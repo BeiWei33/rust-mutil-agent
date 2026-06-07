@@ -1,0 +1,503 @@
+//! Tauri 命令 — 前端调用的 IPC 接口
+//!
+//! 定义所有暴露给前端（React）的 Tauri 命令，
+//! 通过 invoke 机制实现前后端双向通信。
+
+use crate::agent::traits::Capability as AgentCapability;
+use crate::AppState;
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+/// 前端发送消息请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageRequest {
+    pub content: String,
+    pub agent_id: Option<String>,
+    pub route_mode: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// 结构化 API 错误。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiError {
+    pub code: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub retryable: bool,
+    pub request_id: String,
+}
+
+impl ApiError {
+    fn new(code: &str, message: &str, detail: Option<String>, retryable: bool) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.to_string(),
+            detail,
+            retryable,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn invalid_argument(message: &str) -> Self {
+        Self::new("INVALID_ARGUMENT", message, None, false)
+    }
+
+    fn agent_not_found(agent_id: &str) -> Self {
+        Self::new(
+            "AGENT_NOT_FOUND",
+            "找不到指定的 AI 成员，请刷新团队成员列表，或切换为“自动分配”后重试。",
+            Some(format!("Agent [{}] 未注册", agent_id)),
+            true,
+        )
+    }
+
+    fn agent_not_selectable(meta: &AgentMeta) -> Self {
+        Self::new(
+            "AGENT_NOT_SELECTABLE",
+            "这个 AI 成员主要作为内部能力使用，暂不支持直接对话。请切换为“自动分配”或选择协调员。",
+            Some(format!("Agent [{}] is internal/selectable=false", meta.runtime_name)),
+            false,
+        )
+    }
+
+    fn route_failed(detail: String) -> Self {
+        Self::new(
+            "ROUTE_FAILED",
+            "消息已收到，但交给 AI 成员处理时失败。请稍后重试，或切换为“自动分配”。",
+            Some(detail),
+            true,
+        )
+    }
+}
+
+/// 前端消息结构。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageResponse {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub timestamp: String,
+    pub sender_name: Option<String>,
+}
+
+/// 路由信息，告诉前端“这条消息到底交给谁处理”。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteInfoResponse {
+    pub mode: String,
+    pub requested_agent_id: Option<String>,
+    pub target_agent_id: String,
+    pub target_runtime_name: String,
+    pub target_display_name: String,
+    pub fallback: bool,
+    pub reason: String,
+}
+
+/// 发送消息响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageResponse {
+    pub message: ChatMessageResponse,
+    pub handled_by: String,
+    pub task_id: String,
+    pub status: String,
+    pub route: RouteInfoResponse,
+    pub warnings: Vec<String>,
+}
+
+/// 前端 Agent 能力结构。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityResponse {
+    pub name: String,
+    pub description: String,
+    pub available: bool,
+}
+
+/// 前端 Agent 状态结构。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatusResponse {
+    pub id: String,
+    pub runtime_name: String,
+    pub name: String,
+    pub role: String,
+    pub role_label: String,
+    pub description: String,
+    pub online: bool,
+    pub status: String,
+    pub status_label: String,
+    pub current_task: Option<String>,
+    pub capabilities: Vec<CapabilityResponse>,
+    pub last_active: String,
+    pub selectable: bool,
+    pub recommended: bool,
+    pub is_internal: bool,
+}
+
+/// Agent 列表响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentListResponse {
+    pub agents: Vec<AgentStatusResponse>,
+}
+
+/// 健康检查响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckResponse {
+    pub healthy: bool,
+    pub version: String,
+    pub agent_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentMeta {
+    id: &'static str,
+    runtime_name: &'static str,
+    display_name: &'static str,
+    role: &'static str,
+    role_label: &'static str,
+    description: &'static str,
+    selectable: bool,
+    recommended: bool,
+    is_internal: bool,
+}
+
+const AGENT_CATALOG: &[AgentMeta] = &[
+    AgentMeta {
+        id: "coordinator",
+        runtime_name: "Planner",
+        display_name: "协调员/总控",
+        role: "planner",
+        role_label: "任务规划与调度",
+        description: "理解你的需求，拆解任务，并安排合适的 AI 成员协同处理。",
+        selectable: true,
+        recommended: true,
+        is_internal: false,
+    },
+    AgentMeta {
+        id: "executor",
+        runtime_name: "Executor",
+        display_name: "执行工程师",
+        role: "executor",
+        role_label: "任务执行",
+        description: "负责执行明确任务，例如代码处理、命令运行、文件操作和问题修复。",
+        selectable: true,
+        recommended: false,
+        is_internal: false,
+    },
+    AgentMeta {
+        id: "memory",
+        runtime_name: "Memory",
+        display_name: "记忆管理员",
+        role: "memory",
+        role_label: "记忆与检索",
+        description: "负责保存、查找和整理历史上下文，通常由协调员自动调用。",
+        selectable: false,
+        recommended: false,
+        is_internal: true,
+    },
+    AgentMeta {
+        id: "tool",
+        runtime_name: "Tool",
+        display_name: "工具操作员",
+        role: "tool",
+        role_label: "工具调用",
+        description: "负责调用工具、接口和系统能力，通常作为内部执行能力使用。",
+        selectable: false,
+        recommended: false,
+        is_internal: true,
+    },
+    AgentMeta {
+        id: "echo",
+        runtime_name: "Echo",
+        display_name: "回声测试员",
+        role: "echo",
+        role_label: "连接测试",
+        description: "用于测试系统消息链路是否正常，不适合处理复杂正式任务。",
+        selectable: true,
+        recommended: false,
+        is_internal: false,
+    },
+];
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn meta_for_runtime_name(name: &str) -> AgentMeta {
+    AGENT_CATALOG
+        .iter()
+        .copied()
+        .find(|meta| meta.runtime_name == name)
+        .unwrap_or(AgentMeta {
+            id: "custom",
+            runtime_name: "Custom",
+            display_name: "自定义成员",
+            role: "custom",
+            role_label: "自定义能力",
+            description: "项目中注册的自定义 AI 成员。",
+            selectable: true,
+            recommended: false,
+            is_internal: false,
+        })
+}
+
+fn resolve_agent_meta(agent_id: Option<&str>) -> Result<(AgentMeta, String, bool), ApiError> {
+    let raw = agent_id.map(str::trim).filter(|value| !value.is_empty());
+    let Some(id) = raw else {
+        let meta = meta_for_runtime_name("Planner");
+        return Ok((
+            meta,
+            "未指定 AI 成员，默认由协调员/总控理解需求并自动分配。".to_string(),
+            false,
+        ));
+    };
+
+    let normalized = id.to_lowercase();
+    let meta = AGENT_CATALOG
+        .iter()
+        .copied()
+        .find(|meta| {
+            meta.id.eq_ignore_ascii_case(id)
+                || meta.runtime_name.eq_ignore_ascii_case(id)
+                || meta.role.eq_ignore_ascii_case(id)
+        })
+        .ok_or_else(|| ApiError::agent_not_found(id))?;
+
+    if !meta.selectable {
+        return Err(ApiError::agent_not_selectable(&meta));
+    }
+
+    let reason = if normalized == "coordinator" || normalized == "planner" {
+        "已交给协调员/总控处理，他会判断是否需要分派其他成员。".to_string()
+    } else {
+        format!("用户指定优先交给「{}」处理。", meta.display_name)
+    };
+
+    Ok((meta, reason, false))
+}
+
+fn capabilities_for_agent(name: &str) -> Vec<AgentCapability> {
+    match name {
+        "Echo" => vec![AgentCapability::chat()],
+        "Planner" => vec![AgentCapability::planning(), AgentCapability::chat()],
+        "Executor" => vec![AgentCapability::code_execution(), AgentCapability::tool_use()],
+        "Memory" => vec![AgentCapability::memory(), AgentCapability::retrieval()],
+        "Tool" => vec![AgentCapability::tool_use()],
+        _ => vec![AgentCapability::chat()],
+    }
+}
+
+fn capability_label(name: &str) -> String {
+    match name {
+        "chat" => "自然语言对话".to_string(),
+        "planning" => "任务拆解".to_string(),
+        "code_execution" => "代码/命令执行".to_string(),
+        "retrieval" => "信息检索".to_string(),
+        "tool_use" => "工具调用".to_string(),
+        "memory" => "上下文记忆".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn build_agent_status(runtime_name: String) -> AgentStatusResponse {
+    let meta = meta_for_runtime_name(&runtime_name);
+    let capabilities = capabilities_for_agent(&runtime_name)
+        .into_iter()
+        .map(|cap| CapabilityResponse {
+            name: capability_label(&cap.name),
+            description: cap.description,
+            available: true,
+        })
+        .collect();
+
+    AgentStatusResponse {
+        id: meta.id.to_string(),
+        runtime_name,
+        role: meta.role.to_string(),
+        role_label: meta.role_label.to_string(),
+        name: meta.display_name.to_string(),
+        description: meta.description.to_string(),
+        online: true,
+        status: "idle".to_string(),
+        status_label: "空闲".to_string(),
+        current_task: None,
+        capabilities,
+        last_active: now_iso(),
+        selectable: meta.selectable,
+        recommended: meta.recommended,
+        is_internal: meta.is_internal,
+    }
+}
+
+/// 发送用户消息给 Agent 系统。
+///
+/// 前端调用：`invoke('send_message', { request: { content, agentId } })`
+#[tauri::command]
+pub async fn send_message(
+    request: SendMessageRequest,
+    state: State<'_, AppState>,
+) -> Result<SendMessageResponse, ApiError> {
+    let content = request.content.trim();
+    if content.is_empty() {
+        return Err(ApiError::invalid_argument("请输入要发送给 AI 成员的内容。"));
+    }
+
+    let (target_meta, reason, fallback) = resolve_agent_meta(request.agent_id.as_deref())?;
+    let msg_type = if target_meta.runtime_name == "Planner" {
+        "plan_request"
+    } else {
+        "direct_message"
+    };
+
+    let mut orch = state.orchestrator.lock().await;
+    let task_id = orch
+        .submit_task_to_agent(target_meta.runtime_name, content, msg_type)
+        .await
+        .map_err(|e| ApiError::route_failed(format!("{}", e)))?;
+
+    tracing::info!(
+        "[Commands] 任务已提交: {}，处理 Agent: {}({})，route_mode={:?}, session_id={:?}",
+        task_id,
+        target_meta.display_name,
+        target_meta.runtime_name,
+        request.route_mode,
+        request.session_id
+    );
+
+    let content = if target_meta.runtime_name == "Planner" {
+        format!(
+            "✅ 任务已收到\n\n已交给「{}」处理。他会先理解需求，再安排合适成员协同完成。\n\n任务编号：{}",
+            target_meta.display_name, task_id
+        )
+    } else {
+        format!(
+            "✅ 任务已发送给「{}」\n\n系统正在处理，请稍等。\n\n任务编号：{}",
+            target_meta.display_name, task_id
+        )
+    };
+
+    Ok(SendMessageResponse {
+        message: ChatMessageResponse {
+            id: task_id.clone(),
+            role: "assistant".to_string(),
+            content,
+            timestamp: now_iso(),
+            sender_name: Some(target_meta.display_name.to_string()),
+        },
+        handled_by: target_meta.id.to_string(),
+        task_id: task_id.clone(),
+        status: "accepted".to_string(),
+        route: RouteInfoResponse {
+            mode: if target_meta.runtime_name == "Planner" {
+                "auto".to_string()
+            } else {
+                "direct".to_string()
+            },
+            requested_agent_id: request.agent_id,
+            target_agent_id: target_meta.id.to_string(),
+            target_runtime_name: target_meta.runtime_name.to_string(),
+            target_display_name: target_meta.display_name.to_string(),
+            fallback,
+            reason,
+        },
+        warnings: Vec::new(),
+    })
+}
+
+/// 获取单个 Agent 的当前状态。
+///
+/// 前端调用：`invoke('get_agent_status', { agentId })`
+#[tauri::command]
+pub async fn get_agent_status(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<AgentStatusResponse, ApiError> {
+    let requested = resolve_agent_meta(Some(&agent_id))?.0;
+    let orch = state.orchestrator.lock().await;
+    let agents = orch.list_agents();
+    let runtime_name = agents
+        .into_iter()
+        .find(|name| name == requested.runtime_name)
+        .ok_or_else(|| ApiError::agent_not_found(&agent_id))?;
+
+    Ok(build_agent_status(runtime_name))
+}
+
+/// 列出所有已注册的 Agent 及其状态。
+///
+/// 前端调用：`invoke('list_agents')`
+#[tauri::command]
+pub async fn list_agents(
+    state: State<'_, AppState>,
+) -> Result<AgentListResponse, ApiError> {
+    let orch = state.orchestrator.lock().await;
+    let mut agents = orch.list_agents();
+    agents.sort_by_key(|name| {
+        let meta = meta_for_runtime_name(name);
+        AGENT_CATALOG
+            .iter()
+            .position(|item| item.runtime_name == meta.runtime_name)
+            .unwrap_or(usize::MAX)
+    });
+
+    Ok(AgentListResponse {
+        agents: agents.into_iter().map(build_agent_status).collect(),
+    })
+}
+
+/// 获取指定任务的状态和结果。
+///
+/// 前端调用：`invoke('get_task_result', { taskId })`
+#[tauri::command]
+pub async fn get_task_result(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    let orch = state.orchestrator.lock().await;
+
+    let result = orch.get_task_result(&task_id).map(|r| {
+        serde_json::json!({
+            "taskId": r.task_id,
+            "status": r.status,
+            "steps": r.steps,
+            "output": r.output,
+        })
+    });
+
+    Ok(result)
+}
+
+/// 获取系统健康状态。
+///
+/// 前端调用：`invoke('health_check')`
+#[tauri::command]
+pub async fn health_check(state: State<'_, AppState>) -> Result<HealthCheckResponse, ApiError> {
+    let orch = state.orchestrator.lock().await;
+    Ok(HealthCheckResponse {
+        healthy: true,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        agent_count: orch.list_agents().len(),
+    })
+}
+
+/// 获取对话历史。
+///
+/// 当前后端尚未持久化聊天历史，先返回空数组，避免前端 IPC 调用失败。
+#[tauri::command]
+pub async fn get_history(_session_id: String) -> Result<Vec<ChatMessageResponse>, ApiError> {
+    Ok(Vec::new())
+}
+
+/// 清空对话历史。
+///
+/// 当前后端尚未持久化聊天历史，先作为幂等 no-op。
+#[tauri::command]
+pub async fn clear_history(_session_id: String) -> Result<(), ApiError> {
+    Ok(())
+}

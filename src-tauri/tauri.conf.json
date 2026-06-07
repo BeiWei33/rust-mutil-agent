@@ -1,0 +1,51 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickolas-paolucci/tauri-nextjs-template/main/src-tauri/tauri.conf.json",
+  "productName": "多 Agent 协同智能体",
+  "version": "0.1.0",
+  "identifier": "com.rust-mutil-agent.app",
+  "build": {
+    "frontendDist": "../src-web/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "多 Agent 协同智能体",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' https://api.openai.com https://api.anthropic.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "多 Agent 协同智能体系统",
+    "longDescription": "基于 Rust 的多 Agent 协同智能体系统，提供跨平台的个人助理功能，支持任务编排、智能问答和自动化工作流。"
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    },
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
+  }
+}

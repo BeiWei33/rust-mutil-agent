@@ -1,0 +1,214 @@
+/**
+ * 全局样式 — Tailwind 指令 + 自定义样式
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== 全局基础样式 ===== */
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont,
+      "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #0f0f1a;
+    color: #e4e4e7;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* 滚动条样式 */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #3b3b52;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #52527a;
+  }
+
+  /* 选中文本颜色 */
+  ::selection {
+    background-color: rgba(59, 130, 246, 0.3);
+    color: #fff;
+  }
+}
+
+/* ===== 组件样式 ===== */
+@layer components {
+  /* 侧边栏导航项 */
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-lg text-zinc-400
+           hover:bg-sidebar-hover hover:text-zinc-200 cursor-pointer
+           transition-all duration-200 text-sm font-medium;
+  }
+
+  .nav-item.active {
+    @apply bg-sidebar-active text-primary-400;
+  }
+
+  /* 按钮基础样式 */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2
+           rounded-lg font-medium text-sm transition-all duration-200
+           focus:outline-none focus:ring-2 focus:ring-primary-500/50
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary-600 text-white hover:bg-primary-500
+           active:bg-primary-700 shadow-lg shadow-primary-600/20;
+  }
+
+  .btn-secondary {
+    @apply btn bg-zinc-800 text-zinc-300 hover:bg-zinc-700
+           active:bg-zinc-600 border border-zinc-700/50;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-zinc-400 hover:bg-white/5
+           hover:text-zinc-200;
+  }
+
+  /* 输入框 */
+  .input-field {
+    @apply w-full px-3 py-2 bg-zinc-900/50 border border-zinc-700/50
+           rounded-lg text-zinc-200 placeholder:text-zinc-500
+           focus:outline-none focus:ring-2 focus:ring-primary-500/50
+           focus:border-primary-500/50 transition-all duration-200 text-sm;
+  }
+
+  /* 卡片 */
+  .card {
+    @apply bg-zinc-900/50 border border-zinc-800 rounded-xl p-4
+           backdrop-blur-sm;
+  }
+
+  /* 消息气泡 */
+  .message-bubble {
+    @apply max-w-[80%] px-4 py-3 rounded-2xl text-sm leading-relaxed
+           animate-fade-in;
+  }
+
+  .message-bubble.user {
+    @apply bg-primary-600/20 border border-primary-500/30 text-zinc-100
+           rounded-br-md ml-auto;
+  }
+
+  .message-bubble.assistant {
+    @apply bg-zinc-800/80 border border-zinc-700/30 text-zinc-200
+           rounded-bl-md;
+  }
+
+  .message-bubble.system {
+    @apply bg-yellow-500/10 border border-yellow-500/20 text-yellow-200
+           rounded-bl-md text-xs mx-auto max-w-[60%];
+  }
+}
+
+/* ===== 工具类 ===== */
+@layer utilities {
+  /* 毛玻璃效果 */
+  .glass {
+    background: rgba(15, 15, 26, 0.8);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  /* 状态指示灯 */
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block;
+  }
+
+  .status-dot.online {
+    @apply bg-green-400 shadow-sm shadow-green-400/50;
+  }
+
+  .status-dot.busy {
+    @apply bg-yellow-400 shadow-sm shadow-yellow-400/50 animate-pulse;
+  }
+
+  .status-dot.offline {
+    @apply bg-zinc-600;
+  }
+
+  .status-dot.error {
+    @apply bg-red-400 shadow-sm shadow-red-400/50;
+  }
+}
+
+/* ===== Markdown 消息内容样式 ===== */
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3 {
+  @apply font-semibold text-zinc-100 my-2;
+}
+
+.markdown-content h1 { @apply text-lg; }
+.markdown-content h2 { @apply text-base; }
+.markdown-content h3 { @apply text-sm; }
+
+.markdown-content p {
+  @apply my-1 leading-relaxed;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  @apply pl-5 my-1;
+}
+
+.markdown-content ul {
+  @apply list-disc;
+}
+
+.markdown-content ol {
+  @apply list-decimal;
+}
+
+.markdown-content li {
+  @apply my-0.5;
+}
+
+.markdown-content code {
+  @apply bg-zinc-700/50 text-primary-300 rounded px-1.5 py-0.5 text-xs font-mono;
+}
+
+.markdown-content pre {
+  @apply bg-zinc-900/80 border border-zinc-700/50 rounded-lg p-4 my-2
+         overflow-x-auto text-xs;
+}
+
+.markdown-content pre code {
+  @apply bg-transparent text-zinc-300 p-0;
+}
+
+.markdown-content strong {
+  @apply font-semibold text-zinc-100;
+}
+
+.markdown-content a {
+  @apply text-primary-400 hover:text-primary-300 underline;
+}
+
+.markdown-content blockquote {
+  @apply border-l-2 border-primary-500/50 pl-3 my-2 text-zinc-400 italic;
+}

@@ -1,0 +1,117 @@
+[package]
+name = "rust-mutil-agent"
+version = "0.1.0"
+edition = "2021"
+description = "多 Agent 协同智能体系统 - 基于 Rust 和 Tauri v2 的跨平台桌面应用"
+authors = ["开发团队"]
+license = "MIT"
+repository = "https://github.com/your-org/rust-mutil-agent"
+
+# ============================================================
+# 构建配置
+# ============================================================
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# ============================================================
+# 核心依赖
+# ============================================================
+[dependencies]
+# --- Tauri v2 框架 ---
+# 提供跨平台桌面窗口、IPC 通信、事件系统等能力
+tauri = { version = "2", features = ["tray-icon"] }
+
+# --- Tauri 插件 ---
+# 提供文件系统、通知、窗口操作等常用 API
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-process = "2"
+
+# --- 序列化 / 反序列化 ---
+# JSON 格式用于消息传输和配置文件解析
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# MessagePack 二进制序列化（可选，用于高效内部通信）
+rmp-serde = "1"
+
+# --- 异步运行时 ---
+# Tokio 提供高性能异步 I/O，是 Agent 系统的基础设施
+tokio = { version = "1", features = [
+    "full",       # 启用所有功能：网络、文件、同步原语等
+    "sync",       # 包含 broadcast, mpsc, oneshot 等通道
+    "macros",     # 提供 #[tokio::main] 等宏
+] }
+
+# --- 异步 trait ---
+# Rust 原生 async trait 尚不稳定，使用 async-trait 宏实现
+async-trait = "0.1"
+
+# --- 错误处理 ---
+# thiserror 提供 derive 宏，简化自定义错误类型定义
+thiserror = "2"
+
+# --- 日志系统 ---
+# tracing 提供结构化日志，适合异步和多线程环境
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# --- 数据库 ---
+# SQLite 本地轻量数据库，bundled 特性包含编译好的 SQLite 源码
+rusqlite = { version = "0.31", features = ["bundled"] }
+# SQLite 向量扩展，支持语义检索（可选）
+# sqlite-vec = "0.1"  # 功能尚在开发中，待稳定后启用
+
+# --- HTTP 客户端 ---
+# 用于调用 LLM API（OpenAI、Claude 等）
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# --- UUID 生成 ---
+# 为 Agent、任务等实体生成唯一标识符
+uuid = { version = "1", features = ["v4"] }
+
+# --- 时间处理 ---
+chrono = { version = "0.4", features = ["serde"] }
+
+# --- 环境配置 ---
+# 从 .env 文件加载 API Keys 等敏感配置
+dotenvy = "0.15"
+
+# --- 配置文件 ---
+# 支持 TOML 格式的应用配置文件
+toml = "0.8"
+
+# ============================================================
+# 可选依赖（根据实际需要取消注释）
+# ============================================================
+
+# --- Rig：Rust LLM 统一接口框架 ---
+# rig-core = { git = "https://github.com/0xPlaygrounds/rig" }
+
+# --- llama.cpp 绑定（本地模型推理）---
+# llama-cpp-2 = "0.1"
+
+# --- 动态库加载（插件系统）---
+# libloading = "0.8"
+
+# --- 向量数据库 ---
+# lancedb = "0.4"
+
+# ============================================================
+# 目标平台配置
+# ============================================================
+[profile.release]
+# 优化发布构建：减小体积、提升性能
+panic = "abort"           # 移除 panic 栈展开，减小二进制体积
+codegen-units = 1         # 单个代码生成单元，提升优化效果
+lto = true                # 启用链接时优化
+opt-level = "s"           # 优化体积
+strip = true              # 去除调试符号
+
+# ============================================================
+# Tauri 配置（由 tauri-build 读取）
+# ============================================================
+[package.metadata.tauri]
+identifier = "com.rust-mutil-agent.app"

@@ -1,0 +1,149 @@
+/**
+ * 多 Agent 协同智能体 — 类型定义
+ */
+
+/** Agent 能力描述 */
+export interface Capability {
+  /** 能力名称 */
+  name: string;
+  /** 能力描述 */
+  description: string;
+  /** 是否可用 */
+  available: boolean;
+}
+
+/** Agent 状态 */
+export interface AgentStatus {
+  /** Agent 唯一标识（前端稳定 ID，如 coordinator/executor） */
+  id: string;
+  /** 后端运行时名称（如 Planner/Executor） */
+  runtimeName?: string;
+  /** Agent 中文显示名 */
+  name: string;
+  /** Agent 角色/类型 */
+  role: string;
+  /** 中文角色标签 */
+  roleLabel?: string;
+  /** 面向用户的一句话说明 */
+  description?: string;
+  /** 在线状态 */
+  online: boolean;
+  /** 运行状态 */
+  status: "idle" | "busy" | "error" | "offline";
+  /** 中文状态标签 */
+  statusLabel?: string;
+  /** 当前正在执行的任务描述 */
+  currentTask: string | null;
+  /** Agent 能力列表 */
+  capabilities: Capability[];
+  /** 最后活跃时间（ISO 字符串） */
+  lastActive: string;
+  /** 是否允许用户从聊天输入框直接选择 */
+  selectable?: boolean;
+  /** 是否推荐作为默认入口 */
+  recommended?: boolean;
+  /** 是否为内部能力型 Agent */
+  isInternal?: boolean;
+}
+
+/** 消息角色 */
+export type MessageRole = "user" | "assistant" | "system" | "agent";
+
+/** 单条聊天消息 */
+export interface Message {
+  /** 消息唯一 ID */
+  id: string;
+  /** 消息角色 */
+  role: MessageRole;
+  /** 消息内容（支持 Markdown） */
+  content: string;
+  /** 发送时间戳（ISO 字符串） */
+  timestamp: string;
+  /** 发送者名称（Agent 消息时显示 Agent 名） */
+  senderName?: string;
+}
+
+/** 聊天消息（Zustand store 内部使用） */
+export type ChatMessage = Message;
+
+/** 发送消息请求 */
+export interface SendMessageRequest {
+  /** 消息内容 */
+  content: string;
+  /** 目标 Agent ID（可选，不指定则由后端自动路由） */
+  agentId?: string;
+  /** 路由模式：自动分配或直连指定成员 */
+  routeMode?: "auto" | "direct";
+  /** 会话 ID（预留） */
+  sessionId?: string;
+}
+
+/** 消息路由信息 */
+export interface RouteInfo {
+  mode: "auto" | "direct" | string;
+  requestedAgentId?: string | null;
+  targetAgentId: string;
+  targetRuntimeName: string;
+  targetDisplayName: string;
+  fallback: boolean;
+  reason: string;
+}
+
+/** 发送消息响应 */
+export interface SendMessageResponse {
+  /** 响应消息 */
+  message: Message;
+  /** 处理该消息的 Agent ID */
+  handledBy: string;
+  /** 任务 ID */
+  taskId?: string;
+  /** 提交状态 */
+  status?: "accepted" | "completed" | "failed" | "timeout" | string;
+  /** 路由信息 */
+  route?: RouteInfo;
+  /** 非致命警告 */
+  warnings?: string[];
+}
+
+/** Tauri 后端结构化错误 */
+export interface ApiErrorPayload {
+  code?: string;
+  message?: string;
+  detail?: string | null;
+  retryable?: boolean;
+  requestId?: string;
+  error?: string;
+  reason?: string;
+}
+
+/** 健康检查响应 */
+export interface HealthCheckResponse {
+  /** 服务是否健康 */
+  healthy: boolean;
+  /** 版本号 */
+  version: string;
+  /** Agent 数量 */
+  agentCount: number;
+}
+
+/** Agent 列表响应 */
+export interface AgentListResponse {
+  agents: AgentStatus[];
+}
+
+/** 设置项 */
+export interface AppSettings {
+  /** 当前模型名称 */
+  model: string;
+  /** API Key（可留空；桌面端后端可从 DEEPSEEK_API_KEY 用户环境变量读取） */
+  apiKey: string;
+  /** API 基础 URL */
+  apiBaseUrl: string;
+  /** 最大 Token 数 */
+  maxTokens: number;
+  /** 温度参数 */
+  temperature: number;
+}
+
+/** 页面路由（简易状态切换） */
+export type PageRoute = "chat" | "agents" | "settings";
