@@ -9,4 +9,7 @@ pub mod error;
 pub mod llm;
 pub mod memory;
 pub mod orchestrator;
+pub mod project;
+pub mod task;
 pub mod tool;
+pub mod workspace;

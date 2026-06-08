@@ -44,7 +44,11 @@ async fn test_full_coop_flow_search_task() {
     let plan_responses = planner.handle_message(user_msg).await.unwrap();
 
     // 验证：Planner 生成了计划（1 回复 + 3 分派 = 4 条消息）
-    assert_eq!(plan_responses.len(), 4, "Planner 应为搜索任务生成 3 步骤计划");
+    assert_eq!(
+        plan_responses.len(),
+        4,
+        "Planner 应为搜索任务生成 3 步骤计划"
+    );
     assert_eq!(plan_responses[0].msg_type, "plan_created");
 
     // 提取 task_id 用于后续追踪
@@ -80,9 +84,13 @@ async fn test_full_coop_flow_search_task() {
     }
 
     // ---------- 第 3 步：ExecutorAgent 整理分析结果 ----------
-    let exec_msg = AgentMessage::new("Planner", "Executor", "整理和分析搜索结果: 帮我搜索 Rust 编程教程")
-        .with_type("plan_step")
-        .with_task_id(&task_id);
+    let exec_msg = AgentMessage::new(
+        "Planner",
+        "Executor",
+        "整理和分析搜索结果: 帮我搜索 Rust 编程教程",
+    )
+    .with_type("plan_step")
+    .with_task_id(&task_id);
 
     let exec_responses = executor.handle_message(exec_msg).await.unwrap();
     assert!(!exec_responses.is_empty(), "ExecutorAgent 应返回执行结果");
@@ -94,16 +102,23 @@ async fn test_full_coop_flow_search_task() {
     }
 
     // ---------- 第 4 步：MemoryAgent 存储结果 ----------
-    let memory_msg = AgentMessage::new("Planner", "Memory", "存储结果到知识库: 帮我搜索 Rust 编程教程")
-        .with_type("plan_step")
-        .with_task_id(&task_id);
+    let memory_msg = AgentMessage::new(
+        "Planner",
+        "Memory",
+        "存储结果到知识库: 帮我搜索 Rust 编程教程",
+    )
+    .with_type("plan_step")
+    .with_task_id(&task_id);
 
     let memory_responses = memory.handle_message(memory_msg).await.unwrap();
     assert!(!memory_responses.is_empty(), "MemoryAgent 应返回存储确认");
     assert_eq!(memory_responses[0].msg_type, "memory_ack");
 
     // ---------- 验证：MemoryAgent 短期记忆中有存储的内容 ----------
-    assert!(!memory.recent_turns(1).is_empty(), "MemoryAgent 短期记忆应有记录");
+    assert!(
+        !memory.recent_turns(1).is_empty(),
+        "MemoryAgent 短期记忆应有记录"
+    );
 }
 
 // ============================================================
@@ -206,8 +221,7 @@ async fn test_memory_agent_shared_context() {
     memory.handle_message(tool_store).await.unwrap();
 
     // Planner 检索 Executor 的执行记录
-    let query = AgentMessage::new("Planner", "Memory", "代码")
-        .with_type("recall");
+    let query = AgentMessage::new("Planner", "Memory", "代码").with_type("recall");
     let replies = memory.handle_message(query).await.unwrap();
 
     assert_eq!(replies[0].msg_type, "memory_retrieved");
@@ -287,10 +301,7 @@ async fn test_end_to_end_task_lifecycle() {
         .iter()
         .find(|m| m.to == "Tool")
         .expect("计划应包含 Tool 步骤");
-    let tool_reply = tool
-        .handle_message(tool_step.clone())
-        .await
-        .unwrap();
+    let tool_reply = tool.handle_message(tool_step.clone()).await.unwrap();
     assert_eq!(tool_reply[0].msg_type, "tool_result");
 
     // 提取分派给 Executor 的步骤
@@ -298,10 +309,7 @@ async fn test_end_to_end_task_lifecycle() {
         .iter()
         .find(|m| m.to == "Executor")
         .expect("计划应包含 Executor 步骤");
-    let exec_reply = executor
-        .handle_message(exec_step.clone())
-        .await
-        .unwrap();
+    let exec_reply = executor.handle_message(exec_step.clone()).await.unwrap();
     assert_eq!(exec_reply[0].msg_type, "execution_result");
 
     // 提取分派给 Memory 的步骤
@@ -309,18 +317,12 @@ async fn test_end_to_end_task_lifecycle() {
         .iter()
         .find(|m| m.to == "Memory")
         .expect("计划应包含 Memory 步骤");
-    let memory_reply = memory
-        .handle_message(memory_step.clone())
-        .await
-        .unwrap();
+    let memory_reply = memory.handle_message(memory_step.clone()).await.unwrap();
     assert_eq!(memory_reply[0].msg_type, "memory_ack");
 
     // ---------- 验证：Memory 中有记录 ----------
     let recall = memory
-        .handle_message(
-            AgentMessage::new("User", "Memory", &task_id)
-                .with_type("recall"),
-        )
+        .handle_message(AgentMessage::new("User", "Memory", &task_id).with_type("recall"))
         .await
         .unwrap();
     // 至少应有一条记录（与 task_id 相关的）

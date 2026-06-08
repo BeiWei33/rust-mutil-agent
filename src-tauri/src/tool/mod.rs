@@ -2,4 +2,4 @@
 //!
 //! 重新导出 tool_agent 中定义的工具注册表和相关类型。
 
-pub use crate::agent::tool_agent::{ToolRegistry, ToolDescription, ToolFn, register_builtin_tools};
+pub use crate::agent::tool_agent::{register_builtin_tools, ToolDescription, ToolFn, ToolRegistry};

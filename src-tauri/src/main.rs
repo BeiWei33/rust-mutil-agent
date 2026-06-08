@@ -10,7 +10,10 @@ mod error;
 mod llm;
 mod memory;
 mod orchestrator;
+mod project;
+mod task;
 mod tool;
+mod workspace;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -50,15 +53,20 @@ async fn main() {
     tracing::info!("Agent 运行时初始化完成");
 
     tauri::Builder::default()
-        .manage(AppState {
-            bus,
-            orchestrator,
-        })
+        .manage(AppState { bus, orchestrator })
         .invoke_handler(tauri::generate_handler![
             commands::send_message,
+            commands::create_task,
             commands::get_agent_status,
             commands::list_agents,
             commands::get_task_result,
+            commands::get_task,
+            commands::list_tasks,
+            commands::get_task_events,
+            commands::get_project_snapshot,
+            commands::list_project_files,
+            commands::read_project_file,
+            commands::search_project_text,
             commands::health_check,
             commands::get_history,
             commands::clear_history,

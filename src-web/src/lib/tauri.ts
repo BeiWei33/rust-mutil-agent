@@ -11,6 +11,16 @@ import type {
   AgentListResponse,
   HealthCheckResponse,
   Message,
+  CreateTaskRequest,
+  CreateTaskResponse,
+  Task,
+  TaskEvent,
+  TaskListResponse,
+  ProjectSnapshot,
+  ProjectFileListResponse,
+  FileReadResponse,
+  SearchProjectTextRequest,
+  SearchResponse,
 } from "@/types";
 
 /**
@@ -29,6 +39,19 @@ export async function sendMessage(
   request: SendMessageRequest
 ): Promise<SendMessageResponse> {
   return invoke<SendMessageResponse>(`${CMD_PREFIX}send_message`, {
+    request,
+  });
+}
+
+/**
+ * 创建软件工程任务
+ * @param request 任务请求
+ * @returns 创建结果
+ */
+export async function createTask(
+  request: CreateTaskRequest
+): Promise<CreateTaskResponse> {
+  return invoke<CreateTaskResponse>(`${CMD_PREFIX}create_task`, {
     request,
   });
 }
@@ -60,6 +83,79 @@ export async function listAgents(): Promise<AgentListResponse> {
  */
 export async function healthCheck(): Promise<HealthCheckResponse> {
   return invoke<HealthCheckResponse>(`${CMD_PREFIX}health_check`);
+}
+
+/**
+ * 获取任务详情
+ * @param taskId 任务 ID
+ * @returns 任务详情
+ */
+export async function getTask(taskId: string): Promise<Task | null> {
+  return invoke<Task | null>(`${CMD_PREFIX}get_task`, {
+    taskId,
+  });
+}
+
+/**
+ * 获取任务列表
+ * @returns 任务列表
+ */
+export async function listTasks(): Promise<TaskListResponse> {
+  return invoke<TaskListResponse>(`${CMD_PREFIX}list_tasks`);
+}
+
+/**
+ * 获取任务事件
+ * @param taskId 任务 ID
+ * @returns 事件列表
+ */
+export async function getTaskEvents(taskId: string): Promise<TaskEvent[]> {
+  return invoke<TaskEvent[]>(`${CMD_PREFIX}get_task_events`, {
+    taskId,
+  });
+}
+
+/**
+ * 获取项目快照
+ * @returns 项目结构和技术栈摘要
+ */
+export async function getProjectSnapshot(): Promise<ProjectSnapshot> {
+  return invoke<ProjectSnapshot>(`${CMD_PREFIX}get_project_snapshot`);
+}
+
+/**
+ * 列出项目文件
+ * @param maxFiles 最大返回数量
+ * @returns 文件列表
+ */
+export async function listProjectFiles(maxFiles = 500): Promise<ProjectFileListResponse> {
+  return invoke<ProjectFileListResponse>(`${CMD_PREFIX}list_project_files`, {
+    maxFiles,
+  });
+}
+
+/**
+ * 读取项目文件
+ * @param path workspace 相对路径
+ * @returns 文件内容
+ */
+export async function readProjectFile(path: string): Promise<FileReadResponse> {
+  return invoke<FileReadResponse>(`${CMD_PREFIX}read_project_file`, {
+    path,
+  });
+}
+
+/**
+ * 搜索项目文本
+ * @param request 搜索请求
+ * @returns 搜索结果
+ */
+export async function searchProjectText(
+  request: SearchProjectTextRequest
+): Promise<SearchResponse> {
+  return invoke<SearchResponse>(`${CMD_PREFIX}search_project_text`, {
+    request,
+  });
 }
 
 /**
@@ -167,6 +263,22 @@ const MOCK_AGENTS: AgentStatus[] = [
   },
 ];
 
+let MOCK_TASKS: Task[] = [];
+let MOCK_EVENTS: Record<string, TaskEvent[]> = {};
+
+const MOCK_PROJECT_FILES = [
+  "README.md",
+  "docs/TECHNICAL_DOCUMENTATION.md",
+  "docs/SELF_EVOLVING_AGENT_ROADMAP.md",
+  "src-tauri/Cargo.toml",
+  "src-tauri/src/main.rs",
+  "src-tauri/src/commands.rs",
+  "src-tauri/src/orchestrator/mod.rs",
+  "src-web/package.json",
+  "src-web/src/App.tsx",
+  "src-web/src/store/useAgentStore.ts",
+];
+
 /** 浏览器环境下降级的 sendMessage */
 async function mockSendMessage(
   request: SendMessageRequest
@@ -193,16 +305,101 @@ async function mockSendMessage(
   const agents = MOCK_AGENTS.filter((a) => a.online);
   const picked = agents[Math.floor(Math.random() * agents.length)];
 
+  const task = buildMockTask(request.content, request.agentId || "coordinator");
+  MOCK_TASKS = [task, ...MOCK_TASKS];
+
   return {
     message: {
       id: generateId(),
       role: "assistant",
-      content: replyContent,
+      content: `${replyContent}\n\n任务编号：${task.id}`,
       timestamp: new Date().toISOString(),
       senderName: picked.name,
     },
     handledBy: picked.id,
+    taskId: task.id,
+    status: "accepted",
   };
+}
+
+function buildMockTask(content: string, agentId: string): Task {
+  const taskId = generateId();
+  const now = new Date().toISOString();
+  const steps = [
+    {
+      id: `${taskId}-1`,
+      taskId,
+      order: 1,
+      agentId: agentId === "executor" ? "Executor" : "Planner",
+      title: "理解任务目标",
+      instruction: content,
+      status: "completed" as const,
+      dependsOn: [],
+      attempts: 1,
+      result: { mode: "mock" },
+      error: null,
+      startedAt: now,
+      completedAt: now,
+    },
+    {
+      id: `${taskId}-2`,
+      taskId,
+      order: 2,
+      agentId: "Executor",
+      title: "模拟执行步骤",
+      instruction: `处理：${content}`,
+      status: "completed" as const,
+      dependsOn: [`${taskId}-1`],
+      attempts: 1,
+      result: { mode: "mock" },
+      error: null,
+      startedAt: now,
+      completedAt: now,
+    },
+  ];
+
+  MOCK_EVENTS[taskId] = [
+    {
+      id: generateId(),
+      taskId,
+      stepId: null,
+      kind: "created",
+      message: "任务已创建。",
+      payload: null,
+      createdAt: now,
+    },
+    {
+      id: generateId(),
+      taskId,
+      stepId: null,
+      kind: "completed",
+      message: "浏览器 mock 任务已完成。",
+      payload: null,
+      createdAt: now,
+    },
+  ];
+
+  return {
+    id: taskId,
+    title: content.slice(0, 40) || "未命名任务",
+    userGoal: content,
+    status: "completed",
+    steps,
+    artifacts: [],
+    output: "浏览器 mock 任务已完成。",
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+async function mockCreateTask(
+  request: CreateTaskRequest
+): Promise<CreateTaskResponse> {
+  await new Promise((r) => setTimeout(r, 250));
+  const task = buildMockTask(request.content, request.agentId || "coordinator");
+  MOCK_TASKS = [task, ...MOCK_TASKS];
+  return { taskId: task.id, task };
 }
 
 /** 浏览器环境下降级的 listAgents */
@@ -226,6 +423,92 @@ async function mockHealthCheck(): Promise<HealthCheckResponse> {
   };
 }
 
+async function mockListTasks(): Promise<TaskListResponse> {
+  await new Promise((r) => setTimeout(r, 150));
+  return { tasks: MOCK_TASKS };
+}
+
+async function mockGetTask(taskId: string): Promise<Task | null> {
+  await new Promise((r) => setTimeout(r, 100));
+  return MOCK_TASKS.find((task) => task.id === taskId) ?? null;
+}
+
+async function mockGetTaskEvents(taskId: string): Promise<TaskEvent[]> {
+  await new Promise((r) => setTimeout(r, 100));
+  return MOCK_EVENTS[taskId] ?? [];
+}
+
+async function mockGetProjectSnapshot(): Promise<ProjectSnapshot> {
+  await new Promise((r) => setTimeout(r, 150));
+  return {
+    root: "D:/AI/workspace/codex/rust/rust-mutil-agent",
+    name: "rust-mutil-agent",
+    techStack: ["Rust", "Tauri v2", "React", "Vite", "TypeScript", "Zustand", "Tailwind CSS"],
+    manifests: [
+      {
+        path: "src-tauri/Cargo.toml",
+        kind: "Cargo manifest",
+        summary: "package rust-mutil-agent 0.1.0",
+      },
+      {
+        path: "src-web/package.json",
+        kind: "Node package",
+        summary: "React + Vite frontend package",
+      },
+    ],
+    importantFiles: MOCK_PROJECT_FILES.slice(0, 6).map((path) => ({
+      path,
+      kind: "Project file",
+      description: "浏览器 mock 项目文件。",
+    })),
+    recommendedCommands: [
+      { label: "Rust tests", command: "cargo test", workingDir: "src-tauri", kind: "test" },
+      { label: "Rust check", command: "cargo check", workingDir: "src-tauri", kind: "check" },
+      { label: "Frontend tests", command: "npm test -- --run", workingDir: "src-web", kind: "test" },
+    ],
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+async function mockListProjectFiles(maxFiles = 500): Promise<ProjectFileListResponse> {
+  await new Promise((r) => setTimeout(r, 100));
+  return {
+    files: MOCK_PROJECT_FILES.slice(0, maxFiles).map((path) => ({
+      path,
+      name: path.split("/").pop() || path,
+      isDir: false,
+      extension: path.includes(".") ? path.split(".").pop() : null,
+      sizeBytes: 1024,
+      modifiedAt: new Date().toISOString(),
+    })),
+  };
+}
+
+async function mockReadProjectFile(path: string): Promise<FileReadResponse> {
+  await new Promise((r) => setTimeout(r, 100));
+  return {
+    path,
+    content: `// 浏览器 mock 文件\n// ${path}\n\nexport const example = "ProjectPanel";\n`,
+    sizeBytes: 72,
+  };
+}
+
+async function mockSearchProjectText(
+  request: SearchProjectTextRequest
+): Promise<SearchResponse> {
+  await new Promise((r) => setTimeout(r, 120));
+  return {
+    query: request.query,
+    truncated: false,
+    matches: MOCK_PROJECT_FILES.slice(0, request.maxResults ?? 10).map((path, index) => ({
+      path,
+      line: index + 1,
+      column: 1,
+      preview: `mock match for "${request.query}"`,
+    })),
+  };
+}
+
 /** 浏览器环境下降级的 getHistory */
 async function mockGetHistory(_sessionId: string): Promise<Message[]> {
   return [
@@ -244,6 +527,7 @@ async function mockGetHistory(_sessionId: string): Promise<Message[]> {
  */
 export const api = {
   sendMessage: isTauri() ? sendMessage : mockSendMessage,
+  createTask: isTauri() ? createTask : mockCreateTask,
   getAgentStatus: isTauri()
     ? getAgentStatus
     : async (id: string) => {
@@ -252,6 +536,13 @@ export const api = {
         return { ...agent, lastActive: new Date().toISOString() };
       },
   listAgents: isTauri() ? listAgents : mockListAgents,
+  listTasks: isTauri() ? listTasks : mockListTasks,
+  getTask: isTauri() ? getTask : mockGetTask,
+  getTaskEvents: isTauri() ? getTaskEvents : mockGetTaskEvents,
+  getProjectSnapshot: isTauri() ? getProjectSnapshot : mockGetProjectSnapshot,
+  listProjectFiles: isTauri() ? listProjectFiles : mockListProjectFiles,
+  readProjectFile: isTauri() ? readProjectFile : mockReadProjectFile,
+  searchProjectText: isTauri() ? searchProjectText : mockSearchProjectText,
   healthCheck: isTauri() ? healthCheck : mockHealthCheck,
   getHistory: isTauri() ? getHistory : mockGetHistory,
   clearHistory: isTauri()

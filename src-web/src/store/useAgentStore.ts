@@ -10,6 +10,12 @@ import type {
   AppSettings,
   PageRoute,
   SendMessageRequest,
+  Task,
+  TaskEvent,
+  ProjectSnapshot,
+  WorkspaceEntry,
+  FileReadResponse,
+  SearchMatch,
 } from "@/types";
 import { api } from "@/lib/tauri";
 import { getErrorDetail, getErrorMessage } from "@/lib/errors";
@@ -73,6 +79,47 @@ interface AgentState {
   clearMessages: () => void;
   /** 加载历史消息 */
   loadHistory: (sessionId: string) => Promise<void>;
+
+  // ===== 任务管理 =====
+  tasks: Task[];
+  tasksLoading: boolean;
+  tasksError: string | null;
+  selectedTaskId: string | null;
+  selectedTask: Task | null;
+  taskEvents: TaskEvent[];
+  taskEventsLoading: boolean;
+  /** 获取任务列表 */
+  fetchTasks: () => Promise<void>;
+  /** 获取单个任务详情 */
+  fetchTask: (taskId: string) => Promise<void>;
+  /** 获取任务事件 */
+  fetchTaskEvents: (taskId: string) => Promise<void>;
+  /** 创建任务 */
+  createTask: (content: string, agentId?: string) => Promise<void>;
+  /** 设置当前选中任务 */
+  setSelectedTaskId: (taskId: string | null) => void;
+  /** 开启任务轮询 */
+  startTaskPolling: (intervalMs?: number) => () => void;
+
+  // ===== 项目理解 =====
+  projectSnapshot: ProjectSnapshot | null;
+  projectFiles: WorkspaceEntry[];
+  projectLoading: boolean;
+  projectError: string | null;
+  selectedProjectFile: FileReadResponse | null;
+  fileLoading: boolean;
+  searchQuery: string;
+  searchResults: SearchMatch[];
+  searchTruncated: boolean;
+  searchLoading: boolean;
+  /** 加载项目快照和文件列表 */
+  fetchProjectOverview: () => Promise<void>;
+  /** 读取项目文件 */
+  readProjectFile: (path: string) => Promise<void>;
+  /** 搜索项目文本 */
+  searchProjectText: (query: string) => Promise<void>;
+  /** 清除项目错误 */
+  clearProjectError: () => void;
 
   // ===== 健康检查 =====
   healthy: boolean | null;
@@ -173,6 +220,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         sending: false,
         lastFailedSend: null,
       }));
+
+      if (res.taskId) {
+        get().fetchTask(res.taskId).catch(() => {
+          // 任务刷新失败不影响聊天主流程。
+        });
+      }
     } catch (err: unknown) {
       const reason = getErrorMessage(err, "发送消息失败");
       const detail = getErrorDetail(err);
@@ -218,6 +271,185 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // 静默失败，保留当前消息
     }
   },
+
+  // ===== 任务管理 =====
+  tasks: [],
+  tasksLoading: false,
+  tasksError: null,
+  selectedTaskId: null,
+  selectedTask: null,
+  taskEvents: [],
+  taskEventsLoading: false,
+
+  fetchTasks: async () => {
+    set({ tasksLoading: true, tasksError: null });
+    try {
+      const res = await api.listTasks();
+      set((s) => {
+        const selectedStillExists =
+          s.selectedTaskId && res.tasks.some((task) => task.id === s.selectedTaskId);
+        const nextSelectedId =
+          selectedStillExists ? s.selectedTaskId : res.tasks[0]?.id ?? null;
+        const selectedTask =
+          nextSelectedId ? res.tasks.find((task) => task.id === nextSelectedId) ?? null : null;
+
+        return {
+          tasks: res.tasks,
+          tasksLoading: false,
+          selectedTaskId: nextSelectedId,
+          selectedTask,
+        };
+      });
+    } catch (err: unknown) {
+      set({
+        tasksError: getErrorMessage(err, "获取任务列表失败"),
+        tasksLoading: false,
+      });
+    }
+  },
+
+  fetchTask: async (taskId) => {
+    try {
+      const task = await api.getTask(taskId);
+      set((s) => {
+        const withoutOld = s.tasks.filter((item) => item.id !== taskId);
+        const tasks = task ? [task, ...withoutOld] : withoutOld;
+        return {
+          tasks,
+          selectedTaskId: taskId,
+          selectedTask: task,
+          tasksError: null,
+        };
+      });
+      await get().fetchTaskEvents(taskId);
+    } catch (err: unknown) {
+      set({ tasksError: getErrorMessage(err, "获取任务详情失败") });
+    }
+  },
+
+  fetchTaskEvents: async (taskId) => {
+    set({ taskEventsLoading: true });
+    try {
+      const events = await api.getTaskEvents(taskId);
+      set({ taskEvents: events, taskEventsLoading: false });
+    } catch {
+      set({ taskEventsLoading: false });
+    }
+  },
+
+  createTask: async (content, agentId) => {
+    set({ tasksLoading: true, tasksError: null });
+    try {
+      const res = await api.createTask({ content, agentId });
+      set((s) => {
+        const task = res.task ?? null;
+        const withoutOld = s.tasks.filter((item) => item.id !== res.taskId);
+        return {
+          tasks: task ? [task, ...withoutOld] : withoutOld,
+          selectedTaskId: res.taskId,
+          selectedTask: task,
+          tasksLoading: false,
+        };
+      });
+      await get().fetchTask(res.taskId);
+    } catch (err: unknown) {
+      set({
+        tasksError: getErrorMessage(err, "创建任务失败"),
+        tasksLoading: false,
+      });
+    }
+  },
+
+  setSelectedTaskId: (taskId) => {
+    const task = taskId ? get().tasks.find((item) => item.id === taskId) ?? null : null;
+    set({ selectedTaskId: taskId, selectedTask: task, taskEvents: [] });
+    if (taskId) {
+      get().fetchTask(taskId);
+    }
+  },
+
+  startTaskPolling: (intervalMs = 2500) => {
+    get().fetchTasks();
+    const timer = setInterval(() => {
+      const selectedTaskId = get().selectedTaskId;
+      get().fetchTasks();
+      if (selectedTaskId) {
+        get().fetchTask(selectedTaskId);
+      }
+    }, intervalMs);
+    return () => clearInterval(timer);
+  },
+
+  // ===== 项目理解 =====
+  projectSnapshot: null,
+  projectFiles: [],
+  projectLoading: false,
+  projectError: null,
+  selectedProjectFile: null,
+  fileLoading: false,
+  searchQuery: "",
+  searchResults: [],
+  searchTruncated: false,
+  searchLoading: false,
+
+  fetchProjectOverview: async () => {
+    set({ projectLoading: true, projectError: null });
+    try {
+      const [snapshot, files] = await Promise.all([
+        api.getProjectSnapshot(),
+        api.listProjectFiles(500),
+      ]);
+      set({
+        projectSnapshot: snapshot,
+        projectFiles: files.files,
+        projectLoading: false,
+      });
+    } catch (err: unknown) {
+      set({
+        projectError: getErrorMessage(err, "获取项目概览失败"),
+        projectLoading: false,
+      });
+    }
+  },
+
+  readProjectFile: async (path) => {
+    set({ fileLoading: true, projectError: null });
+    try {
+      const file = await api.readProjectFile(path);
+      set({ selectedProjectFile: file, fileLoading: false });
+    } catch (err: unknown) {
+      set({
+        projectError: getErrorMessage(err, "读取项目文件失败"),
+        fileLoading: false,
+      });
+    }
+  },
+
+  searchProjectText: async (query) => {
+    const trimmed = query.trim();
+    set({ searchQuery: query });
+    if (!trimmed) {
+      set({ searchResults: [], searchTruncated: false, searchLoading: false });
+      return;
+    }
+
+    set({ searchLoading: true, projectError: null });
+    try {
+      const result = await api.searchProjectText({ query: trimmed, maxResults: 50 });
+      set({
+        searchResults: result.matches,
+        searchTruncated: result.truncated,
+        searchLoading: false,
+      });
+    } catch (err: unknown) {
+      set({
+        projectError: getErrorMessage(err, "搜索项目失败"),
+        searchLoading: false,
+      });
+    }
+  },
+
+  clearProjectError: () => set({ projectError: null }),
 
   // ===== 健康检查 =====
   healthy: null,

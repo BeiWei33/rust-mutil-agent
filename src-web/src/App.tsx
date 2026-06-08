@@ -8,6 +8,8 @@ import { useAgentStore } from "@/store/useAgentStore";
 import ChatWindow from "@/components/ChatWindow";
 import AgentPanel from "@/components/AgentPanel";
 import SettingsPanel from "@/components/SettingsPanel";
+import TaskBoard from "@/components/TaskBoard";
+import ProjectPanel from "@/components/ProjectPanel";
 import type { PageRoute } from "@/types";
 
 // ============ 侧边栏导航配置 ============
@@ -20,6 +22,8 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { route: "chat", label: "对话", icon: "💬" },
+  { route: "tasks", label: "任务", icon: "📋" },
+  { route: "project", label: "项目", icon: "🗂️" },
   { route: "agents", label: "Agent", icon: "🤖" },
   { route: "settings", label: "设置", icon: "⚙️" },
 ];
@@ -108,6 +112,10 @@ function PageContent() {
   switch (currentPage) {
     case "chat":
       return <ChatWindow />;
+    case "tasks":
+      return <TaskBoard />;
+    case "project":
+      return <ProjectPanel />;
     case "agents":
       return <AgentPanel />;
     case "settings":

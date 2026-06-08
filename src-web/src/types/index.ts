@@ -105,6 +105,171 @@ export interface SendMessageResponse {
   warnings?: string[];
 }
 
+/** 任务状态 */
+export type TaskStatus =
+  | "draft"
+  | "planning"
+  | "waitingApproval"
+  | "running"
+  | "reviewing"
+  | "failed"
+  | "completed"
+  | "cancelled";
+
+/** 任务步骤状态 */
+export type StepStatus =
+  | "pending"
+  | "waitingApproval"
+  | "running"
+  | "failed"
+  | "completed"
+  | "skipped";
+
+/** 任务步骤 */
+export interface TaskStep {
+  id: string;
+  taskId: string;
+  order: number;
+  agentId: string;
+  title: string;
+  instruction: string;
+  status: StepStatus;
+  dependsOn: string[];
+  attempts: number;
+  result?: unknown | null;
+  error?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
+/** 软件工程任务 */
+export interface Task {
+  id: string;
+  title: string;
+  userGoal: string;
+  status: TaskStatus;
+  steps: TaskStep[];
+  artifacts: unknown[];
+  output?: string | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 任务事件类型 */
+export type TaskEventKind =
+  | "created"
+  | "planned"
+  | "stepStarted"
+  | "stepCompleted"
+  | "stepFailed"
+  | "completed"
+  | "failed";
+
+/** 任务事件 */
+export interface TaskEvent {
+  id: string;
+  taskId: string;
+  stepId?: string | null;
+  kind: TaskEventKind;
+  message: string;
+  payload: unknown;
+  createdAt: string;
+}
+
+/** 创建任务请求 */
+export interface CreateTaskRequest {
+  content: string;
+  agentId?: string;
+}
+
+/** 创建任务响应 */
+export interface CreateTaskResponse {
+  taskId: string;
+  task?: Task | null;
+}
+
+/** 任务列表响应 */
+export interface TaskListResponse {
+  tasks: Task[];
+}
+
+/** 项目 manifest */
+export interface ProjectManifest {
+  path: string;
+  kind: string;
+  summary: string;
+}
+
+/** 项目重要文件 */
+export interface ProjectImportantFile {
+  path: string;
+  kind: string;
+  description: string;
+}
+
+/** 推荐验证命令 */
+export interface ProjectCommand {
+  label: string;
+  command: string;
+  workingDir: string;
+  kind: string;
+}
+
+/** 项目快照 */
+export interface ProjectSnapshot {
+  root: string;
+  name: string;
+  techStack: string[];
+  manifests: ProjectManifest[];
+  importantFiles: ProjectImportantFile[];
+  recommendedCommands: ProjectCommand[];
+  generatedAt: string;
+}
+
+/** Workspace 文件项 */
+export interface WorkspaceEntry {
+  path: string;
+  name: string;
+  isDir: boolean;
+  extension?: string | null;
+  sizeBytes: number;
+  modifiedAt?: string | null;
+}
+
+/** 项目文件列表响应 */
+export interface ProjectFileListResponse {
+  files: WorkspaceEntry[];
+}
+
+/** 文件读取响应 */
+export interface FileReadResponse {
+  path: string;
+  content: string;
+  sizeBytes: number;
+}
+
+/** 搜索结果项 */
+export interface SearchMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
+
+/** 搜索响应 */
+export interface SearchResponse {
+  query: string;
+  matches: SearchMatch[];
+  truncated: boolean;
+}
+
+/** 搜索请求 */
+export interface SearchProjectTextRequest {
+  query: string;
+  maxResults?: number;
+}
+
 /** Tauri 后端结构化错误 */
 export interface ApiErrorPayload {
   code?: string;
@@ -146,4 +311,4 @@ export interface AppSettings {
 }
 
 /** 页面路由（简易状态切换） */
-export type PageRoute = "chat" | "agents" | "settings";
+export type PageRoute = "chat" | "tasks" | "project" | "agents" | "settings";

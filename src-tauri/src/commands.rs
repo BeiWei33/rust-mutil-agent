@@ -4,6 +4,9 @@
 //! 通过 invoke 机制实现前后端双向通信。
 
 use crate::agent::traits::Capability as AgentCapability;
+use crate::project::ProjectSnapshot;
+use crate::task::{Task, TaskEvent};
+use crate::workspace::{FileReadResponse, SearchResponse, WorkspaceEntry};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -16,6 +19,22 @@ pub struct SendMessageRequest {
     pub agent_id: Option<String>,
     pub route_mode: Option<String>,
     pub session_id: Option<String>,
+}
+
+/// 创建软件工程任务请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskRequest {
+    pub content: String,
+    pub agent_id: Option<String>,
+}
+
+/// 搜索项目文本请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchProjectTextRequest {
+    pub query: String,
+    pub max_results: Option<usize>,
 }
 
 /// 结构化 API 错误。
@@ -57,7 +76,10 @@ impl ApiError {
         Self::new(
             "AGENT_NOT_SELECTABLE",
             "这个 AI 成员主要作为内部能力使用，暂不支持直接对话。请切换为“自动分配”或选择协调员。",
-            Some(format!("Agent [{}] is internal/selectable=false", meta.runtime_name)),
+            Some(format!(
+                "Agent [{}] is internal/selectable=false",
+                meta.runtime_name
+            )),
             false,
         )
     }
@@ -68,6 +90,15 @@ impl ApiError {
             "消息已收到，但交给 AI 成员处理时失败。请稍后重试，或切换为“自动分配”。",
             Some(detail),
             true,
+        )
+    }
+
+    fn workspace_failed(detail: String) -> Self {
+        Self::new(
+            "WORKSPACE_ERROR",
+            "读取项目工作区时失败。请检查路径是否存在，或稍后重试。",
+            Some(detail),
+            false,
         )
     }
 }
@@ -106,6 +137,28 @@ pub struct SendMessageResponse {
     pub status: String,
     pub route: RouteInfoResponse,
     pub warnings: Vec<String>,
+}
+
+/// 创建任务响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskResponse {
+    pub task_id: String,
+    pub task: Option<Task>,
+}
+
+/// 任务列表响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListResponse {
+    pub tasks: Vec<Task>,
+}
+
+/// 项目文件列表响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileListResponse {
+    pub files: Vec<WorkspaceEntry>,
 }
 
 /// 前端 Agent 能力结构。
@@ -286,7 +339,10 @@ fn capabilities_for_agent(name: &str) -> Vec<AgentCapability> {
     match name {
         "Echo" => vec![AgentCapability::chat()],
         "Planner" => vec![AgentCapability::planning(), AgentCapability::chat()],
-        "Executor" => vec![AgentCapability::code_execution(), AgentCapability::tool_use()],
+        "Executor" => vec![
+            AgentCapability::code_execution(),
+            AgentCapability::tool_use(),
+        ],
         "Memory" => vec![AgentCapability::memory(), AgentCapability::retrieval()],
         "Tool" => vec![AgentCapability::tool_use()],
         _ => vec![AgentCapability::chat()],
@@ -410,6 +466,36 @@ pub async fn send_message(
     })
 }
 
+/// 创建软件工程任务。
+///
+/// 前端调用：`invoke('create_task', { request: { content, agentId } })`
+#[tauri::command]
+pub async fn create_task(
+    request: CreateTaskRequest,
+    state: State<'_, AppState>,
+) -> Result<CreateTaskResponse, ApiError> {
+    let content = request.content.trim();
+    if content.is_empty() {
+        return Err(ApiError::invalid_argument("请输入任务目标。"));
+    }
+
+    let (target_meta, _, _) = resolve_agent_meta(request.agent_id.as_deref())?;
+    let msg_type = if target_meta.runtime_name == "Planner" {
+        "plan_request"
+    } else {
+        "direct_message"
+    };
+
+    let mut orch = state.orchestrator.lock().await;
+    let task_id = orch
+        .submit_task_to_agent(target_meta.runtime_name, content, msg_type)
+        .await
+        .map_err(|e| ApiError::route_failed(format!("{}", e)))?;
+    let task = orch.get_task(&task_id).await;
+
+    Ok(CreateTaskResponse { task_id, task })
+}
+
 /// 获取单个 Agent 的当前状态。
 ///
 /// 前端调用：`invoke('get_agent_status', { agentId })`
@@ -433,9 +519,7 @@ pub async fn get_agent_status(
 ///
 /// 前端调用：`invoke('list_agents')`
 #[tauri::command]
-pub async fn list_agents(
-    state: State<'_, AppState>,
-) -> Result<AgentListResponse, ApiError> {
+pub async fn list_agents(state: State<'_, AppState>) -> Result<AgentListResponse, ApiError> {
     let orch = state.orchestrator.lock().await;
     let mut agents = orch.list_agents();
     agents.sort_by_key(|name| {
@@ -461,7 +545,7 @@ pub async fn get_task_result(
 ) -> Result<Option<serde_json::Value>, ApiError> {
     let orch = state.orchestrator.lock().await;
 
-    let result = orch.get_task_result(&task_id).map(|r| {
+    let result = orch.get_task_result(&task_id).await.map(|r| {
         serde_json::json!({
             "taskId": r.task_id,
             "status": r.status,
@@ -471,6 +555,80 @@ pub async fn get_task_result(
     });
 
     Ok(result)
+}
+
+/// 获取任务详情。
+///
+/// 前端调用：`invoke('get_task', { taskId })`
+#[tauri::command]
+pub async fn get_task(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<Task>, ApiError> {
+    let orch = state.orchestrator.lock().await;
+    Ok(orch.get_task(&task_id).await)
+}
+
+/// 获取任务列表。
+///
+/// 前端调用：`invoke('list_tasks')`
+#[tauri::command]
+pub async fn list_tasks(state: State<'_, AppState>) -> Result<TaskListResponse, ApiError> {
+    let orch = state.orchestrator.lock().await;
+    Ok(TaskListResponse {
+        tasks: orch.list_tasks().await,
+    })
+}
+
+/// 获取任务事件流。
+///
+/// 前端调用：`invoke('get_task_events', { taskId })`
+#[tauri::command]
+pub async fn get_task_events(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TaskEvent>, ApiError> {
+    let orch = state.orchestrator.lock().await;
+    Ok(orch.get_task_events(&task_id).await)
+}
+
+/// 获取当前项目快照。
+///
+/// 前端调用：`invoke('get_project_snapshot')`
+#[tauri::command]
+pub async fn get_project_snapshot() -> Result<ProjectSnapshot, ApiError> {
+    crate::project::scan_project().map_err(|e| ApiError::workspace_failed(format!("{}", e)))
+}
+
+/// 列出项目文件。
+///
+/// 前端调用：`invoke('list_project_files', { maxFiles })`
+#[tauri::command]
+pub async fn list_project_files(
+    max_files: Option<usize>,
+) -> Result<ProjectFileListResponse, ApiError> {
+    crate::workspace::list_files(max_files)
+        .map(|files| ProjectFileListResponse { files })
+        .map_err(|e| ApiError::workspace_failed(format!("{}", e)))
+}
+
+/// 读取项目内文本文件。
+///
+/// 前端调用：`invoke('read_project_file', { path })`
+#[tauri::command]
+pub async fn read_project_file(path: String) -> Result<FileReadResponse, ApiError> {
+    crate::workspace::read_file(&path).map_err(|e| ApiError::workspace_failed(format!("{}", e)))
+}
+
+/// 搜索项目内文本。
+///
+/// 前端调用：`invoke('search_project_text', { request: { query, maxResults } })`
+#[tauri::command]
+pub async fn search_project_text(
+    request: SearchProjectTextRequest,
+) -> Result<SearchResponse, ApiError> {
+    crate::workspace::search_text(&request.query, request.max_results)
+        .map_err(|e| ApiError::workspace_failed(format!("{}", e)))
 }
 
 /// 获取系统健康状态。

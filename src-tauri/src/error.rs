@@ -65,7 +65,7 @@ pub enum AppError {
 pub type AppResult<T> = Result<T, AppError>;
 
 /// 旧版 Agent 错误类型（保持向后兼容）
-/// 
+///
 /// 使用方式：AgentError::BusError("...".into())
 #[derive(Debug, Error)]
 pub enum AgentError {

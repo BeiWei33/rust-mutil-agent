@@ -29,9 +29,7 @@ use crate::error::AgentError;
 ///
 /// 接收 JSON Value 参数，返回 JSON Value 结果。
 /// 使用 Arc 包装以支持多线程共享。
-pub type ToolFn = Arc<
-    dyn Fn(serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync,
->;
+pub type ToolFn = Arc<dyn Fn(serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
 
 /// 工具描述
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,9 +90,10 @@ impl ToolRegistry {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, AgentError> {
-        let tool = self.tools.get(name).ok_or_else(|| {
-            AgentError::ToolNotFound(format!("工具 '{name}' 未注册"))
-        })?;
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| AgentError::ToolNotFound(format!("工具 '{name}' 未注册")))?;
 
         tool(args).map_err(|e| AgentError::Tool(format!("工具 '{name}' 调用失败: {e}")))
     }
@@ -139,9 +138,7 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
             }),
         },
         |args| {
-            let expr = args["expression"]
-                .as_str()
-                .ok_or("缺少 expression 参数")?;
+            let expr = args["expression"].as_str().ok_or("缺少 expression 参数")?;
             // 简单计算器：仅支持基本四则运算
             let result = eval_expression(expr)?;
             Ok(serde_json::json!({ "result": result, "expression": expr }))
@@ -271,7 +268,9 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
                         break;
                     }
                 }
-                let num: f64 = num_str.parse().map_err(|e| format!("无效数字 '{}': {e}", num_str))?;
+                let num: f64 = num_str
+                    .parse()
+                    .map_err(|e| format!("无效数字 '{}': {e}", num_str))?;
                 tokens.push(Token::Number(num));
             }
             '+' => {
@@ -424,10 +423,7 @@ impl ToolAgent {
 
     /// 使用预配置的注册表创建
     pub fn with_registry(registry: ToolRegistry) -> Self {
-        Self {
-            registry,
-            count: 0,
-        }
+        Self { registry, count: 0 }
     }
 }
 
@@ -449,30 +445,25 @@ impl Agent for ToolAgent {
         vec![Capability::tool_use()]
     }
 
-    async fn handle_message(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError> {
+    async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         self.count += 1;
 
         // 从消息中解析工具名称和参数
-        let tool_name = msg.context["tool"]
-            .as_str()
-            .unwrap_or_else(|| {
-                // 如果没有显式指定，从内容中提取
-                let content = &msg.content;
-                if content.contains("计算") || content.contains("calc") {
-                    "calculator"
-                } else if content.contains("时间") || content.contains("日期") {
-                    "datetime"
-                } else if content.contains("搜索") || content.contains("search") {
-                    "web_search"
-                } else if content.contains("文件") || content.contains("file") {
-                    "file_read"
-                } else {
-                    "calculator" // 默认尝试计算器
-                }
-            });
+        let tool_name = msg.context["tool"].as_str().unwrap_or_else(|| {
+            // 如果没有显式指定，从内容中提取
+            let content = &msg.content;
+            if content.contains("计算") || content.contains("calc") {
+                "calculator"
+            } else if content.contains("时间") || content.contains("日期") {
+                "datetime"
+            } else if content.contains("搜索") || content.contains("search") {
+                "web_search"
+            } else if content.contains("文件") || content.contains("file") {
+                "file_read"
+            } else {
+                "calculator" // 默认尝试计算器
+            }
+        });
 
         let args = msg.context.get("args").cloned().unwrap_or_else(|| {
             // 从内容中提取参数
@@ -482,17 +473,13 @@ impl Agent for ToolAgent {
             })
         });
 
-        tracing::info!(
-            "ToolAgent 调用工具: {tool_name}, 参数: {args}"
-        );
+        tracing::info!("ToolAgent 调用工具: {tool_name}, 参数: {args}");
 
         // 调用工具
         match self.registry.call(tool_name, args) {
             Ok(result) => {
                 let reply = msg
-                    .reply_to(&format!(
-                        "工具 [{tool_name}] 执行结果: {result}",
-                    ))
+                    .reply_to(&format!("工具 [{tool_name}] 执行结果: {result}",))
                     .with_type("tool_result")
                     .with_context(serde_json::json!({
                         "tool": tool_name,
@@ -653,8 +640,8 @@ mod tests {
     async fn test_tool_agent_explicit_tool_selection() {
         let mut agent = ToolAgent::default();
 
-        let msg = AgentMessage::new("User", "Tool", "计算一些东西")
-            .with_context(serde_json::json!({
+        let msg =
+            AgentMessage::new("User", "Tool", "计算一些东西").with_context(serde_json::json!({
                 "tool": "datetime",
                 "args": { "format": "readable" }
             }));
@@ -689,15 +676,21 @@ mod tests {
         register_builtin_tools(&mut registry);
 
         // iso 格式
-        let r1 = registry.call("datetime", serde_json::json!({"format": "iso"})).unwrap();
+        let r1 = registry
+            .call("datetime", serde_json::json!({"format": "iso"}))
+            .unwrap();
         assert!(r1["datetime"].as_str().unwrap().contains("T"));
 
         // readable 格式
-        let r2 = registry.call("datetime", serde_json::json!({"format": "readable"})).unwrap();
+        let r2 = registry
+            .call("datetime", serde_json::json!({"format": "readable"}))
+            .unwrap();
         assert!(r2["datetime"].as_str().unwrap().contains("年"));
 
         // timestamp 格式
-        let r3 = registry.call("datetime", serde_json::json!({"format": "timestamp"})).unwrap();
+        let r3 = registry
+            .call("datetime", serde_json::json!({"format": "timestamp"}))
+            .unwrap();
         assert!(r3["datetime"].as_str().unwrap().parse::<i64>().is_ok());
     }
 

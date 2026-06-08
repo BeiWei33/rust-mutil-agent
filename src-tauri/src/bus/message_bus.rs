@@ -49,9 +49,7 @@ impl MessageBus {
     pub fn publish(&self, msg: AgentMessage) -> Result<usize, AgentError> {
         let count = self.tx.receiver_count();
         if count == 0 {
-            return Err(AgentError::BusError(
-                "消息总线没有活跃的订阅者".to_string(),
-            ));
+            return Err(AgentError::BusError("消息总线没有活跃的订阅者".to_string()));
         }
         self.tx
             .send(msg)

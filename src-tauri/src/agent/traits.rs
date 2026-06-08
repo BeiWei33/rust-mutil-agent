@@ -199,7 +199,7 @@ impl Capability {
 /// Agent 核心接口
 ///
 /// 所有 Agent 必须实现此 trait。
-/// 
+///
 /// # 实现指南
 /// 1. `name()` — 返回 Agent 唯一名称
 /// 2. `capabilities()` — 声明 Agent 的能力列表
@@ -241,16 +241,13 @@ pub trait Agent: Send + Sync {
     /// # 返回值
     /// - 成功时返回要发回的回复消息列表（可能为空）
     /// - 失败时返回 AgentError
-    async fn handle_message(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError>;
+    async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError>;
 
     /// Agent 的主循环（可选覆盖）
     ///
     /// 默认实现：从接收器持续读取消息，调用 handle_message 处理，
     /// 将回复发送回总线。
-    /// 
+    ///
     /// # 参数
     /// - `rx`：消息接收端
     /// - `tx`：消息发送端（总线的发送器）

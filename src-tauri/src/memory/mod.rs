@@ -20,7 +20,10 @@ impl KnowledgeBase {
 
     /// 获取或创建数据库连接
     fn get_conn(&self) -> Result<std::sync::MutexGuard<Option<rusqlite::Connection>>, AgentError> {
-        let mut guard = self.conn.lock().map_err(|e| AgentError::Internal(e.to_string()))?;
+        let mut guard = self
+            .conn
+            .lock()
+            .map_err(|e| AgentError::Internal(e.to_string()))?;
         if guard.is_none() {
             *guard = Some(rusqlite::Connection::open(&self.db_path)?);
         }
@@ -84,18 +87,15 @@ impl KnowledgeBase {
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![like_pattern, limit as i64],
-            |row| {
-                Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "title": row.get::<_, String>(1)?,
-                    "content": row.get::<_, String>(2)?,
-                    "source": row.get::<_, Option<String>>(3)?,
-                    "created_at": row.get::<_, String>(4)?,
-                }))
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params![like_pattern, limit as i64], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "content": row.get::<_, String>(2)?,
+                "source": row.get::<_, Option<String>>(3)?,
+                "created_at": row.get::<_, String>(4)?,
+            }))
+        })?;
         let mut results = Vec::new();
         for row in rows {
             results.push(row?);
@@ -123,7 +123,12 @@ mod tests {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
         let id = kb
-            .store_knowledge("Rust 入门", "Rust 是一门系统编程语言...", Some("教程"), Some(&["rust".to_string(), "编程".to_string()]))
+            .store_knowledge(
+                "Rust 入门",
+                "Rust 是一门系统编程语言...",
+                Some("教程"),
+                Some(&["rust".to_string(), "编程".to_string()]),
+            )
             .unwrap();
         assert!(!id.is_empty());
         let results = kb.search_knowledge("Rust", 5).unwrap();
@@ -135,7 +140,13 @@ mod tests {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
         for i in 1..=5 {
-            kb.store_knowledge(&format!("条目{i}"), &format!("这是第 {i} 条知识的内容"), None, None).unwrap();
+            kb.store_knowledge(
+                &format!("条目{i}"),
+                &format!("这是第 {i} 条知识的内容"),
+                None,
+                None,
+            )
+            .unwrap();
         }
         let results = kb.search_knowledge("知识", 3).unwrap();
         assert_eq!(results.len(), 3);
@@ -147,8 +158,10 @@ mod tests {
     fn test_search_by_title() {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
-        kb.store_knowledge("Python 入门教程", "Python 是...", None, None).unwrap();
-        kb.store_knowledge("Rust 高级编程", "Rust 高级特性", None, None).unwrap();
+        kb.store_knowledge("Python 入门教程", "Python 是...", None, None)
+            .unwrap();
+        kb.store_knowledge("Rust 高级编程", "Rust 高级特性", None, None)
+            .unwrap();
         let results = kb.search_knowledge("Python", 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["title"], "Python 入门教程");
@@ -158,8 +171,10 @@ mod tests {
     fn test_search_by_content() {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
-        kb.store_knowledge("系统设计", "分布式系统架构设计指南", None, None).unwrap();
-        kb.store_knowledge("前端开发", "React 组件设计模式", None, None).unwrap();
+        kb.store_knowledge("系统设计", "分布式系统架构设计指南", None, None)
+            .unwrap();
+        kb.store_knowledge("前端开发", "React 组件设计模式", None, None)
+            .unwrap();
         let results = kb.search_knowledge("分布式", 5).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["title"], "系统设计");
@@ -178,7 +193,8 @@ mod tests {
     fn test_knowledge_source_field() {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
-        kb.store_knowledge("新闻", "今日新闻摘要", Some("人民日报"), None).unwrap();
+        kb.store_knowledge("新闻", "今日新闻摘要", Some("人民日报"), None)
+            .unwrap();
         let results = kb.search_knowledge("新闻", 5).unwrap();
         assert_eq!(results[0]["source"], "人民日报");
     }
@@ -203,8 +219,13 @@ mod tests {
     fn test_store_with_tags() {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
-        let tags = vec!["rust".to_string(), "编程语言".to_string(), "系统编程".to_string()];
-        kb.store_knowledge("Rust 特性", "Rust 的所有权系统...", None, Some(&tags)).unwrap();
+        let tags = vec![
+            "rust".to_string(),
+            "编程语言".to_string(),
+            "系统编程".to_string(),
+        ];
+        kb.store_knowledge("Rust 特性", "Rust 的所有权系统...", None, Some(&tags))
+            .unwrap();
         let results = kb.search_knowledge("Rust", 5).unwrap();
         assert_eq!(results.len(), 1);
     }

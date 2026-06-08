@@ -88,13 +88,19 @@ pub struct TaskPlan {
 
 impl TaskPlan {
     /// 根据目标生成简单线性计划（演示用）
-    /// 
+    ///
     /// 实际生产环境中，这里应调用 LLM 来智能分解任务。
     pub fn from_goal(goal: &str) -> Self {
-        let task_id = Uuid::new_v4().to_string();
+        Self::from_goal_with_id(goal, Uuid::new_v4().to_string())
+    }
+
+    /// 根据目标和外部任务 ID 生成简单线性计划。
+    pub fn from_goal_with_id(goal: &str, task_id: impl Into<String>) -> Self {
+        let task_id = task_id.into();
 
         // 演示：根据关键词简单推断所需步骤
-        let steps = if goal.contains("搜索") || goal.contains("查找") || goal.contains("新闻") {
+        let steps = if goal.contains("搜索") || goal.contains("查找") || goal.contains("新闻")
+        {
             vec![
                 PlanStep {
                     step_id: format!("{task_id}-1"),
@@ -159,6 +165,141 @@ impl TaskPlan {
             created_at: chrono::Utc::now(),
         }
     }
+
+    /// 根据目标、任务 ID 和项目上下文生成计划。
+    pub fn from_goal_with_context(
+        goal: &str,
+        task_id: impl Into<String>,
+        context: &serde_json::Value,
+    ) -> Self {
+        let task_id = task_id.into();
+        if is_software_goal(goal) {
+            if let Some(project_context) = context.get("projectPlanningContext") {
+                return Self::from_software_goal(goal, task_id, project_context);
+            }
+        }
+
+        Self::from_goal_with_id(goal, task_id)
+    }
+
+    fn from_software_goal(
+        goal: &str,
+        task_id: String,
+        project_context: &serde_json::Value,
+    ) -> Self {
+        let tech_stack = project_context
+            .pointer("/snapshot/techStack")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "未知技术栈".to_string());
+
+        let search_query = project_context
+            .get("searchQuery")
+            .and_then(|value| value.as_str())
+            .unwrap_or("未生成搜索词");
+
+        let related_files = project_context
+            .get("searchMatches")
+            .and_then(|value| value.as_array())
+            .map(|matches| {
+                let mut paths = Vec::new();
+                for item in matches {
+                    if let Some(path) = item.get("path").and_then(|value| value.as_str()) {
+                        if !paths.iter().any(|existing: &&str| *existing == path) {
+                            paths.push(path);
+                        }
+                    }
+                    if paths.len() >= 5 {
+                        break;
+                    }
+                }
+                paths.join(", ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "暂无直接命中文件，优先查看项目关键文件".to_string());
+
+        let recommended_commands = project_context
+            .pointer("/snapshot/recommendedCommands")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("command").and_then(|command| command.as_str()))
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "cargo check, cargo test".to_string());
+
+        let steps = vec![
+            PlanStep {
+                step_id: format!("{task_id}-1"),
+                order: 1,
+                agent: "Planner".to_string(),
+                instruction: format!(
+                    "基于项目快照理解软件任务: {goal}。当前技术栈: {tech_stack}。"
+                ),
+                depends_on: vec![],
+                status: StepStatus::Pending,
+            },
+            PlanStep {
+                step_id: format!("{task_id}-2"),
+                order: 2,
+                agent: "Tool".to_string(),
+                instruction: format!(
+                    "只读检索相关源码。搜索词: {search_query}。优先关注: {related_files}。"
+                ),
+                depends_on: vec![format!("{task_id}-1")],
+                status: StepStatus::Pending,
+            },
+            PlanStep {
+                step_id: format!("{task_id}-3"),
+                order: 3,
+                agent: "Executor".to_string(),
+                instruction: format!(
+                    "结合项目结构形成实现方案和模拟执行结果，不直接修改文件: {goal}。建议验证命令: {recommended_commands}。"
+                ),
+                depends_on: vec![format!("{task_id}-2")],
+                status: StepStatus::Pending,
+            },
+            PlanStep {
+                step_id: format!("{task_id}-4"),
+                order: 4,
+                agent: "Memory".to_string(),
+                instruction: format!(
+                    "记录本轮项目事实、相关文件和后续实现建议: {goal}。"
+                ),
+                depends_on: vec![format!("{task_id}-3")],
+                status: StepStatus::Pending,
+            },
+        ];
+
+        Self {
+            task_id,
+            goal: goal.to_string(),
+            steps,
+            created_at: chrono::Utc::now(),
+        }
+    }
+}
+
+fn is_software_goal(goal: &str) -> bool {
+    let lower = goal.to_lowercase();
+    [
+        "项目", "代码", "编程", "实现", "修复", "bug", "测试", "构建", "前端", "后端", "页面",
+        "组件", "文件", "ipc", "agent", "rust", "react", "tauri", "store",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
 }
 
 // ============================================================
@@ -195,14 +336,14 @@ impl Agent for PlannerAgent {
         vec![Capability::planning()]
     }
 
-    async fn handle_message(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError> {
+    async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         self.plans_created += 1;
 
-        // 根据消息内容生成执行计划
-        let plan = TaskPlan::from_goal(&msg.content);
+        // 根据消息内容生成执行计划；优先沿用 Orchestrator 创建的 task_id。
+        let plan = match msg.task_id.as_deref() {
+            Some(task_id) => TaskPlan::from_goal_with_context(&msg.content, task_id, &msg.context),
+            None => TaskPlan::from_goal(&msg.content),
+        };
 
         tracing::info!(
             "PlannerAgent 为任务 {} 创建了 {} 个步骤的计划",
@@ -211,9 +352,8 @@ impl Agent for PlannerAgent {
         );
 
         // 序列化计划为 JSON，放入消息 context
-        let context = serde_json::to_value(&plan).map_err(|e| {
-            AgentError::Internal(format!("计划序列化失败: {e}"))
-        })?;
+        let context = serde_json::to_value(&plan)
+            .map_err(|e| AgentError::Internal(format!("计划序列化失败: {e}")))?;
 
         // 构建包含计划的回复消息
         let reply = AgentMessage::new(
@@ -228,13 +368,9 @@ impl Agent for PlannerAgent {
         // 为每个步骤生成分派消息（发送给对应的 Agent）
         let mut dispatch_messages = Vec::new();
         for step in &plan.steps {
-            let dispatch_msg = AgentMessage::new(
-                self.name(),
-                &step.agent,
-                &step.instruction,
-            )
-            .with_type("plan_step")
-            .with_task_id(&plan.task_id);
+            let dispatch_msg = AgentMessage::new(self.name(), &step.agent, &step.instruction)
+                .with_type("plan_step")
+                .with_task_id(&plan.task_id);
 
             dispatch_messages.push(dispatch_msg);
         }
@@ -404,6 +540,63 @@ mod tests {
         let targets: Vec<&str> = replies.iter().skip(1).map(|m| m.to.as_str()).collect();
         assert!(targets.contains(&"Planner"));
         assert!(targets.contains(&"Executor"));
+    }
+
+    /// 测试 — 带项目上下文的软件任务生成项目感知计划
+    #[tokio::test]
+    async fn test_planner_project_aware_software_plan() {
+        let mut planner = PlannerAgent::new();
+        let context = serde_json::json!({
+            "projectPlanningContext": {
+                "snapshot": {
+                    "techStack": ["Rust", "Tauri v2", "React"],
+                    "recommendedCommands": [
+                        { "command": "cargo test" },
+                        { "command": "npm test -- --run" }
+                    ]
+                },
+                "searchQuery": "Task",
+                "searchMatches": [
+                    { "path": "src-web/src/components/TaskBoard.tsx" },
+                    { "path": "src-tauri/src/orchestrator/mod.rs" }
+                ]
+            }
+        });
+
+        let msg = AgentMessage::new("User", "Planner", "优化项目任务看板")
+            .with_task_id("task-project")
+            .with_context(context);
+        let replies = planner.handle_message(msg).await.unwrap();
+
+        assert_eq!(replies.len(), 5);
+        let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
+        assert_eq!(plan.steps.len(), 4);
+        assert!(plan.steps[0].instruction.contains("Rust"));
+        assert!(plan.steps[1].instruction.contains("TaskBoard.tsx"));
+        assert!(plan.steps[2].instruction.contains("cargo test"));
+    }
+
+    /// 测试 — 普通搜索任务不会因项目上下文被误判为软件任务
+    #[tokio::test]
+    async fn test_planner_project_context_keeps_non_software_search_plan() {
+        let mut planner = PlannerAgent::new();
+        let context = serde_json::json!({
+            "projectPlanningContext": {
+                "snapshot": { "techStack": ["Rust"] },
+                "searchQuery": "Agent",
+                "searchMatches": []
+            }
+        });
+
+        let msg = AgentMessage::new("User", "Planner", "帮我搜索今日新闻")
+            .with_task_id("task-news")
+            .with_context(context);
+        let replies = planner.handle_message(msg).await.unwrap();
+
+        assert_eq!(replies.len(), 4);
+        let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].agent, "Tool");
     }
 
     /// 测试 — PlanStep 序列化反序列化

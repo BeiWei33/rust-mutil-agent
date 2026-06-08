@@ -5,11 +5,18 @@
 
 use crate::error::AgentError;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// OpenAI Chat Completions 默认端点。
+pub const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+/// OpenAI 默认模型。
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 
 /// DeepSeek 默认 OpenAI-compatible Chat Completions 端点。
 pub const DEFAULT_DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/v1/chat/completions";
 /// 默认 DeepSeek 模型。
 pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-v4-pro";
+const DEFAULT_LLM_TIMEOUT_SECS: u64 = 60;
 
 /// LLM 提供商类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +64,19 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     /// 温度参数 (0.0 ~ 2.0)
     pub temperature: Option<f32>,
+    /// 响应格式；`JsonObject` 会映射为 OpenAI-compatible 的 JSON mode。
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// LLM 响应格式。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResponseFormat {
+    /// 普通文本响应。
+    #[serde(rename = "text")]
+    Text,
+    /// JSON 对象响应。
+    #[serde(rename = "json_object")]
+    JsonObject,
 }
 
 /// 聊天补全响应
@@ -82,6 +102,47 @@ pub struct LLMClient {
     api_key: Option<String>,
     /// 默认模型名称
     model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OpenAIResponseFormat>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChatResponse {
+    model: Option<String>,
+    choices: Vec<OpenAIChoice>,
+    usage: Option<OpenAIUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChoice {
+    message: OpenAIChoiceMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChoiceMessage {
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIUsage {
+    total_tokens: Option<u32>,
 }
 
 impl LLMClient {
@@ -114,9 +175,42 @@ impl LLMClient {
     pub fn openai(api_key: String, model: Option<String>) -> Self {
         Self {
             provider: LLMProvider::OpenAI,
-            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            endpoint: DEFAULT_OPENAI_ENDPOINT.to_string(),
             api_key: Some(api_key),
-            model: model.unwrap_or_else(|| "gpt-4o".to_string()),
+            model: model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string()),
+        }
+    }
+
+    /// 从环境变量创建 OpenAI 客户端。
+    ///
+    /// 支持的环境变量：
+    /// - `OPENAI_API_KEY`：API Key
+    /// - `OPENAI_BASE_URL`：可选，可为 base URL 或完整 `/chat/completions` 端点
+    /// - `OPENAI_MODEL` / `DEFAULT_MODEL`：可选模型名
+    pub fn openai_from_env() -> Self {
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let endpoint = std::env::var("OPENAI_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| normalize_chat_endpoint(&value))
+            .unwrap_or_else(|| DEFAULT_OPENAI_ENDPOINT.to_string());
+        let model = std::env::var("OPENAI_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("DEFAULT_MODEL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+
+        Self {
+            provider: LLMProvider::OpenAI,
+            endpoint,
+            api_key,
+            model,
         }
     }
 
@@ -143,6 +237,7 @@ impl LLMClient {
         let endpoint = std::env::var("DEEPSEEK_BASE_URL")
             .ok()
             .filter(|v| !v.trim().is_empty())
+            .map(|value| normalize_chat_endpoint(&value))
             .unwrap_or_else(|| DEFAULT_DEEPSEEK_ENDPOINT.to_string());
         let model = std::env::var("DEEPSEEK_MODEL")
             .ok()
@@ -157,14 +252,15 @@ impl LLMClient {
         }
     }
 
-    /// 发送聊天补全请求
+    /// 发送聊天补全请求。
     ///
-    /// Mock 模式返回模拟响应，真实模式将在后续集成 reqwest 后实现。
+    /// Mock 模式返回模拟响应；OpenAI、DeepSeek 和 Custom 走
+    /// OpenAI-compatible Chat Completions 协议。
     pub async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, AgentError> {
-        match self.provider {
+        match &self.provider {
             LLMProvider::Mock => {
                 let last_user_msg = request
                     .messages
@@ -179,11 +275,100 @@ impl LLMClient {
                     truncated: false,
                 })
             }
-            _ => Err(AgentError::LlmError(format!(
-                "LLM 调用尚未实现，当前仅支持 Mock 模式。提供者: {:?}，端点: {}",
-                self.provider, self.endpoint
-            ))),
+            LLMProvider::OpenAI | LLMProvider::DeepSeek | LLMProvider::Custom(_) => {
+                self.chat_completion_openai_compatible(request).await
+            }
+            LLMProvider::LlamaCpp => Err(AgentError::LlmError(
+                "llama.cpp 本地服务调用尚未接入 OpenAI-compatible 客户端".to_string(),
+            )),
         }
+    }
+
+    async fn chat_completion_openai_compatible(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, AgentError> {
+        if matches!(&self.provider, LLMProvider::OpenAI | LLMProvider::DeepSeek)
+            && self
+                .api_key
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            return Err(AgentError::LlmError(format!(
+                "{:?} 调用缺少 API Key，请配置对应环境变量或前端设置。",
+                self.provider
+            )));
+        }
+
+        let payload = self.build_openai_chat_request(&request)?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_LLM_TIMEOUT_SECS))
+            .build()
+            .map_err(|err| AgentError::LlmError(format!("创建 HTTP 客户端失败: {err}")))?;
+
+        let mut builder = client.post(&self.endpoint).json(&payload);
+        if let Some(api_key) = self
+            .api_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            builder = builder.bearer_auth(api_key);
+        }
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| AgentError::LlmError(format!("LLM HTTP 请求失败: {err}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| AgentError::LlmError(format!("读取 LLM 响应失败: {err}")))?;
+
+        if !status.is_success() {
+            return Err(AgentError::LlmError(format!(
+                "LLM HTTP 请求失败，状态码 {status}: {}",
+                compact_error_body(&body)
+            )));
+        }
+
+        parse_openai_chat_response(&body, &self.model)
+    }
+
+    fn build_openai_chat_request(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<OpenAIChatRequest, AgentError> {
+        let mut messages = Vec::new();
+        if let Some(system_prompt) = request
+            .system_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: system_prompt.to_string(),
+            });
+        }
+        messages.extend(request.messages.clone());
+
+        if messages.is_empty() {
+            return Err(AgentError::MessageFormat(
+                "LLM 请求至少需要一条消息".to_string(),
+            ));
+        }
+
+        Ok(OpenAIChatRequest {
+            model: self.model.clone(),
+            messages,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            response_format: request.response_format.as_ref().map(openai_response_format),
+        })
     }
 
     /// 返回当前使用的 LLM 提供商
@@ -207,6 +392,55 @@ impl LLMClient {
     }
 }
 
+fn openai_response_format(format: &ResponseFormat) -> OpenAIResponseFormat {
+    let kind = match format {
+        ResponseFormat::Text => "text",
+        ResponseFormat::JsonObject => "json_object",
+    };
+    OpenAIResponseFormat { kind }
+}
+
+fn parse_openai_chat_response(
+    body: &str,
+    fallback_model: &str,
+) -> Result<ChatCompletionResponse, AgentError> {
+    let parsed: OpenAIChatResponse = serde_json::from_str(body)
+        .map_err(|err| AgentError::LlmError(format!("解析 LLM JSON 响应失败: {err}")))?;
+
+    let choice = parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| AgentError::LlmError("LLM 响应缺少 choices".to_string()))?;
+    let content = choice.message.content.unwrap_or_default();
+
+    Ok(ChatCompletionResponse {
+        content,
+        tokens_used: parsed.usage.and_then(|usage| usage.total_tokens),
+        model: parsed.model.unwrap_or_else(|| fallback_model.to_string()),
+        truncated: choice.finish_reason.as_deref() == Some("length"),
+    })
+}
+
+fn normalize_chat_endpoint(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/chat/completions")
+    }
+}
+
+fn compact_error_body(body: &str) -> String {
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let mut preview = chars.by_ref().take(500).collect::<String>();
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    preview
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +456,7 @@ mod tests {
             }],
             max_tokens: Some(100),
             temperature: Some(0.7),
+            response_format: None,
         };
 
         let response = client.chat_completion(request).await.unwrap();
@@ -232,17 +467,15 @@ mod tests {
     fn test_openai_client_creation() {
         let client = LLMClient::openai("sk-test-key".to_string(), None);
         assert_eq!(*client.provider(), LLMProvider::OpenAI);
-        assert_eq!(client.model(), "gpt-4o");
+        assert_eq!(client.model(), DEFAULT_OPENAI_MODEL);
+        assert_eq!(client.endpoint(), DEFAULT_OPENAI_ENDPOINT);
     }
 
     /// 测试 — 使用自定义模型创建 OpenAI 客户端
     /// 验证：指定模型参数后 client.model() 返回正确值
     #[test]
     fn test_openai_client_custom_model() {
-        let client = LLMClient::openai(
-            "sk-custom".to_string(),
-            Some("gpt-4-turbo".to_string()),
-        );
+        let client = LLMClient::openai("sk-custom".to_string(), Some("gpt-4-turbo".to_string()));
         assert_eq!(*client.provider(), LLMProvider::OpenAI);
         assert_eq!(client.model(), "gpt-4-turbo");
     }
@@ -267,6 +500,90 @@ mod tests {
         assert!(!client.endpoint().is_empty());
     }
 
+    /// 测试 — OpenAI-compatible base URL 会归一化为 chat/completions 端点
+    #[test]
+    fn test_normalize_chat_endpoint() {
+        assert_eq!(
+            normalize_chat_endpoint("https://api.example.com/v1"),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_chat_endpoint("https://api.example.com/v1/chat/completions"),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    /// 测试 — JSON mode 会写入 OpenAI-compatible response_format
+    #[test]
+    fn test_openai_payload_includes_json_response_format() {
+        let client = LLMClient::openai("sk-test-key".to_string(), Some("gpt-test".to_string()));
+        let request = ChatCompletionRequest {
+            system_prompt: Some("只输出 JSON".to_string()),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "生成计划".to_string(),
+            }],
+            max_tokens: Some(256),
+            temperature: Some(0.2),
+            response_format: Some(ResponseFormat::JsonObject),
+        };
+
+        let payload = client.build_openai_chat_request(&request).unwrap();
+        let value = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(value["model"], "gpt-test");
+        assert_eq!(value["messages"][0]["role"], "system");
+        assert_eq!(value["messages"][1]["content"], "生成计划");
+        assert_eq!(value["response_format"]["type"], "json_object");
+    }
+
+    /// 测试 — OpenAI 缺少 API Key 时本地失败，不尝试发起网络请求
+    #[tokio::test]
+    async fn test_openai_missing_key_returns_local_error() {
+        let client = LLMClient::new(
+            LLMProvider::OpenAI,
+            DEFAULT_OPENAI_ENDPOINT.to_string(),
+            None,
+            DEFAULT_OPENAI_MODEL.to_string(),
+        );
+        let request = ChatCompletionRequest {
+            system_prompt: None,
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".to_string(),
+            }],
+            max_tokens: None,
+            temperature: None,
+            response_format: None,
+        };
+
+        let result = client.chat_completion(request).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("缺少 API Key"));
+    }
+
+    /// 测试 — OpenAI-compatible 响应解析 token、模型和截断标记
+    #[test]
+    fn test_parse_openai_chat_response() {
+        let body = r#"{
+            "model": "deepseek-test",
+            "choices": [
+                {
+                    "message": { "role": "assistant", "content": "{\"ok\":true}" },
+                    "finish_reason": "length"
+                }
+            ],
+            "usage": { "total_tokens": 123 }
+        }"#;
+
+        let response = parse_openai_chat_response(body, "fallback").unwrap();
+        assert_eq!(response.content, "{\"ok\":true}");
+        assert_eq!(response.tokens_used, Some(123));
+        assert_eq!(response.model, "deepseek-test");
+        assert!(response.truncated);
+    }
+
     /// 测试 — Mock 客户端返回固定 token 数量
     /// 验证：Mock 模式时 tokens_used 为 42 且 truncated 为 false
     #[tokio::test]
@@ -280,6 +597,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            response_format: None,
         };
 
         let response = client.chat_completion(request).await.unwrap();
@@ -311,6 +629,7 @@ mod tests {
             ],
             max_tokens: None,
             temperature: None,
+            response_format: None,
         };
 
         let response = client.chat_completion(request).await.unwrap();
@@ -338,12 +657,13 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            response_format: None,
         };
 
         let result = client.chat_completion(request).await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("尚未实现") || err.contains("Mock"));
+        assert!(err.contains("尚未接入") || err.contains("OpenAI-compatible"));
     }
 
     /// 测试 — LLMProvider 的序列化
@@ -365,7 +685,10 @@ mod tests {
         let provider = LLMProvider::Custom("https://my-api.com/llm".to_string());
         let json = serde_json::to_string(&provider).unwrap();
         let restored: LLMProvider = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored, LLMProvider::Custom("https://my-api.com/llm".to_string()));
+        assert_eq!(
+            restored,
+            LLMProvider::Custom("https://my-api.com/llm".to_string())
+        );
     }
 
     /// 测试 — ChatMessage 的序列化
@@ -397,6 +720,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            response_format: None,
         };
 
         let result = client.chat_completion(request).await;

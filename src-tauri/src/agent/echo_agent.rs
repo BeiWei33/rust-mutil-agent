@@ -44,25 +44,19 @@ impl Agent for EchoAgent {
         vec![Capability::chat()]
     }
 
-    async fn handle_message(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError> {
+    async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         self.count += 1;
 
-        // 构建回显消息
-        let reply = AgentMessage::new(
-            self.name(),
-            &msg.from,
-            &format!("[Echo #{count}] {content}", count = self.count, content = msg.content),
-        )
-        .with_type("echo_reply");
+        // 构建回显消息，并保留 task_id / reply_id 等回复链路元数据。
+        let reply = msg
+            .reply_to(&format!(
+                "[Echo #{count}] {content}",
+                count = self.count,
+                content = msg.content
+            ))
+            .with_type("echo_reply");
 
-        tracing::debug!(
-            "EchoAgent 处理第 {} 条消息，来自: {}",
-            self.count,
-            msg.from
-        );
+        tracing::debug!("EchoAgent 处理第 {} 条消息，来自: {}", self.count, msg.from);
 
         Ok(vec![reply])
     }
@@ -136,8 +130,7 @@ mod tests {
     async fn test_echo_agent_reply_metadata() {
         let mut agent = EchoAgent::new();
 
-        let msg = AgentMessage::new("Alice", "Echo", "你好")
-            .with_task_id("task-123");
+        let msg = AgentMessage::new("Alice", "Echo", "你好").with_task_id("task-123");
 
         let replies = agent.handle_message(msg).await.unwrap();
         let reply = &replies[0];
@@ -146,6 +139,7 @@ mod tests {
         assert_eq!(reply.from, "Echo");
         assert_eq!(reply.to, "Alice");
         assert_eq!(reply.msg_type, "echo_reply");
+        assert_eq!(reply.task_id, Some("task-123".to_string()));
         // 回显时保留唯一消息 ID（和原消息不同）
         assert_ne!(reply.id, "");
     }

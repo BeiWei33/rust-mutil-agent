@@ -1,0 +1,305 @@
+/**
+ * 项目理解面板
+ * 展示项目快照、文件索引、文本搜索和只读文件预览。
+ */
+
+import { useEffect, useMemo, useState } from "react";
+import { useAgentStore } from "@/store/useAgentStore";
+import type { WorkspaceEntry } from "@/types";
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function isReadable(entry: WorkspaceEntry): boolean {
+  if (entry.isDir) return false;
+  return [
+    "rs",
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "json",
+    "toml",
+    "md",
+    "css",
+    "html",
+    "yml",
+    "yaml",
+    "txt",
+  ].includes((entry.extension || "").toLowerCase());
+}
+
+export default function ProjectPanel() {
+  const snapshot = useAgentStore((s) => s.projectSnapshot);
+  const files = useAgentStore((s) => s.projectFiles);
+  const loading = useAgentStore((s) => s.projectLoading);
+  const error = useAgentStore((s) => s.projectError);
+  const selectedFile = useAgentStore((s) => s.selectedProjectFile);
+  const fileLoading = useAgentStore((s) => s.fileLoading);
+  const searchResults = useAgentStore((s) => s.searchResults);
+  const searchTruncated = useAgentStore((s) => s.searchTruncated);
+  const searchLoading = useAgentStore((s) => s.searchLoading);
+  const fetchProjectOverview = useAgentStore((s) => s.fetchProjectOverview);
+  const readProjectFile = useAgentStore((s) => s.readProjectFile);
+  const searchProjectText = useAgentStore((s) => s.searchProjectText);
+  const clearProjectError = useAgentStore((s) => s.clearProjectError);
+
+  const [filter, setFilter] = useState("");
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    fetchProjectOverview();
+  }, [fetchProjectOverview]);
+
+  const visibleFiles = useMemo(() => {
+    const text = filter.trim().toLowerCase();
+    const candidates = files.filter(isReadable);
+    if (!text) return candidates.slice(0, 120);
+    return candidates
+      .filter((file) => file.path.toLowerCase().includes(text))
+      .slice(0, 120);
+  }, [files, filter]);
+
+  const handleSearch = () => {
+    searchProjectText(query);
+  };
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between border-b border-zinc-800/50 px-6 py-3">
+        <div>
+          <h2 className="text-lg font-semibold text-zinc-200">项目</h2>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            {snapshot ? snapshot.name : "workspace"}
+          </p>
+        </div>
+        <button
+          onClick={fetchProjectOverview}
+          disabled={loading}
+          className="btn-ghost px-3 py-1.5 text-xs"
+          title="刷新项目"
+        >
+          {loading ? "刷新中..." : "刷新"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mx-6 mt-4 flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">
+          <span>{error}</span>
+          <button className="btn-ghost px-2 py-1 text-xs" onClick={clearProjectError}>
+            关闭
+          </button>
+        </div>
+      )}
+
+      <div className="grid min-h-0 flex-1 grid-cols-[380px_minmax(0,1fr)] overflow-hidden">
+        <aside className="min-h-0 overflow-y-auto border-r border-zinc-800/50 px-5 py-5">
+          {snapshot ? (
+            <div className="space-y-5">
+              <section>
+                <h3 className="text-sm font-medium text-zinc-300">技术栈</h3>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {snapshot.techStack.map((item) => (
+                    <span
+                      key={item}
+                      className="rounded-md border border-primary-500/20 bg-primary-500/10 px-2 py-1 text-xs text-primary-200"
+                    >
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <h3 className="text-sm font-medium text-zinc-300">Manifest</h3>
+                <div className="mt-3 space-y-2">
+                  {snapshot.manifests.map((manifest) => (
+                    <button
+                      key={manifest.path}
+                      type="button"
+                      onClick={() => readProjectFile(manifest.path)}
+                      className="w-full rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 text-left hover:border-zinc-700"
+                    >
+                      <div className="text-xs text-zinc-500">{manifest.kind}</div>
+                      <div className="mt-1 text-sm text-zinc-200">{manifest.path}</div>
+                      <div className="mt-1 text-xs text-zinc-500">{manifest.summary}</div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <h3 className="text-sm font-medium text-zinc-300">推荐命令</h3>
+                <div className="mt-3 space-y-2">
+                  {snapshot.recommendedCommands.map((command) => (
+                    <div
+                      key={`${command.workingDir}-${command.command}`}
+                      className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm text-zinc-200">{command.label}</span>
+                        <span className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400">
+                          {command.kind}
+                        </span>
+                      </div>
+                      <code className="mt-2 block rounded-md bg-zinc-950 px-2 py-1 text-xs text-primary-200">
+                        {command.command}
+                      </code>
+                      <div className="mt-1 text-[11px] text-zinc-500">
+                        {command.workingDir}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <h3 className="text-sm font-medium text-zinc-300">关键文件</h3>
+                <div className="mt-3 space-y-2">
+                  {snapshot.importantFiles.map((file) => (
+                    <button
+                      key={file.path}
+                      type="button"
+                      onClick={() => readProjectFile(file.path)}
+                      className="w-full rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 text-left hover:border-zinc-700"
+                    >
+                      <div className="text-xs text-zinc-500">{file.kind}</div>
+                      <div className="mt-1 text-sm text-zinc-200">{file.path}</div>
+                      <div className="mt-1 text-xs leading-relaxed text-zinc-500">
+                        {file.description}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </div>
+          ) : (
+            <div className="py-12 text-center text-sm text-zinc-500">
+              {loading ? "正在扫描项目..." : "暂无项目快照"}
+            </div>
+          )}
+        </aside>
+
+        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
+          <div className="border-b border-zinc-800/50 px-5 py-4">
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+                <input
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  placeholder="过滤文件路径"
+                  className="w-full bg-transparent px-2 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-500"
+                />
+              </div>
+              <div className="flex gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") handleSearch();
+                  }}
+                  placeholder="搜索源码文本"
+                  className="min-w-0 flex-1 bg-transparent px-2 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleSearch}
+                  disabled={!query.trim() || searchLoading}
+                  className="btn-primary px-3 py-2 text-xs"
+                >
+                  {searchLoading ? "搜索中..." : "搜索"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid min-h-0 grid-cols-[360px_minmax(0,1fr)] overflow-hidden">
+            <div className="min-h-0 overflow-y-auto border-r border-zinc-800/50 px-4 py-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-medium text-zinc-300">文件</h3>
+                <span className="text-xs text-zinc-500">{visibleFiles.length}</span>
+              </div>
+              <div className="space-y-2">
+                {visibleFiles.map((file) => (
+                  <button
+                    key={file.path}
+                    type="button"
+                    onClick={() => readProjectFile(file.path)}
+                    className={`w-full rounded-lg border p-3 text-left transition-colors ${
+                      selectedFile?.path === file.path
+                        ? "border-primary-500/50 bg-primary-500/10"
+                        : "border-zinc-800 bg-zinc-900/35 hover:border-zinc-700"
+                    }`}
+                  >
+                    <div className="truncate text-sm text-zinc-200">{file.path}</div>
+                    <div className="mt-1 text-[11px] text-zinc-500">
+                      {formatBytes(file.sizeBytes)}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="min-h-0 overflow-y-auto px-5 py-4">
+              {searchResults.length > 0 && (
+                <section className="mb-5">
+                  <div className="mb-3 flex items-center gap-2">
+                    <h3 className="text-sm font-medium text-zinc-300">搜索结果</h3>
+                    {searchTruncated && (
+                      <span className="text-xs text-amber-300">结果已截断</span>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {searchResults.map((match) => (
+                      <button
+                        key={`${match.path}-${match.line}-${match.column}`}
+                        type="button"
+                        onClick={() => readProjectFile(match.path)}
+                        className="w-full rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 text-left hover:border-zinc-700"
+                      >
+                        <div className="text-xs text-zinc-500">
+                          {match.path}:{match.line}:{match.column}
+                        </div>
+                        <div className="mt-1 text-sm text-zinc-300">{match.preview}</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              <section>
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-zinc-300">预览</h3>
+                  {selectedFile && (
+                    <span className="text-xs text-zinc-500">
+                      {formatBytes(selectedFile.sizeBytes)}
+                    </span>
+                  )}
+                </div>
+                {fileLoading ? (
+                  <div className="py-16 text-center text-sm text-zinc-500">读取中...</div>
+                ) : selectedFile ? (
+                  <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
+                    <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                      {selectedFile.path}
+                    </div>
+                    <pre className="max-h-[70vh] overflow-auto p-4 text-xs leading-relaxed text-zinc-300">
+                      <code>{selectedFile.content}</code>
+                    </pre>
+                  </div>
+                ) : (
+                  <div className="py-16 text-center text-sm text-zinc-500">
+                    选择一个文本文件
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}

@@ -1,7 +1,7 @@
 //! 记忆 Agent（MemoryAgent）
 //!
 //! 管理短期对话记忆与长期知识存储。
-//! 
+//!
 //! # 功能
 //! - **短期记忆**：维护对话轮次，提供上下文给其他 Agent
 //! - **长期记忆**：将信息存入 SQLite 数据库，支持结构化查询
@@ -153,9 +153,9 @@ impl MemoryAgent {
         db: &Mutex<rusqlite::Connection>,
         turn: &ConversationTurn,
     ) -> Result<(), AgentError> {
-        let conn = db.lock().map_err(|e| {
-            AgentError::Internal(format!("数据库锁获取失败: {e}"))
-        })?;
+        let conn = db
+            .lock()
+            .map_err(|e| AgentError::Internal(format!("数据库锁获取失败: {e}")))?;
 
         conn.execute(
             "INSERT OR REPLACE INTO conversations (id, session_id, role, content, agent_name)
@@ -189,10 +189,7 @@ impl Agent for MemoryAgent {
         vec![Capability::memory(), Capability::retrieval()]
     }
 
-    async fn handle_message(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError> {
+    async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         self.count += 1;
 
         // 根据消息类型执行不同操作
@@ -215,10 +212,7 @@ impl Agent for MemoryAgent {
 
 impl MemoryAgent {
     /// 处理存储请求
-    async fn handle_store(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError> {
+    async fn handle_store(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         let turn = ConversationTurn {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id.clone(),
@@ -261,7 +255,11 @@ impl MemoryAgent {
         let result = if relevant.is_empty() {
             "未找到相关记忆".to_string()
         } else {
-            format!("找到 {} 条相关记忆:\n{}", relevant.len(), relevant.join("\n"))
+            format!(
+                "找到 {} 条相关记忆:\n{}",
+                relevant.len(),
+                relevant.join("\n")
+            )
         };
 
         let context = serde_json::json!({
@@ -323,13 +321,11 @@ mod tests {
         let mut agent = MemoryAgent::new();
 
         // 存储一条消息
-        let store_msg = AgentMessage::new("User", "Memory", "今天天气很好")
-            .with_type("store");
+        let store_msg = AgentMessage::new("User", "Memory", "今天天气很好").with_type("store");
         agent.handle_message(store_msg).await.unwrap();
 
         // 检索消息
-        let query_msg = AgentMessage::new("User", "Memory", "天气")
-            .with_type("query");
+        let query_msg = AgentMessage::new("User", "Memory", "天气").with_type("query");
         let replies = agent.handle_message(query_msg).await.unwrap();
 
         assert_eq!(replies[0].msg_type, "memory_retrieved");
@@ -349,8 +345,7 @@ mod tests {
 
         // 存储超过缓冲区的消息
         for i in 0..60 {
-            let msg = AgentMessage::new("User", "Memory", &format!("消息 {i}"))
-                .with_type("store");
+            let msg = AgentMessage::new("User", "Memory", &format!("消息 {i}")).with_type("store");
             agent.handle_message(msg).await.unwrap();
         }
 
@@ -382,13 +377,11 @@ mod tests {
         let mut agent = MemoryAgent::new();
 
         // 先存储一些消息
-        let store = AgentMessage::new("User", "Memory", "今天天气真好")
-            .with_type("store");
+        let store = AgentMessage::new("User", "Memory", "今天天气真好").with_type("store");
         agent.handle_message(store).await.unwrap();
 
         // 用不相关的关键词检索
-        let query = AgentMessage::new("User", "Memory", "量子计算")
-            .with_type("query");
+        let query = AgentMessage::new("User", "Memory", "量子计算").with_type("query");
         let replies = agent.handle_message(query).await.unwrap();
 
         assert_eq!(replies[0].msg_type, "memory_retrieved");
@@ -402,15 +395,14 @@ mod tests {
         let mut agent = MemoryAgent::new();
 
         // 存储
-        agent.handle_message(
-            AgentMessage::new("User", "Memory", "Rust 编程").with_type("store")
-        ).await.unwrap();
+        agent
+            .handle_message(AgentMessage::new("User", "Memory", "Rust 编程").with_type("store"))
+            .await
+            .unwrap();
 
         // 用 recall 类型检索
         let replies = agent
-            .handle_message(
-                AgentMessage::new("User", "Memory", "Rust").with_type("recall")
-            )
+            .handle_message(AgentMessage::new("User", "Memory", "Rust").with_type("recall"))
             .await
             .unwrap();
 
@@ -465,8 +457,7 @@ mod tests {
 
         // 存储 10 条消息
         for i in 0..10 {
-            let msg = AgentMessage::new("User", "Memory", &format!("消息{i}"))
-                .with_type("store");
+            let msg = AgentMessage::new("User", "Memory", &format!("消息{i}")).with_type("store");
             agent.handle_message(msg).await.unwrap();
         }
 
@@ -484,19 +475,23 @@ mod tests {
         let mut agent = MemoryAgent::new();
 
         // 存储两条消息
-        agent.handle_message(
-            AgentMessage::new("User", "Memory", "学习 Rust 编程语言").with_type("store")
-        ).await.unwrap();
+        agent
+            .handle_message(
+                AgentMessage::new("User", "Memory", "学习 Rust 编程语言").with_type("store"),
+            )
+            .await
+            .unwrap();
 
-        agent.handle_message(
-            AgentMessage::new("User", "Memory", "学习 TypeScript 前端开发").with_type("store")
-        ).await.unwrap();
+        agent
+            .handle_message(
+                AgentMessage::new("User", "Memory", "学习 TypeScript 前端开发").with_type("store"),
+            )
+            .await
+            .unwrap();
 
         // 用 retrieve 类型检索 Rust 相关内容
         let replies = agent
-            .handle_message(
-                AgentMessage::new("User", "Memory", "Rust").with_type("retrieve")
-            )
+            .handle_message(AgentMessage::new("User", "Memory", "Rust").with_type("retrieve"))
             .await
             .unwrap();
 

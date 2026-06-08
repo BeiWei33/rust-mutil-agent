@@ -1,7 +1,7 @@
 //! 执行 Agent（ExecutorAgent）
 //!
 //! 负责执行具体操作：API 调用、本地命令、文件操作等。
-//! 
+//!
 //! # 职责
 //! - 接收 Planner 或其他 Agent 的执行指令
 //! - 调用外部 API（搜索、HTTP 请求等）
@@ -70,10 +70,7 @@ impl Agent for ExecutorAgent {
         vec![Capability::code_execution()]
     }
 
-    async fn handle_message(
-        &mut self,
-        msg: AgentMessage,
-    ) -> Result<Vec<AgentMessage>, AgentError> {
+    async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         self.count += 1;
 
         tracing::info!(
@@ -103,9 +100,8 @@ impl Agent for ExecutorAgent {
 
         match result {
             Ok(exec_result) => {
-                let context = serde_json::to_value(&exec_result).map_err(|e| {
-                    AgentError::Serialization(e)
-                })?;
+                let context =
+                    serde_json::to_value(&exec_result).map_err(|e| AgentError::Serialization(e))?;
 
                 let reply = msg
                     .reply_to(&format!("执行完成: {}", exec_result.output))
@@ -156,9 +152,10 @@ impl ExecutorAgent {
             }
         };
 
-        let resp = response.send().await.map_err(|e| {
-            AgentError::Internal(format!("HTTP 请求失败: {e}"))
-        })?;
+        let resp = response
+            .send()
+            .await
+            .map_err(|e| AgentError::Internal(format!("HTTP 请求失败: {e}")))?;
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -178,10 +175,7 @@ impl ExecutorAgent {
     /// 模拟搜索操作（开发阶段占位）
     ///
     /// 未来应替换为真实的搜索引擎 API 调用。
-    async fn execute_mock_search(
-        &self,
-        query: &str,
-    ) -> Result<ExecutionResult, AgentError> {
+    async fn execute_mock_search(&self, query: &str) -> Result<ExecutionResult, AgentError> {
         let start = std::time::Instant::now();
 
         // 模拟搜索延迟
@@ -284,21 +278,24 @@ mod tests {
         let mut executor = ExecutorAgent::new();
 
         // 第一次调用
-        executor.handle_message(
-            AgentMessage::new("P", "E", "任务1")
-        ).await.unwrap();
+        executor
+            .handle_message(AgentMessage::new("P", "E", "任务1"))
+            .await
+            .unwrap();
         assert_eq!(executor.count, 1);
 
         // 第二次调用
-        executor.handle_message(
-            AgentMessage::new("P", "E", "任务2")
-        ).await.unwrap();
+        executor
+            .handle_message(AgentMessage::new("P", "E", "任务2"))
+            .await
+            .unwrap();
         assert_eq!(executor.count, 2);
 
         // 第三次调用
-        executor.handle_message(
-            AgentMessage::new("P", "E", "任务3")
-        ).await.unwrap();
+        executor
+            .handle_message(AgentMessage::new("P", "E", "任务3"))
+            .await
+            .unwrap();
         assert_eq!(executor.count, 3);
     }
 
@@ -338,8 +335,7 @@ mod tests {
         let mut executor = ExecutorAgent::new();
 
         // msg_type 为 "http_request" 但 context 中没有 url 应返回错误
-        let msg = AgentMessage::new("Planner", "Executor", "HTTP 请求")
-            .with_type("http_request");
+        let msg = AgentMessage::new("Planner", "Executor", "HTTP 请求").with_type("http_request");
 
         let replies = executor.handle_message(msg).await.unwrap();
 
