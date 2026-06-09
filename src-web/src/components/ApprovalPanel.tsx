@@ -11,6 +11,7 @@ import type {
   ApprovalStatus,
   PatchApplyResult,
   PatchProposal,
+  PatchRevertResult,
   ProjectCommandRunResponse,
 } from "@/types";
 
@@ -113,25 +114,31 @@ function ApprovalItem({
   loading,
   executionLoading,
   patchApplyLoading,
+  patchRevertLoading,
   executedRun,
   patchProposal,
   patchApplyResult,
+  patchRevertResult,
   onApprove,
   onReject,
   onExecute,
   onApplyPatch,
+  onRevertPatch,
 }: {
   approval: ApprovalRequest;
   loading: boolean;
   executionLoading: boolean;
   patchApplyLoading: boolean;
+  patchRevertLoading: boolean;
   executedRun?: ProjectCommandRunResponse;
   patchProposal?: PatchProposal;
   patchApplyResult?: PatchApplyResult | null;
+  patchRevertResult?: PatchRevertResult | null;
   onApprove: () => void;
   onReject: () => void;
   onExecute: () => void;
   onApplyPatch: () => void;
+  onRevertPatch: () => void;
 }) {
   const pending = approval.status === "pending";
   const canExecuteCommand =
@@ -140,10 +147,18 @@ function ApprovalItem({
     approval.actionType === "workspace.applyPatch"
       ? patchApprovalPayload(approval.actionPayload)
       : null;
+  const patchReverted =
+    patchProposal?.status === "reverted" ||
+    (patchRevertResult?.patchId === patchPayload?.patchId &&
+      patchRevertResult.status === "reverted");
   const patchApplied =
-    patchProposal?.status === "applied" ||
-    (patchApplyResult?.patchId === patchPayload?.patchId && patchApplyResult.status === "applied");
-  const canApplyPatch = approval.status === "approved" && !!patchPayload && !patchApplied;
+    !patchReverted &&
+    (patchProposal?.status === "applied" ||
+      (patchApplyResult?.patchId === patchPayload?.patchId &&
+        patchApplyResult.status === "applied"));
+  const canApplyPatch =
+    approval.status === "approved" && !!patchPayload && !patchApplied && !patchReverted;
+  const canRevertPatch = approval.status === "approved" && !!patchPayload && patchApplied && !patchReverted;
 
   return (
     <article className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
@@ -156,7 +171,13 @@ function ApprovalItem({
           </div>
           <p className="mt-2 text-sm leading-relaxed text-zinc-400">{approval.reason}</p>
         </div>
-        {(pending || canExecuteCommand || executedRun || canApplyPatch || patchApplied) && (
+        {(pending ||
+          canExecuteCommand ||
+          executedRun ||
+          canApplyPatch ||
+          canRevertPatch ||
+          patchApplied ||
+          patchReverted) && (
           <div className="flex shrink-0 gap-2">
             {pending && (
               <>
@@ -198,6 +219,16 @@ function ApprovalItem({
                 {patchApplyLoading ? "应用中..." : "应用补丁"}
               </button>
             )}
+            {canRevertPatch && (
+              <button
+                type="button"
+                onClick={onRevertPatch}
+                disabled={patchRevertLoading}
+                className="rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200 transition-colors hover:border-amber-400/40 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {patchRevertLoading ? "回滚中..." : "回滚补丁"}
+              </button>
+            )}
             {executedRun && (
               <span
                 className={`rounded-md border px-3 py-1.5 text-xs ${
@@ -212,6 +243,11 @@ function ApprovalItem({
             {patchApplied && (
               <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200">
                 已应用
+              </span>
+            )}
+            {patchReverted && (
+              <span className="rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200">
+                已回滚
               </span>
             )}
           </div>
@@ -280,6 +316,17 @@ function ApprovalItem({
           {formatTime(patchApplyResult?.appliedAt ?? patchProposal?.appliedAt ?? approval.updatedAt)}
         </div>
       )}
+
+      {patchReverted && (
+        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300">
+          补丁回滚：
+          {patchRevertResult?.files.length ?? patchProposal?.files.length ?? patchPayload?.files.length ?? 0}
+          {" 文件 · "}
+          {formatTime(
+            patchRevertResult?.revertedAt ?? patchProposal?.revertedAt ?? approval.updatedAt
+          )}
+        </div>
+      )}
     </article>
   );
 }
@@ -291,7 +338,9 @@ export default function ApprovalPanel() {
   const approvalDecisionLoadingId = useAgentStore((s) => s.approvalDecisionLoadingId);
   const approvalExecutionLoadingId = useAgentStore((s) => s.approvalExecutionLoadingId);
   const patchApplyLoadingId = useAgentStore((s) => s.patchApplyLoadingId);
+  const patchRevertLoadingId = useAgentStore((s) => s.patchRevertLoadingId);
   const lastPatchApplyResult = useAgentStore((s) => s.lastPatchApplyResult);
+  const lastPatchRevertResult = useAgentStore((s) => s.lastPatchRevertResult);
   const commandRuns = useAgentStore((s) => s.commandRuns);
   const patchProposals = useAgentStore((s) => s.patchProposals);
   const fetchApprovals = useAgentStore((s) => s.fetchApprovals);
@@ -299,6 +348,7 @@ export default function ApprovalPanel() {
   const decideApproval = useAgentStore((s) => s.decideApproval);
   const runApprovedCommand = useAgentStore((s) => s.runApprovedCommand);
   const applyApprovedPatch = useAgentStore((s) => s.applyApprovedPatch);
+  const revertAppliedPatch = useAgentStore((s) => s.revertAppliedPatch);
   const [filter, setFilter] = useState<ApprovalStatus | undefined>("pending");
 
   useEffect(() => {
@@ -375,6 +425,10 @@ export default function ApprovalPanel() {
                 lastPatchApplyResult?.patchId === patchPayload?.patchId
                   ? lastPatchApplyResult
                   : null;
+              const patchRevertResult =
+                lastPatchRevertResult?.patchId === patchPayload?.patchId
+                  ? lastPatchRevertResult
+                  : null;
 
               return (
                 <ApprovalItem
@@ -383,13 +437,18 @@ export default function ApprovalPanel() {
                   loading={approvalDecisionLoadingId === approval.id}
                   executionLoading={approvalExecutionLoadingId === approval.id}
                   patchApplyLoading={patchApplyLoadingId === approval.id}
+                  patchRevertLoading={
+                    !!patchPayload && patchRevertLoadingId === patchPayload.patchId
+                  }
                   executedRun={commandRuns.find((run) => run.approvalId === approval.id)}
                   patchProposal={patchProposal}
                   patchApplyResult={patchApplyResult}
+                  patchRevertResult={patchRevertResult}
                   onApprove={() => decideApproval(approval.id, true)}
                   onReject={() => decideApproval(approval.id, false)}
                   onExecute={() => runApprovedCommand(approval.id)}
                   onApplyPatch={() => applyApprovedPatch(approval.id)}
+                  onRevertPatch={() => patchPayload && revertAppliedPatch(patchPayload.patchId)}
                 />
               );
             })}

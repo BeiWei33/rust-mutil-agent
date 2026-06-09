@@ -197,6 +197,15 @@ interface PatchVerificationArtifact {
   runs?: PatchVerificationRun[];
 }
 
+interface PatchRevertedArtifact {
+  kind: "patchReverted";
+  patchId: string;
+  approvalId?: string;
+  summary?: string;
+  files?: string[];
+  revertedAt?: string;
+}
+
 function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
   if (!value || typeof value !== "object") return null;
   const artifact = value as {
@@ -219,6 +228,31 @@ function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
       ? artifact.files.filter((file): file is string => typeof file === "string")
       : undefined,
     appliedAt: typeof artifact.appliedAt === "string" ? artifact.appliedAt : undefined,
+  };
+}
+
+function patchRevertedArtifact(value: unknown): PatchRevertedArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as {
+    kind?: unknown;
+    patchId?: unknown;
+    approvalId?: unknown;
+    summary?: unknown;
+    files?: unknown;
+    revertedAt?: unknown;
+  };
+  if (artifact.kind !== "patchReverted" || typeof artifact.patchId !== "string") {
+    return null;
+  }
+  return {
+    kind: "patchReverted",
+    patchId: artifact.patchId,
+    approvalId: typeof artifact.approvalId === "string" ? artifact.approvalId : undefined,
+    summary: typeof artifact.summary === "string" ? artifact.summary : undefined,
+    files: Array.isArray(artifact.files)
+      ? artifact.files.filter((file): file is string => typeof file === "string")
+      : undefined,
+    revertedAt: typeof artifact.revertedAt === "string" ? artifact.revertedAt : undefined,
   };
 }
 
@@ -319,6 +353,40 @@ function ArtifactRow({ artifact }: { artifact: unknown }) {
         {patchArtifact.files && patchArtifact.files.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-2">
             {patchArtifact.files.map((file) => (
+              <span
+                key={file}
+                className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300"
+              >
+                {file}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const revertedArtifact = patchRevertedArtifact(artifact);
+  if (revertedArtifact) {
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-zinc-200">
+              {revertedArtifact.summary || revertedArtifact.patchId}
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {revertedArtifact.files?.length ?? 0} 文件
+              {revertedArtifact.revertedAt && ` · ${formatTime(revertedArtifact.revertedAt)}`}
+            </div>
+          </div>
+          <span className="rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-200">
+            Rollback
+          </span>
+        </div>
+        {revertedArtifact.files && revertedArtifact.files.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {revertedArtifact.files.map((file) => (
               <span
                 key={file}
                 className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300"

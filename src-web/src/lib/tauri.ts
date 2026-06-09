@@ -36,7 +36,9 @@ import type {
   CreatePatchProposalRequest,
   CreatePatchProposalResponse,
   ApplyApprovedPatchRequest,
+  RevertAppliedPatchRequest,
   PatchApplyResult,
+  PatchRevertResult,
   PatchProposal,
   PatchProposalListResponse,
 } from "@/types";
@@ -300,6 +302,19 @@ export async function applyApprovedPatch(
   request: ApplyApprovedPatchRequest
 ): Promise<PatchApplyResult> {
   return invoke<PatchApplyResult>(`${CMD_PREFIX}apply_approved_patch`, {
+    request,
+  });
+}
+
+/**
+ * 回滚已应用补丁提案
+ * @param request 补丁 ID
+ * @returns 补丁回滚结果
+ */
+export async function revertAppliedPatch(
+  request: RevertAppliedPatchRequest
+): Promise<PatchRevertResult> {
+  return invoke<PatchRevertResult>(`${CMD_PREFIX}revert_applied_patch`, {
     request,
   });
 }
@@ -938,6 +953,10 @@ async function mockCreatePatchProposal(
     requestedBy: request.requestedBy || "ProjectPanel",
     createdAt: now,
     updatedAt: now,
+    appliedAt: null,
+    appliedBy: null,
+    revertedAt: null,
+    revertedBy: null,
   };
   const approval: ApprovalRequest = {
     id: generateId(),
@@ -1016,6 +1035,8 @@ async function mockApplyApprovedPatch(
     status: "applied",
     appliedAt,
     appliedBy: proposal.appliedBy || "user",
+    revertedAt: null,
+    revertedBy: null,
     updatedAt: appliedAt,
   };
   MOCK_PATCH_PROPOSALS = MOCK_PATCH_PROPOSALS.map((item) =>
@@ -1166,6 +1187,90 @@ async function mockApplyApprovedPatch(
   return result;
 }
 
+async function mockRevertAppliedPatch(
+  request: RevertAppliedPatchRequest
+): Promise<PatchRevertResult> {
+  await new Promise((r) => setTimeout(r, 180));
+
+  const proposal = MOCK_PATCH_PROPOSALS.find((item) => item.id === request.patchId);
+  if (!proposal) throw new Error("找不到对应的补丁提案。");
+  if (proposal.status !== "applied" && proposal.status !== "reverted") {
+    throw new Error("补丁提案尚未应用，不能回滚。");
+  }
+
+  const alreadyReverted = proposal.status === "reverted";
+  const revertedAt = alreadyReverted && proposal.revertedAt
+    ? proposal.revertedAt
+    : new Date().toISOString();
+  const updated: PatchProposal = {
+    ...proposal,
+    status: "reverted",
+    revertedAt,
+    revertedBy: proposal.revertedBy || "user",
+    updatedAt: revertedAt,
+  };
+  MOCK_PATCH_PROPOSALS = MOCK_PATCH_PROPOSALS.map((item) =>
+    item.id === updated.id ? updated : item
+  );
+
+  const result: PatchRevertResult = {
+    patchId: updated.id,
+    status: updated.status,
+    files: updated.files.map((file) => file.path),
+    revertedAt,
+    alreadyReverted,
+  };
+
+  if (updated.taskId) {
+    const artifact = {
+      kind: "patchReverted",
+      patchId: updated.id,
+      approvalId: updated.approvalId,
+      summary: updated.summary,
+      status: result.status,
+      files: result.files,
+      revertedAt: result.revertedAt,
+      revertedBy: updated.revertedBy,
+      alreadyReverted: result.alreadyReverted,
+      rollbackDiff: updated.files
+        .map((file) => buildMockPatchDiff(file.path, file.newContent, file.oldContent))
+        .join("\n"),
+    };
+    const targetTask = MOCK_TASKS.find((task) => task.id === updated.taskId);
+    const hasRevertArtifact = (task: Task) =>
+      task.artifacts.some((item) => {
+        const value = item as { kind?: unknown; patchId?: unknown };
+        return value.kind === "patchReverted" && value.patchId === updated.id;
+      });
+    const shouldAppendArtifact = !!targetTask && !hasRevertArtifact(targetTask);
+    MOCK_TASKS = MOCK_TASKS.map((task) =>
+      task.id === updated.taskId && shouldAppendArtifact
+        ? {
+            ...task,
+            artifacts: [...task.artifacts, artifact],
+            updatedAt: revertedAt,
+          }
+        : task
+    );
+    if (shouldAppendArtifact) {
+      MOCK_EVENTS[updated.taskId] = [
+        ...(MOCK_EVENTS[updated.taskId] ?? []),
+        {
+          id: generateId(),
+          taskId: updated.taskId,
+          stepId: updated.stepId ?? null,
+          kind: "artifactCreated",
+          message: `补丁已回滚：${updated.summary}`,
+          payload: artifact,
+          createdAt: revertedAt,
+        },
+      ];
+    }
+  }
+
+  return result;
+}
+
 async function mockListApprovalRequests(
   status?: ApprovalStatus,
   limit = 50
@@ -1261,6 +1366,7 @@ export const api = {
   listPatchProposals: isTauri() ? listPatchProposals : mockListPatchProposals,
   getPatchProposal: isTauri() ? getPatchProposal : mockGetPatchProposal,
   applyApprovedPatch: isTauri() ? applyApprovedPatch : mockApplyApprovedPatch,
+  revertAppliedPatch: isTauri() ? revertAppliedPatch : mockRevertAppliedPatch,
   listApprovalRequests: isTauri() ? listApprovalRequests : mockListApprovalRequests,
   approveAction: isTauri() ? approveAction : mockApproveAction,
   healthCheck: isTauri() ? healthCheck : mockHealthCheck,

@@ -4,8 +4,9 @@ pub mod patch;
 
 use crate::error::AgentError;
 pub use patch::{
-    apply_patch_proposal, build_patch_proposal, CreatePatchProposalRequest, PatchApplyResult,
-    PatchProposal, PatchProposalListResponse, PatchProposalStatus, PatchProposalStore,
+    apply_patch_proposal, build_patch_proposal, revert_patch_proposal, CreatePatchProposalRequest,
+    PatchApplyResult, PatchProposal, PatchProposalListResponse, PatchProposalStatus,
+    PatchProposalStore, PatchRevertResult,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;

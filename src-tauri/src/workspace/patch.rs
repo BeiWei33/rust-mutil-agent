@@ -22,6 +22,7 @@ pub enum PatchProposalStatus {
     Approved,
     Rejected,
     Applied,
+    Reverted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +77,10 @@ pub struct PatchProposal {
     pub applied_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub applied_by: Option<String>,
+    #[serde(default)]
+    pub reverted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub reverted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +97,16 @@ pub struct PatchApplyResult {
     pub files: Vec<String>,
     pub applied_at: DateTime<Utc>,
     pub already_applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchRevertResult {
+    pub patch_id: String,
+    pub status: PatchProposalStatus,
+    pub files: Vec<String>,
+    pub reverted_at: DateTime<Utc>,
+    pub already_reverted: bool,
 }
 
 /// SQLite-backed patch proposal store.
@@ -115,7 +130,16 @@ impl PatchProposal {
         self.status = PatchProposalStatus::Applied;
         self.applied_at = Some(applied_at);
         self.applied_by = applied_by;
+        self.reverted_at = None;
+        self.reverted_by = None;
         self.updated_at = applied_at;
+    }
+
+    fn mark_reverted(&mut self, reverted_at: DateTime<Utc>, reverted_by: Option<String>) {
+        self.status = PatchProposalStatus::Reverted;
+        self.reverted_at = Some(reverted_at);
+        self.reverted_by = reverted_by;
+        self.updated_at = reverted_at;
     }
 }
 
@@ -280,6 +304,8 @@ pub fn build_patch_proposal(
         updated_at: now,
         applied_at: None,
         applied_by: None,
+        reverted_at: None,
+        reverted_by: None,
     })
 }
 
@@ -348,6 +374,74 @@ pub fn apply_patch_proposal(
             .collect(),
         applied_at,
         already_applied: false,
+    })
+}
+
+pub fn revert_patch_proposal(
+    proposal: &mut PatchProposal,
+    reverted_by: Option<&str>,
+) -> Result<PatchRevertResult, AgentError> {
+    if proposal.status == PatchProposalStatus::Reverted {
+        let reverted_at = proposal.reverted_at.unwrap_or_else(|| {
+            let now = Utc::now();
+            proposal.reverted_at = Some(now);
+            now
+        });
+        return Ok(PatchRevertResult {
+            patch_id: proposal.id.clone(),
+            status: proposal.status.clone(),
+            files: proposal
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect(),
+            reverted_at,
+            already_reverted: true,
+        });
+    }
+
+    if proposal.status != PatchProposalStatus::Applied {
+        return Err(AgentError::MessageFormat(format!(
+            "补丁提案 [{}] 当前状态为 {:?}，不能回滚",
+            proposal.id, proposal.status
+        )));
+    }
+
+    let mut resolved_files = Vec::with_capacity(proposal.files.len());
+    for file in &proposal.files {
+        match file.change_type {
+            PatchChangeType::Modify => {
+                let (path, file_path) = resolve_existing_text_file(&file.path)?;
+                let current_content = fs::read_to_string(&file_path).map_err(|err| {
+                    AgentError::Internal(format!("读取当前文件失败 [{}]: {err}", path))
+                })?;
+                if current_content != file.new_content {
+                    return Err(AgentError::MessageFormat(format!(
+                        "文件 [{}] 当前内容与补丁应用结果不一致，已拒绝回滚",
+                        path
+                    )));
+                }
+                resolved_files.push((path, file_path, file.old_content.clone()));
+            }
+        }
+    }
+
+    for (path, file_path, old_content) in &resolved_files {
+        fs::write(file_path, old_content)
+            .map_err(|err| AgentError::Internal(format!("回滚补丁文件失败 [{}]: {err}", path)))?;
+    }
+
+    let reverted_at = Utc::now();
+    proposal.mark_reverted(reverted_at, clean_applied_by(reverted_by));
+    Ok(PatchRevertResult {
+        patch_id: proposal.id.clone(),
+        status: proposal.status.clone(),
+        files: resolved_files
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect(),
+        reverted_at,
+        already_reverted: false,
     })
 }
 
@@ -600,6 +694,7 @@ fn status_value(status: &PatchProposalStatus) -> &'static str {
         PatchProposalStatus::Approved => "approved",
         PatchProposalStatus::Rejected => "rejected",
         PatchProposalStatus::Applied => "applied",
+        PatchProposalStatus::Reverted => "reverted",
     }
 }
 
@@ -646,6 +741,8 @@ mod tests {
             updated_at: now,
             applied_at: None,
             applied_by: None,
+            reverted_at: None,
+            reverted_by: None,
         };
 
         store.save_proposal(&proposal).unwrap();
@@ -721,6 +818,8 @@ mod tests {
             updated_at: now,
             applied_at: None,
             applied_by: None,
+            reverted_at: None,
+            reverted_by: None,
         }
     }
 
@@ -754,5 +853,40 @@ mod tests {
         assert!(err.to_string().contains("基线不一致"));
         assert_eq!(proposal.status, PatchProposalStatus::Approved);
         assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "changed\n");
+    }
+
+    #[test]
+    fn revert_patch_proposal_restores_old_content_and_is_idempotent() {
+        let (path, test_file) = workspace_test_file("old\n");
+        let mut proposal = approved_test_proposal(path.clone(), "old\n", "new\n");
+
+        apply_patch_proposal(&mut proposal, Some("tester")).unwrap();
+        let result = revert_patch_proposal(&mut proposal, Some("tester")).unwrap();
+
+        assert_eq!(result.patch_id, proposal.id);
+        assert_eq!(result.status, PatchProposalStatus::Reverted);
+        assert_eq!(result.files, vec![path.clone()]);
+        assert!(!result.already_reverted);
+        assert_eq!(proposal.status, PatchProposalStatus::Reverted);
+        assert_eq!(proposal.reverted_by.as_deref(), Some("tester"));
+        assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "old\n");
+
+        let second = revert_patch_proposal(&mut proposal, Some("tester")).unwrap();
+        assert!(second.already_reverted);
+        assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "old\n");
+    }
+
+    #[test]
+    fn revert_patch_proposal_rejects_current_content_mismatch() {
+        let (path, test_file) = workspace_test_file("old\n");
+        let mut proposal = approved_test_proposal(path, "old\n", "new\n");
+
+        apply_patch_proposal(&mut proposal, Some("tester")).unwrap();
+        fs::write(&test_file.path, "user edit\n").unwrap();
+        let err = revert_patch_proposal(&mut proposal, Some("tester")).unwrap_err();
+
+        assert!(err.to_string().contains("应用结果不一致"));
+        assert_eq!(proposal.status, PatchProposalStatus::Applied);
+        assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "user edit\n");
     }
 }

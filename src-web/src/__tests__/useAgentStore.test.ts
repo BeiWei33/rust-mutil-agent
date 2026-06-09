@@ -31,6 +31,7 @@ vi.mock("@/lib/tauri", () => ({
     listPatchProposals: vi.fn(),
     getPatchProposal: vi.fn(),
     applyApprovedPatch: vi.fn(),
+    revertAppliedPatch: vi.fn(),
     listApprovalRequests: vi.fn(),
     approveAction: vi.fn(),
   },
@@ -55,6 +56,7 @@ const mockApi = api as unknown as {
   listPatchProposals: ReturnType<typeof vi.fn>;
   getPatchProposal: ReturnType<typeof vi.fn>;
   applyApprovedPatch: ReturnType<typeof vi.fn>;
+  revertAppliedPatch: ReturnType<typeof vi.fn>;
   listApprovalRequests: ReturnType<typeof vi.fn>;
   approveAction: ReturnType<typeof vi.fn>;
 };
@@ -123,7 +125,9 @@ describe("useAgentStore", () => {
       approvalDecisionLoadingId: null,
       approvalExecutionLoadingId: null,
       patchApplyLoadingId: null,
+      patchRevertLoadingId: null,
       lastPatchApplyResult: null,
+      lastPatchRevertResult: null,
       settings: {
         model: "deepseek-v4-pro",
         apiKey: "",
@@ -1026,6 +1030,103 @@ describe("useAgentStore", () => {
     expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(10);
     expect(mockApi.getTask).toHaveBeenCalledWith("task-1");
     expect(mockApi.getTaskEvents).toHaveBeenCalledWith("task-1");
+    expect(getState().selectedTask).toEqual(task);
+    expect(getState().taskEvents).toEqual([event]);
+  });
+
+  /// 测试 — revertAppliedPatch 成功时刷新关联任务
+  /// 验证：已应用补丁回滚后 proposal 进入 reverted，并拉取最新 artifact 时间线
+  it("revertAppliedPatch 成功时应更新补丁状态并刷新关联任务", async () => {
+    const proposal = {
+      id: "patch-revert-1",
+      taskId: "task-1",
+      stepId: "task-1-2",
+      approvalId: "approval-patch-revert-1",
+      summary: "回滚任务文件",
+      status: "applied" as const,
+      files: [
+        {
+          path: "README.md",
+          changeType: "modify" as const,
+          oldContent: "old",
+          newContent: "new",
+          diff: "diff --git a/README.md b/README.md\n-old\n+new",
+        },
+      ],
+      unifiedDiff: "diff --git a/README.md b/README.md\n-old\n+new",
+      requestedBy: "ProjectPanel",
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:02:00Z",
+      appliedAt: "2026-06-09T12:02:00Z",
+      appliedBy: "user",
+      revertedAt: null,
+      revertedBy: null,
+    };
+    const task = {
+      id: "task-1",
+      title: "回滚任务文件",
+      userGoal: "回滚任务文件",
+      status: "completed" as const,
+      steps: [],
+      artifacts: [
+        {
+          kind: "patchReverted",
+          patchId: "patch-revert-1",
+          summary: "回滚任务文件",
+          files: ["README.md"],
+          revertedAt: "2026-06-09T12:04:00Z",
+        },
+      ],
+      output: "完成",
+      error: null,
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:04:00Z",
+    };
+    const event = {
+      id: "event-revert-1",
+      taskId: "task-1",
+      stepId: "task-1-2",
+      kind: "artifactCreated" as const,
+      message: "补丁已回滚：回滚任务文件",
+      payload: task.artifacts[0],
+      createdAt: "2026-06-09T12:04:00Z",
+    };
+    const result = {
+      patchId: "patch-revert-1",
+      status: "reverted" as const,
+      files: ["README.md"],
+      revertedAt: "2026-06-09T12:04:00Z",
+      alreadyReverted: false,
+    };
+    useAgentStore.setState({ patchProposals: [proposal], lastPatchProposal: proposal });
+    mockApi.revertAppliedPatch.mockResolvedValue(result);
+    mockApi.listPatchProposals.mockResolvedValue({
+      proposals: [
+        {
+          ...proposal,
+          status: "reverted" as const,
+          revertedAt: result.revertedAt,
+          updatedAt: result.revertedAt,
+        },
+      ],
+    });
+    mockApi.getTask.mockResolvedValue(task);
+    mockApi.getTaskEvents.mockResolvedValue([event]);
+
+    await getState().revertAppliedPatch("patch-revert-1");
+
+    expect(mockApi.revertAppliedPatch).toHaveBeenCalledWith({
+      patchId: "patch-revert-1",
+    });
+    expect(mockApi.getTask).toHaveBeenCalledWith("task-1");
+    expect(mockApi.getTaskEvents).toHaveBeenCalledWith("task-1");
+    expect(getState().patchRevertLoadingId).toBeNull();
+    expect(getState().lastPatchRevertResult).toEqual(result);
+    expect(getState().patchProposals[0]).toMatchObject({
+      id: "patch-revert-1",
+      status: "reverted",
+      revertedAt: result.revertedAt,
+    });
     expect(getState().selectedTask).toEqual(task);
     expect(getState().taskEvents).toEqual([event]);
   });

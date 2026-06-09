@@ -48,6 +48,7 @@ function formatRunTime(value: string): string {
 }
 
 function patchStatusLabel(proposal: PatchProposal): string {
+  if (proposal.status === "reverted") return "已回滚";
   if (proposal.status === "applied") return "已应用";
   if (proposal.status === "approved") return "已通过";
   if (proposal.status === "rejected") return "已拒绝";

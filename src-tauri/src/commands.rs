@@ -19,7 +19,8 @@ use crate::runtime::{
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{
     CreatePatchProposalRequest, FileReadResponse, PatchApplyResult, PatchProposal,
-    PatchProposalListResponse, PatchProposalStatus, SearchResponse, WorkspaceEntry,
+    PatchProposalListResponse, PatchProposalStatus, PatchRevertResult, SearchResponse,
+    WorkspaceEntry,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,13 @@ pub struct RunApprovedProjectCommandRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyApprovedPatchRequest {
     pub approval_id: String,
+}
+
+/// 回滚已应用补丁请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertAppliedPatchRequest {
+    pub patch_id: String,
 }
 
 /// 创建补丁提案响应。
@@ -1345,6 +1353,41 @@ pub async fn apply_approved_patch(
     Ok(result)
 }
 
+/// 回滚已应用的补丁提案。
+///
+/// 前端调用：`invoke('revert_applied_patch', { request: { patchId } })`
+#[tauri::command]
+pub async fn revert_applied_patch(
+    request: RevertAppliedPatchRequest,
+    state: State<'_, AppState>,
+) -> Result<PatchRevertResult, ApiError> {
+    let patch_id = request.patch_id.trim();
+    if patch_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少补丁提案 ID。"));
+    }
+
+    let Some(mut proposal) = state
+        .patch_store
+        .get_proposal(patch_id)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?
+    else {
+        return Err(ApiError::invalid_argument("找不到对应的补丁提案。"));
+    };
+
+    let result = crate::workspace::revert_patch_proposal(&mut proposal, Some("user"))
+        .map_err(map_patch_error)?;
+    state
+        .patch_store
+        .save_proposal(&proposal)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+    {
+        let orch = state.orchestrator.lock().await;
+        orch.record_patch_reverted(&proposal, &result).await;
+    }
+
+    Ok(result)
+}
+
 /// 列出审批请求。
 ///
 /// 前端调用：`invoke('list_approval_requests', { status, limit })`
@@ -1614,6 +1657,8 @@ mod tests {
             updated_at: now,
             applied_at: None,
             applied_by: None,
+            reverted_at: None,
+            reverted_by: None,
         };
 
         let input = build_patch_approval_input(&proposal);

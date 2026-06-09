@@ -337,7 +337,8 @@ export type PatchProposalStatus =
   | "pendingApproval"
   | "approved"
   | "rejected"
-  | "applied";
+  | "applied"
+  | "reverted";
 
 /** 补丁文件变更类型 */
 export type PatchChangeType = "modify";
@@ -382,6 +383,8 @@ export interface PatchProposal {
   updatedAt: string;
   appliedAt?: string | null;
   appliedBy?: string | null;
+  revertedAt?: string | null;
+  revertedBy?: string | null;
 }
 
 /** 创建补丁提案响应 */
@@ -400,6 +403,11 @@ export interface ApplyApprovedPatchRequest {
   approvalId: string;
 }
 
+/** 回滚已应用补丁请求 */
+export interface RevertAppliedPatchRequest {
+  patchId: string;
+}
+
 /** 应用补丁结果 */
 export interface PatchApplyResult {
   patchId: string;
@@ -407,6 +415,15 @@ export interface PatchApplyResult {
   files: string[];
   appliedAt: string;
   alreadyApplied: boolean;
+}
+
+/** 回滚补丁结果 */
+export interface PatchRevertResult {
+  patchId: string;
+  status: PatchProposalStatus;
+  files: string[];
+  revertedAt: string;
+  alreadyReverted: boolean;
 }
 
 /** 项目快照 */

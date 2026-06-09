@@ -24,6 +24,7 @@ import type {
   CreatePatchProposalRequest,
   PatchApplyResult,
   PatchProposal,
+  PatchRevertResult,
 } from "@/types";
 import { api } from "@/lib/tauri";
 import { getErrorDetail, getErrorMessage } from "@/lib/errors";
@@ -137,7 +138,9 @@ interface AgentState {
   approvalDecisionLoadingId: string | null;
   approvalExecutionLoadingId: string | null;
   patchApplyLoadingId: string | null;
+  patchRevertLoadingId: string | null;
   lastPatchApplyResult: PatchApplyResult | null;
+  lastPatchRevertResult: PatchRevertResult | null;
   /** 获取审批请求列表 */
   fetchApprovals: (status?: ApprovalStatus) => Promise<void>;
   /** 审批或拒绝动作 */
@@ -146,6 +149,8 @@ interface AgentState {
   runApprovedCommand: (approvalId: string) => Promise<void>;
   /** 应用已通过审批的补丁 */
   applyApprovedPatch: (approvalId: string) => Promise<void>;
+  /** 回滚已应用的补丁 */
+  revertAppliedPatch: (patchId: string) => Promise<void>;
 
   // ===== 项目理解 =====
   projectSnapshot: ProjectSnapshot | null;
@@ -506,7 +511,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   approvalDecisionLoadingId: null,
   approvalExecutionLoadingId: null,
   patchApplyLoadingId: null,
+  patchRevertLoadingId: null,
   lastPatchApplyResult: null,
+  lastPatchRevertResult: null,
 
   fetchApprovals: async (status) => {
     set({ approvalsLoading: true, approvalsError: null });
@@ -619,6 +626,53 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set({
         approvalsError: getErrorMessage(err, "应用已审批补丁失败"),
         patchApplyLoadingId: null,
+      });
+    }
+  },
+
+  revertAppliedPatch: async (patchId) => {
+    const linkedTaskId =
+      get().patchProposals.find((proposal) => proposal.id === patchId)?.taskId ??
+      (get().lastPatchProposal?.id === patchId ? get().lastPatchProposal?.taskId : null);
+    set({ patchRevertLoadingId: patchId, approvalsError: null });
+    try {
+      const result = await api.revertAppliedPatch({ patchId });
+      set((s) => ({
+        lastPatchRevertResult: result,
+        patchRevertLoadingId: null,
+        approvalsError: null,
+        patchProposals: s.patchProposals.map((proposal) =>
+          proposal.id === result.patchId
+            ? {
+                ...proposal,
+                status: result.status,
+                revertedAt: result.revertedAt,
+                updatedAt: result.revertedAt,
+              }
+            : proposal
+        ),
+        lastPatchProposal:
+          s.lastPatchProposal?.id === result.patchId
+            ? {
+                ...s.lastPatchProposal,
+                status: result.status,
+                revertedAt: result.revertedAt,
+                updatedAt: result.revertedAt,
+              }
+            : s.lastPatchProposal,
+      }));
+      get().fetchPatchProposals(10).catch(() => {
+        // 回滚结果已返回，列表刷新失败不影响审批面板状态。
+      });
+      if (linkedTaskId) {
+        await get().fetchTask(linkedTaskId).catch(() => {
+          // 任务 artifact 刷新失败不影响回滚主流程。
+        });
+      }
+    } catch (err: unknown) {
+      set({
+        approvalsError: getErrorMessage(err, "回滚已应用补丁失败"),
+        patchRevertLoadingId: null,
       });
     }
   },

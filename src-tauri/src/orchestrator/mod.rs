@@ -16,7 +16,7 @@ use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
 use crate::runtime::ProjectCommandRunResponse;
 use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep, TaskStore};
-use crate::workspace::{self, PatchApplyResult, PatchProposal};
+use crate::workspace::{self, PatchApplyResult, PatchProposal, PatchRevertResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
@@ -503,6 +503,40 @@ impl TaskRuntime {
         Some(updated)
     }
 
+    fn record_patch_reverted(
+        &mut self,
+        proposal: &PatchProposal,
+        result: &PatchRevertResult,
+    ) -> Option<Task> {
+        let task_id = proposal.task_id.as_deref()?.trim();
+        if task_id.is_empty() {
+            return None;
+        }
+
+        let artifact = patch_revert_artifact(proposal, result);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_patch_kind_artifact(task, "patchReverted", &proposal.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            proposal.step_id.clone(),
+            TaskEventKind::ArtifactCreated,
+            format!("补丁已回滚：{}", proposal.summary),
+            artifact,
+        ));
+
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
     fn fail_running_step(
         &mut self,
         task_id: &str,
@@ -903,6 +937,16 @@ impl Orchestrator {
         runtime.record_patch_verification(proposal, approval_id, runs, errors)
     }
 
+    /// 记录已回滚补丁为任务 artifact 和事件。
+    pub async fn record_patch_reverted(
+        &self,
+        proposal: &PatchProposal,
+        result: &PatchRevertResult,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_patch_reverted(proposal, result)
+    }
+
     /// 取消任务。
     pub async fn cancel_task(&self, task_id: &str, reason: &str) -> Option<Task> {
         let mut runtime = self.runtime.lock().await;
@@ -1202,6 +1246,37 @@ fn patch_verification_artifact(
         "failedCount": failed_count,
         "runs": run_summaries,
         "errors": errors,
+    })
+}
+
+fn patch_revert_artifact(
+    proposal: &PatchProposal,
+    result: &PatchRevertResult,
+) -> serde_json::Value {
+    let rollback_diff = proposal
+        .files
+        .iter()
+        .map(|file| {
+            crate::workspace::patch::build_unified_diff(
+                &file.path,
+                &file.new_content,
+                &file.old_content,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    serde_json::json!({
+        "kind": "patchReverted",
+        "patchId": &proposal.id,
+        "approvalId": &proposal.approval_id,
+        "summary": &proposal.summary,
+        "status": &result.status,
+        "files": &result.files,
+        "revertedAt": result.reverted_at,
+        "revertedBy": &proposal.reverted_by,
+        "alreadyReverted": result.already_reverted,
+        "rollbackDiff": rollback_diff,
     })
 }
 
@@ -1734,6 +1809,8 @@ mod tests {
             updated_at: now,
             applied_at: Some(now),
             applied_by: Some("tester".to_string()),
+            reverted_at: None,
+            reverted_by: None,
         }
     }
 
@@ -1881,6 +1958,85 @@ mod tests {
         runtime
             .record_patch_verification(&proposal, "approval-1", &runs, &[])
             .unwrap();
+
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            runtime
+                .get_events(task_id)
+                .iter()
+                .filter(|event| event.kind == TaskEventKind::ArtifactCreated)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_record_patch_reverted_adds_task_artifact_and_event() {
+        let task_id = "task-patch-reverted";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "回滚补丁"));
+        let mut proposal = patch_proposal_for_task(task_id);
+        let reverted_at = chrono::Utc::now();
+        proposal.status = crate::workspace::PatchProposalStatus::Reverted;
+        proposal.reverted_at = Some(reverted_at);
+        proposal.reverted_by = Some("tester".to_string());
+        let result = PatchRevertResult {
+            patch_id: proposal.id.clone(),
+            status: crate::workspace::PatchProposalStatus::Reverted,
+            files: vec!["README.md".to_string()],
+            reverted_at,
+            already_reverted: false,
+        };
+
+        let task = runtime.record_patch_reverted(&proposal, &result).unwrap();
+
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            task.artifacts[0]["kind"],
+            serde_json::json!("patchReverted")
+        );
+        assert_eq!(
+            task.artifacts[0]["patchId"],
+            serde_json::json!("patch-task-1")
+        );
+        assert_eq!(
+            task.artifacts[0]["files"][0],
+            serde_json::json!("README.md")
+        );
+        assert!(task.artifacts[0]["rollbackDiff"]
+            .as_str()
+            .unwrap()
+            .contains("-new"));
+
+        let events = runtime.get_events(task_id);
+        let event = events
+            .iter()
+            .find(|event| event.kind == TaskEventKind::ArtifactCreated)
+            .unwrap();
+        assert!(event.message.contains("补丁已回滚"));
+        assert_eq!(event.payload["kind"], serde_json::json!("patchReverted"));
+    }
+
+    #[test]
+    fn test_record_patch_reverted_is_idempotent_for_same_patch() {
+        let task_id = "task-patch-reverted-idempotent";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "重复回滚补丁"));
+        let mut proposal = patch_proposal_for_task(task_id);
+        let reverted_at = chrono::Utc::now();
+        proposal.status = crate::workspace::PatchProposalStatus::Reverted;
+        proposal.reverted_at = Some(reverted_at);
+        let result = PatchRevertResult {
+            patch_id: proposal.id.clone(),
+            status: crate::workspace::PatchProposalStatus::Reverted,
+            files: vec!["README.md".to_string()],
+            reverted_at,
+            already_reverted: false,
+        };
+
+        runtime.record_patch_reverted(&proposal, &result).unwrap();
+        runtime.record_patch_reverted(&proposal, &result).unwrap();
 
         let task = runtime.get_task(task_id).unwrap();
         assert_eq!(task.artifacts.len(), 1);

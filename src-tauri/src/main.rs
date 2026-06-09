@@ -160,6 +160,7 @@ async fn main() {
             commands::list_patch_proposals,
             commands::get_patch_proposal,
             commands::apply_approved_patch,
+            commands::revert_applied_patch,
             commands::list_approval_requests,
             commands::approve_action,
             commands::health_check,
