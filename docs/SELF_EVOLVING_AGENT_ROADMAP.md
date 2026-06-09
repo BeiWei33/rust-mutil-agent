@@ -254,7 +254,7 @@ src-tauri/src/workspace/diff.rs
 | `workspace.get_diff` | 获取当前 diff |
 | `workspace.revert_patch` | 回滚指定 patch |
 
-当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、关联任务/步骤等待审批、补丁审批通过恢复或拒绝失败、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与事件写回；命令审批也已支持关联任务/步骤等待审批、审批决策恢复或失败，以及已审批命令运行后的 `commandRun` artifact 与事件写回。调度器已支持单步骤跳过和步骤超时，跳过的依赖可继续解锁后续步骤，运行超时的步骤会进入 `timedOut` 并生成事件。MemoryAgent 已在应用启动时按 `MEMORY_DB_PATH` 接入 SQLite 长期记忆，自动存储会落盘，检索会先查短期记忆再补充长期记忆。通用 `tool.*` 工具审批已支持创建请求、关联任务/步骤等待审批、审批通过恢复和拒绝失败，并写入 `toolApproval` / `toolApprovalResolved` artifact；Tool 步骤即将调用 legacy `file_read` 或 `web_search` 时会自动创建 `tool.fileRead` / `tool.webSearch` 审批，通过后恢复原 Tool 步骤投递，实际读取复用 workspace 只读 API 的路径沙箱。ToolAgent 调用会写入 `tool_invocations` SQLite 审计表，记录任务/步骤、approvalId、工具名、脱敏参数摘要、成功/失败、错误、耗时和创建时间，并在项目页展示最近记录。验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`，可通过 `retry_task` 重新调度。前端项目页、审批页和任务看板已能展示对应状态。更多 ToolAgent 高风险动作拦截、验证失败自动返工、结构化经验模型、更细粒度的回滚策略仍未实现。
+当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、关联任务/步骤等待审批、补丁审批通过恢复或拒绝失败、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与事件写回；命令审批也已支持关联任务/步骤等待审批、审批决策恢复或失败，以及已审批命令运行后的 `commandRun` artifact 与事件写回。调度器已支持单步骤跳过和步骤超时，跳过的依赖可继续解锁后续步骤，运行超时的步骤会进入 `timedOut` 并生成事件。MemoryAgent 已在应用启动时按 `MEMORY_DB_PATH` 接入 SQLite 长期记忆，自动存储会落盘，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已通过 `store_knowledge` / `search_knowledge` 暴露结构化知识条目写入和检索。通用 `tool.*` 工具审批已支持创建请求、关联任务/步骤等待审批、审批通过恢复和拒绝失败，并写入 `toolApproval` / `toolApprovalResolved` artifact；Tool 步骤即将调用 legacy `file_read` 或 `web_search` 时会自动创建 `tool.fileRead` / `tool.webSearch` 审批，通过后恢复原 Tool 步骤投递，实际读取复用 workspace 只读 API 的路径沙箱。ToolAgent 调用会写入 `tool_invocations` SQLite 审计表，记录任务/步骤、approvalId、工具名、脱敏参数摘要、成功/失败、错误、耗时和创建时间，并在项目页展示最近记录。验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`，可通过 `retry_task` 重新调度。前端项目页、审批页和任务看板已能展示对应状态。更多 ToolAgent 高风险动作拦截、验证失败自动返工、自动经验生成、更细粒度的回滚策略仍未实现。
 
 安全要求：
 
@@ -383,7 +383,7 @@ Memory 类型：
 
 任务：
 
-- 把当前 `MemoryAgent` 从短期内存升级为 SQLite 持久化。（已完成第一版：启动时连接 SQLite、自动存储落盘、短期/长期组合检索）
+- 把当前 `MemoryAgent` 从短期内存升级为 SQLite 持久化。（已完成第一版：启动时连接 SQLite、自动存储落盘、短期/长期组合检索、结构化知识条目 IPC）
 - 每次任务完成后由 EvolutionAgent 生成经验摘要。
 - Planner 在新任务开始前检索相关 ProjectFact、FailureCase 和历史经验。
 
@@ -637,7 +637,7 @@ task://completed
 
 1. 新增 storage 模块和 SQLite schema。
 2. 保存 Task、Step、Event、ToolInvocation、PatchSet、ReviewReport。
-3. MemoryAgent 接入 SQLite。（已部分完成：启动连接、自动存储和长期检索已落地；结构化经验模型待补齐）
+3. MemoryAgent 接入 SQLite。（已部分完成：启动连接、自动存储、长期检索和结构化知识条目 IPC 已落地；自动经验生成待补齐）
 4. 新任务开始前检索相关 ProjectFact 和 FailureCase。
 
 验收标准：

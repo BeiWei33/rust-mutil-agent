@@ -328,6 +328,41 @@ export interface ToolInvocationListResponse {
   invocations: ToolInvocationRecord[];
 }
 
+/** 长期知识条目 */
+export interface KnowledgeItem {
+  id: string;
+  title: string;
+  content: string;
+  source?: string | null;
+  tags: string[];
+  createdAt: string;
+}
+
+/** 存储长期知识请求 */
+export interface StoreKnowledgeRequest {
+  title: string;
+  content: string;
+  source?: string | null;
+  tags?: string[];
+}
+
+/** 存储长期知识响应 */
+export interface StoreKnowledgeResponse {
+  id: string;
+}
+
+/** 搜索长期知识请求 */
+export interface SearchKnowledgeRequest {
+  query: string;
+  limit?: number;
+}
+
+/** 搜索长期知识响应 */
+export interface SearchKnowledgeResponse {
+  query: string;
+  items: KnowledgeItem[];
+}
+
 /** 审批风险等级 */
 export type ApprovalRisk = "low" | "medium" | "high" | "critical";
 

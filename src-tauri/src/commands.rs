@@ -11,6 +11,7 @@ use crate::approval::{
 };
 use crate::chat::ChatMessage as StoredChatMessage;
 use crate::error::AgentError;
+use crate::memory::KnowledgeItem;
 use crate::project::ProjectSnapshot;
 use crate::runtime::{
     CommandRunStore, ProjectCommandInspection, ProjectCommandRunListResponse,
@@ -106,6 +107,39 @@ pub struct RevertAppliedPatchRequest {
     pub patch_id: String,
 }
 
+/// 存储知识条目请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreKnowledgeRequest {
+    pub title: String,
+    pub content: String,
+    pub source: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// 存储知识条目响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreKnowledgeResponse {
+    pub id: String,
+}
+
+/// 搜索知识库请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchKnowledgeRequest {
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+/// 搜索知识库响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchKnowledgeResponse {
+    pub query: String,
+    pub items: Vec<KnowledgeItem>,
+}
+
 /// 创建补丁提案响应。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +217,15 @@ impl ApiError {
         Self::new(
             "HISTORY_ERROR",
             "读写聊天历史时失败。当前操作没有完成，请稍后重试。",
+            Some(detail),
+            true,
+        )
+    }
+
+    fn knowledge_failed(detail: String) -> Self {
+        Self::new(
+            "KNOWLEDGE_ERROR",
+            "读写长期记忆时失败。请稍后重试，或检查记忆数据库路径。",
             Some(detail),
             true,
         )
@@ -568,6 +611,24 @@ fn clean_optional_string(value: Option<&String>) -> Option<String> {
         .map(|item| item.trim())
         .filter(|item| !item.is_empty())
         .map(ToString::to_string)
+}
+
+fn clean_required_text(value: &str, field_label: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ApiError::invalid_argument(&format!(
+            "{field_label} 不能为空。"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn clean_tags(tags: Option<Vec<String>>) -> Vec<String> {
+    tags.unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect()
 }
 
 fn build_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value {
@@ -1013,6 +1074,43 @@ pub async fn search_project_text(
 ) -> Result<SearchResponse, ApiError> {
     crate::workspace::search_text(&request.query, request.max_results)
         .map_err(|e| ApiError::workspace_failed(format!("{}", e)))
+}
+
+/// 存储长期知识条目。
+///
+/// 前端调用：`invoke('store_knowledge', { request: { title, content, source?, tags? } })`
+#[tauri::command]
+pub async fn store_knowledge(
+    request: StoreKnowledgeRequest,
+    state: State<'_, AppState>,
+) -> Result<StoreKnowledgeResponse, ApiError> {
+    let title = clean_required_text(&request.title, "知识标题")?;
+    let content = clean_required_text(&request.content, "知识内容")?;
+    let source = clean_optional_string(request.source.as_ref());
+    let tags = clean_tags(request.tags);
+
+    let id = state
+        .knowledge_base
+        .store_knowledge(&title, &content, source.as_deref(), Some(&tags))
+        .map_err(|err| ApiError::knowledge_failed(format!("{}", err)))?;
+    Ok(StoreKnowledgeResponse { id })
+}
+
+/// 搜索长期知识条目。
+///
+/// 前端调用：`invoke('search_knowledge', { request: { query, limit } })`
+#[tauri::command]
+pub async fn search_knowledge(
+    request: SearchKnowledgeRequest,
+    state: State<'_, AppState>,
+) -> Result<SearchKnowledgeResponse, ApiError> {
+    let query = clean_required_text(&request.query, "搜索关键词")?;
+    let limit = request.limit.unwrap_or(20).clamp(1, 100);
+    let items = state
+        .knowledge_base
+        .search_knowledge(&query, limit)
+        .map_err(|err| ApiError::knowledge_failed(format!("{}", err)))?;
+    Ok(SearchKnowledgeResponse { query, items })
 }
 
 /// 运行受控项目命令。
@@ -1822,6 +1920,32 @@ mod tests {
             clean_session_id(Some(&" session-1 ".to_string())),
             "session-1"
         );
+    }
+
+    #[test]
+    fn test_store_knowledge_request_deserializes_tags() {
+        let request: StoreKnowledgeRequest = serde_json::from_value(serde_json::json!({
+            "title": "失败经验",
+            "content": "cargo test 失败时先看 stderr 摘要",
+            "source": "task-1",
+            "tags": ["FailureCase", " cargo "]
+        }))
+        .unwrap();
+
+        assert_eq!(request.title, "失败经验");
+        assert_eq!(request.source.as_deref(), Some("task-1"));
+        assert_eq!(
+            clean_tags(request.tags),
+            vec!["FailureCase".to_string(), "cargo".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_clean_required_text_rejects_blank() {
+        let err = clean_required_text("  ", "知识标题").unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("知识标题"));
+        assert_eq!(clean_required_text("  abc  ", "知识标题").unwrap(), "abc");
     }
 
     #[test]

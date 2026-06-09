@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、MemoryAgent SQLite 长期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact 和验证失败任务/步骤状态回写已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、MemoryAgent SQLite 长期记忆、结构化 KnowledgeBase 存储/检索、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact 和验证失败任务/步骤状态回写已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -88,6 +88,7 @@ Rust Tauri Commands
   ├─ run_project_command / request_project_command_approval / request_tool_action_approval
   ├─ run_approved_project_command
   ├─ list_project_command_runs
+  ├─ store_knowledge / search_knowledge
   ├─ create_patch_proposal / list_patch_proposals / get_patch_proposal
   ├─ apply_approved_patch / revert_applied_patch
   ├─ list_approval_requests / approve_action
@@ -122,7 +123,7 @@ MessageBus
 1. 初始化 `tracing_subscriber`，默认日志级别为 `info`。
 2. 通过 `dotenvy::dotenv()` 尝试加载 `.env`。
 3. 创建全局 `MessageBus`。
-4. 初始化聊天历史、任务/事件、命令审计、工具调用审计、审批请求和补丁提案 SQLite store。
+4. 初始化聊天历史、结构化知识库、任务/事件、命令审计、工具调用审计、审批请求和补丁提案 SQLite store。
 5. 创建 `Orchestrator`，注入审批 store、工具调用审计 store 和 `MEMORY_DB_PATH`，再调用 `register_builtin_agents()` 注册内置 Agent。
 6. `MemoryAgent` 注册时会尝试连接长期记忆 SQLite；初始化失败会记录 warning 并回退到短期记忆。
 7. 将 `AppState` 注入 Tauri 状态并注册 Tauri IPC 命令。
@@ -246,6 +247,8 @@ pub trait Agent: Send + Sync {
 
 应用启动时读取 `MEMORY_DB_PATH`，默认使用 `rust-mutil-agent-memory.sqlite3`。Orchestrator 注册内置 Agent 时会优先使用 `MemoryAgent::with_database()`；数据库初始化失败时记录 warning，并回退到 `MemoryAgent::new()` 的短期记忆模式。
 
+同一数据库路径也会初始化 `KnowledgeBase`，并通过 `store_knowledge` / `search_knowledge` IPC 暴露结构化知识条目。条目包含标题、内容、来源、标签和创建时间，可作为后续 ProjectFact、FailureCase、SuccessPattern 等经验模型的存储基础；数据库初始化失败时会回退到内存知识库。
+
 ### 6.7 ToolAgent 与 ToolRegistry
 
 位置：`src-tauri/src/agent/tool_agent.rs`
@@ -335,6 +338,8 @@ Planner LLM 相关环境变量：
 | `run_approved_project_command` | `{ request: { approvalId } }` | `ProjectCommandRunResponse` | 已实现已审批命令执行、审计关联和关联任务结果回写 |
 | `list_project_command_runs` | `{ limit? }` | `{ runs }` | 已实现最近命令审计读取 |
 | `list_tool_invocations` | `{ limit? }` | `{ invocations }` | 已实现最近 ToolAgent 调用审计读取，参数摘要会脱敏和截断 |
+| `store_knowledge` | `{ request: { title, content, source?, tags? } }` | `{ id }` | 已实现结构化长期知识写入 |
+| `search_knowledge` | `{ request: { query, limit? } }` | `{ query, items }` | 已实现标题/内容关键词检索，返回来源、标签和创建时间 |
 | `create_patch_proposal` | `{ request: { summary, files, taskId?, stepId?, requestedBy? } }` | `{ proposal, approval }` | 已实现补丁提案持久化、diff 审批创建和关联任务/步骤等待审批 |
 | `list_patch_proposals` | `{ limit? }` | `{ proposals }` | 已实现最近补丁提案读取 |
 | `get_patch_proposal` | `{ patchId }` | `PatchProposal` 或 `null` | 已实现单个补丁提案读取 |
@@ -592,7 +597,7 @@ npm test
 3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、单步骤跳过、步骤超时、失败/取消后的任务重试、任务/事件持久化，以及命令、补丁和通用 `tool.*` 审批对任务步骤的等待、恢复和失败回写；legacy `file_read` 和 `web_search` 已能自动进入审批，其他高风险工具仍待接入。
 4. Planner 分析步骤仍由运行时内部模拟完成，避免把计划内 Planner 子步骤再次送入 Planner 触发嵌套规划。
 5. 聊天历史已按 `sessionId` 持久化；当前前端默认使用 `default` 单会话，尚未实现多会话管理界面。
-6. MemoryAgent 已接入启动流程并默认使用 SQLite 长期记忆；后续仍需统一结构化 ProjectFact / FailureCase 与 KnowledgeBase 检索语义。
+6. MemoryAgent 已接入启动流程并默认使用 SQLite 长期记忆，KnowledgeBase 已提供结构化知识条目写入/检索 IPC；后续仍需统一 ProjectFact / FailureCase 的生成、检索和 Planner 注入语义。
 7. `web_search` 是模拟结果。
 8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截，ToolAgent 调用审计已接入项目面板。
 9. 前端设置中的 API Key 和模型配置保存在 localStorage；后端请求期可使用该配置，但尚未接入系统安全凭据存储。

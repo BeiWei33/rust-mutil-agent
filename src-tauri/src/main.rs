@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use crate::approval::ApprovalStore;
 use crate::bus::MessageBus;
 use crate::chat::ChatStore;
+use crate::memory::KnowledgeBase;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::{CommandRunStore, ToolInvocationStore};
 use crate::workspace::PatchProposalStore;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub bus: Arc<MessageBus>,
     pub orchestrator: Arc<Mutex<Orchestrator>>,
     pub chat_store: Arc<ChatStore>,
+    pub knowledge_base: Arc<KnowledgeBase>,
     pub command_store: Arc<CommandRunStore>,
     pub tool_invocation_store: Arc<ToolInvocationStore>,
     pub approval_store: Arc<ApprovalStore>,
@@ -80,6 +82,21 @@ async fn main() {
         std::env::var("TASK_DB_PATH").unwrap_or_else(|_| DEFAULT_TASK_DB_PATH.to_string());
     let memory_db_path =
         std::env::var("MEMORY_DB_PATH").unwrap_or_else(|_| DEFAULT_MEMORY_DB_PATH.to_string());
+    let knowledge_base = {
+        let store = Arc::new(KnowledgeBase::new(memory_db_path.clone()));
+        match store.initialize() {
+            Ok(()) => {
+                tracing::info!("知识库数据库已启用: {}", memory_db_path);
+                store
+            }
+            Err(err) => {
+                tracing::warn!("知识库数据库初始化失败，将使用内存知识库: {}", err);
+                let fallback = Arc::new(KnowledgeBase::new(":memory:"));
+                fallback.initialize().expect("内存知识库初始化失败");
+                fallback
+            }
+        }
+    };
     let orchestrator = match Orchestrator::with_task_store(bus.clone(), &task_db_path) {
         Ok(orch) => {
             tracing::info!("任务持久化数据库已启用: {}", task_db_path);
@@ -153,6 +170,7 @@ async fn main() {
             bus,
             orchestrator,
             chat_store,
+            knowledge_base,
             command_store,
             tool_invocation_store,
             approval_store,
@@ -174,6 +192,8 @@ async fn main() {
             commands::list_project_files,
             commands::read_project_file,
             commands::search_project_text,
+            commands::store_knowledge,
+            commands::search_knowledge,
             commands::run_project_command,
             commands::request_project_command_approval,
             commands::request_tool_action_approval,

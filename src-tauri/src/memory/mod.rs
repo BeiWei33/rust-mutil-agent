@@ -1,7 +1,19 @@
 //! 记忆/知识库模块 — 持久化存储与向量检索
 
 use crate::error::AgentError;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeItem {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub source: Option<String>,
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
 
 /// 知识库管理器，封装 SQLite 操作
 pub struct KnowledgeBase {
@@ -19,7 +31,9 @@ impl KnowledgeBase {
     }
 
     /// 获取或创建数据库连接
-    fn get_conn(&self) -> Result<std::sync::MutexGuard<Option<rusqlite::Connection>>, AgentError> {
+    fn get_conn(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<rusqlite::Connection>>, AgentError> {
         let mut guard = self
             .conn
             .lock()
@@ -32,7 +46,7 @@ impl KnowledgeBase {
 
     /// 初始化数据库表结构
     pub fn initialize(&self) -> Result<(), AgentError> {
-        let mut guard = self.get_conn()?;
+        let guard = self.get_conn()?;
         let conn = guard.as_ref().unwrap();
         conn.execute_batch(
             "
@@ -60,7 +74,7 @@ impl KnowledgeBase {
         source: Option<&str>,
         tags: Option<&[String]>,
     ) -> Result<String, AgentError> {
-        let mut guard = self.get_conn()?;
+        let guard = self.get_conn()?;
         let conn = guard.as_ref().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let tags_json = serde_json::to_string(&tags.unwrap_or(&[])).unwrap_or_default();
@@ -76,25 +90,28 @@ impl KnowledgeBase {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<serde_json::Value>, AgentError> {
-        let mut guard = self.get_conn()?;
+    ) -> Result<Vec<KnowledgeItem>, AgentError> {
+        let guard = self.get_conn()?;
         let conn = guard.as_ref().unwrap();
         let like_pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT id, title, content, source, created_at
+            "SELECT id, title, content, source, tags, created_at
              FROM knowledge
              WHERE title LIKE ?1 OR content LIKE ?1
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![like_pattern, limit as i64], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "title": row.get::<_, String>(1)?,
-                "content": row.get::<_, String>(2)?,
-                "source": row.get::<_, Option<String>>(3)?,
-                "created_at": row.get::<_, String>(4)?,
-            }))
+            let tags_json = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+            let tags = serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default();
+            Ok(KnowledgeItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                content: row.get(2)?,
+                source: row.get(3)?,
+                tags,
+                created_at: row.get(5)?,
+            })
         })?;
         let mut results = Vec::new();
         for row in rows {
@@ -164,7 +181,7 @@ mod tests {
             .unwrap();
         let results = kb.search_knowledge("Python", 5).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["title"], "Python 入门教程");
+        assert_eq!(results[0].title, "Python 入门教程");
     }
 
     #[test]
@@ -177,7 +194,7 @@ mod tests {
             .unwrap();
         let results = kb.search_knowledge("分布式", 5).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["title"], "系统设计");
+        assert_eq!(results[0].title, "系统设计");
     }
 
     #[test]
@@ -196,7 +213,7 @@ mod tests {
         kb.store_knowledge("新闻", "今日新闻摘要", Some("人民日报"), None)
             .unwrap();
         let results = kb.search_knowledge("新闻", 5).unwrap();
-        assert_eq!(results[0]["source"], "人民日报");
+        assert_eq!(results[0].source.as_deref(), Some("人民日报"));
     }
 
     #[test]
@@ -228,6 +245,23 @@ mod tests {
             .unwrap();
         let results = kb.search_knowledge("Rust", 5).unwrap();
         assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tags, tags);
+    }
+
+    #[test]
+    fn test_knowledge_item_serializes_camel_case() {
+        let item = KnowledgeItem {
+            id: "knowledge-1".to_string(),
+            title: "FailureCase".to_string(),
+            content: "验证失败经验".to_string(),
+            source: Some("task-1".to_string()),
+            tags: vec!["FailureCase".to_string()],
+            created_at: "2026-06-09T00:00:00Z".to_string(),
+        };
+
+        let value = serde_json::to_value(item).unwrap();
+        assert_eq!(value["createdAt"], "2026-06-09T00:00:00Z");
+        assert!(value.get("created_at").is_none());
     }
 
     #[test]
@@ -242,8 +276,8 @@ mod tests {
             .unwrap();
         let results = kb.search_knowledge("共同", 5).unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0]["content"], "新数据");
-        assert_eq!(results[1]["content"], "旧数据");
+        assert_eq!(results[0].content, "新数据");
+        assert_eq!(results[1].content, "旧数据");
     }
 
     #[test]

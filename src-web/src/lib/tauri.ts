@@ -32,6 +32,11 @@ import type {
   ProjectCommandRunListResponse,
   ToolInvocationListResponse,
   ToolInvocationRecord,
+  KnowledgeItem,
+  StoreKnowledgeRequest,
+  StoreKnowledgeResponse,
+  SearchKnowledgeRequest,
+  SearchKnowledgeResponse,
   ApprovalDecisionRequest,
   ApprovalListResponse,
   ApprovalRequest,
@@ -301,6 +306,32 @@ export async function listToolInvocations(
 }
 
 /**
+ * 存储长期知识条目
+ * @param request 标题、内容、来源和标签
+ * @returns 新知识条目 ID
+ */
+export async function storeKnowledge(
+  request: StoreKnowledgeRequest
+): Promise<StoreKnowledgeResponse> {
+  return invoke<StoreKnowledgeResponse>(`${CMD_PREFIX}store_knowledge`, {
+    request,
+  });
+}
+
+/**
+ * 搜索长期知识条目
+ * @param request 搜索关键词和最大返回数量
+ * @returns 知识条目列表
+ */
+export async function searchKnowledge(
+  request: SearchKnowledgeRequest
+): Promise<SearchKnowledgeResponse> {
+  return invoke<SearchKnowledgeResponse>(`${CMD_PREFIX}search_knowledge`, {
+    request,
+  });
+}
+
+/**
  * 创建补丁提案并生成审批请求
  * @param request 补丁摘要和文件变更
  * @returns 补丁提案和对应审批
@@ -511,6 +542,16 @@ let MOCK_TOOL_INVOCATIONS: ToolInvocationRecord[] = [
     success: true,
     error: null,
     durationMs: 36,
+    createdAt: new Date().toISOString(),
+  },
+];
+let MOCK_KNOWLEDGE_ITEMS: KnowledgeItem[] = [
+  {
+    id: "mock-knowledge-1",
+    title: "示例失败经验",
+    content: "验证失败后优先查看命令审计中的 stderr 和关联任务 artifact。",
+    source: "browser-mock",
+    tags: ["FailureCase", "verification"],
     createdAt: new Date().toISOString(),
   },
 ];
@@ -1439,6 +1480,47 @@ async function mockListToolInvocations(
   return { invocations: MOCK_TOOL_INVOCATIONS.slice(0, limit) };
 }
 
+async function mockStoreKnowledge(
+  request: StoreKnowledgeRequest
+): Promise<StoreKnowledgeResponse> {
+  await new Promise((r) => setTimeout(r, 100));
+  const title = request.title.trim();
+  const content = request.content.trim();
+  if (!title) throw new Error("知识标题不能为空。");
+  if (!content) throw new Error("知识内容不能为空。");
+
+  const item: KnowledgeItem = {
+    id: generateId(),
+    title,
+    content,
+    source: request.source?.trim() || null,
+    tags: (request.tags ?? []).map((tag) => tag.trim()).filter(Boolean),
+    createdAt: new Date().toISOString(),
+  };
+  MOCK_KNOWLEDGE_ITEMS = [item, ...MOCK_KNOWLEDGE_ITEMS].slice(0, 100);
+  return { id: item.id };
+}
+
+async function mockSearchKnowledge(
+  request: SearchKnowledgeRequest
+): Promise<SearchKnowledgeResponse> {
+  await new Promise((r) => setTimeout(r, 100));
+  const query = request.query.trim();
+  if (!query) throw new Error("搜索关键词不能为空。");
+  const lower = query.toLowerCase();
+  const limit = Math.max(1, Math.min(request.limit ?? 20, 100));
+  return {
+    query,
+    items: MOCK_KNOWLEDGE_ITEMS.filter((item) => {
+      return (
+        item.title.toLowerCase().includes(lower) ||
+        item.content.toLowerCase().includes(lower) ||
+        item.tags.some((tag) => tag.toLowerCase().includes(lower))
+      );
+    }).slice(0, limit),
+  };
+}
+
 function buildMockPatchDiff(path: string, oldContent: string, newContent: string): string {
   const oldLines = oldContent.split("\n").filter((_, index, lines) =>
     index < lines.length - 1 || lines[index] !== ""
@@ -1945,6 +2027,8 @@ export const api = {
     : mockRunApprovedProjectCommand,
   listProjectCommandRuns: isTauri() ? listProjectCommandRuns : mockListProjectCommandRuns,
   listToolInvocations: isTauri() ? listToolInvocations : mockListToolInvocations,
+  storeKnowledge: isTauri() ? storeKnowledge : mockStoreKnowledge,
+  searchKnowledge: isTauri() ? searchKnowledge : mockSearchKnowledge,
   createPatchProposal: isTauri() ? createPatchProposal : mockCreatePatchProposal,
   listPatchProposals: isTauri() ? listPatchProposals : mockListPatchProposals,
   getPatchProposal: isTauri() ? getPatchProposal : mockGetPatchProposal,
