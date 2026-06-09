@@ -124,6 +124,7 @@ async fn main() {
 
     {
         let mut orch = orchestrator.lock().await;
+        orch.set_approval_store(approval_store.clone());
         orch.register_builtin_agents().await;
     }
     tracing::info!("Agent 运行时初始化完成");

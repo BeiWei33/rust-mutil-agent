@@ -1666,7 +1666,7 @@ pub async fn approve_action(
 
         if approval.action_type.starts_with("tool.") {
             let orch = state.orchestrator.lock().await;
-            orch.record_tool_approval_resolved(approval).await;
+            orch.resolve_tool_approval(approval).await;
         }
 
         if let (Some(patch_id), Some(status)) = (

@@ -465,13 +465,11 @@ impl Agent for ToolAgent {
             }
         });
 
-        let args = msg.context.get("args").cloned().unwrap_or_else(|| {
-            // 从内容中提取参数
-            serde_json::json!({
-                "expression": &msg.content,
-                "query": &msg.content,
-            })
-        });
+        let args = msg
+            .context
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| default_tool_args(tool_name, &msg.content));
 
         tracing::info!("ToolAgent 调用工具: {tool_name}, 参数: {args}");
 
@@ -499,6 +497,102 @@ impl Agent for ToolAgent {
             }
         }
     }
+}
+
+fn default_tool_args(tool_name: &str, content: &str) -> serde_json::Value {
+    match tool_name {
+        "file_read" => {
+            infer_file_read_args_from_content(content).unwrap_or_else(|| serde_json::json!({}))
+        }
+        _ => serde_json::json!({
+            "expression": content,
+            "query": content,
+        }),
+    }
+}
+
+pub(crate) fn infer_file_read_args_from_content(content: &str) -> Option<serde_json::Value> {
+    infer_file_path_from_content(content).map(|path| serde_json::json!({ "path": path }))
+}
+
+fn infer_file_path_from_content(content: &str) -> Option<String> {
+    let normalized = content
+        .chars()
+        .map(|ch| {
+            if matches!(
+                ch,
+                '，' | '。'
+                    | '；'
+                    | '：'
+                    | ':'
+                    | '、'
+                    | '“'
+                    | '”'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | '（'
+                    | '）'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+            ) {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+
+    for window in tokens.windows(2) {
+        let label = window[0].to_ascii_lowercase();
+        if matches!(label.as_str(), "path" | "file" | "文件" | "路径") {
+            if let Some(path) = clean_path_token(window[1]) {
+                return Some(path);
+            }
+        }
+    }
+
+    tokens
+        .iter()
+        .rev()
+        .find_map(|token| clean_path_token(token))
+}
+
+fn clean_path_token(token: &str) -> Option<String> {
+    let mut token = token
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ',' | ';' | '，' | '。' | '；' | '、' | '"' | '\'' | '`' | '“' | '”'
+                )
+        })
+        .trim();
+    if token.ends_with('.') && token.trim_end_matches('.').contains('.') {
+        token = token.trim_end_matches('.');
+    }
+    if token.is_empty() {
+        return None;
+    }
+
+    let lower = token.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "path" | "file" | "read" | "读取" | "文件" | "路径"
+    ) {
+        return None;
+    }
+
+    let looks_like_path = token.contains('/')
+        || token.contains('\\')
+        || token.contains('.')
+        || token.starts_with('.');
+    looks_like_path.then(|| token.to_string())
 }
 
 #[cfg(test)]
@@ -651,6 +745,20 @@ mod tests {
         assert_eq!(replies[0].msg_type, "tool_result");
         // 应包含日期（"年月日"格式）
         assert!(replies[0].content.contains("年"));
+    }
+
+    #[test]
+    fn test_infer_file_read_args_from_content() {
+        let args = infer_file_read_args_from_content("读取文件 README.md").unwrap();
+        assert_eq!(args["path"], serde_json::json!("README.md"));
+
+        let args = infer_file_read_args_from_content("path: src-tauri/src/main.rs").unwrap();
+        assert_eq!(args["path"], serde_json::json!("src-tauri/src/main.rs"));
+
+        let args = infer_file_read_args_from_content("读取文件 .env").unwrap();
+        assert_eq!(args["path"], serde_json::json!(".env"));
+
+        assert!(infer_file_read_args_from_content("读取文件").is_none());
     }
 
     /// 测试 — ToolDescription 结构体字段

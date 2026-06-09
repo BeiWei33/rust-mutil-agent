@@ -6,13 +6,14 @@
 //! 3. 监听 Agent 回复并更新任务状态
 //! 4. 按计划依赖调度步骤，并用只读工具观察项目状态
 
+use crate::agent::action::RiskLevel;
 use crate::agent::echo_agent::EchoAgent;
 use crate::agent::executor_agent::ExecutorAgent;
 use crate::agent::memory_agent::MemoryAgent;
 use crate::agent::planner_agent::{PlannerAgent, TaskPlan};
-use crate::agent::tool_agent::ToolAgent;
+use crate::agent::tool_agent::{infer_file_read_args_from_content, ToolAgent};
 use crate::agent::traits::{Agent, AgentMessage};
-use crate::approval::{ApprovalRequest, ApprovalStatus};
+use crate::approval::{ApprovalRequest, ApprovalStatus, ApprovalStore, CreateApprovalRequest};
 use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
 use crate::runtime::ProjectCommandRunResponse;
@@ -1492,6 +1493,8 @@ pub struct Orchestrator {
     bus: Arc<MessageBus>,
     /// 任务运行状态
     runtime: Arc<Mutex<TaskRuntime>>,
+    /// 审批请求存储，用于调度器自动拦截高风险工具步骤。
+    approval_store: Option<Arc<ApprovalStore>>,
     /// 是否已启动后台事件监听器
     event_loop_started: bool,
 }
@@ -1503,6 +1506,7 @@ impl Orchestrator {
             agents: HashMap::new(),
             bus,
             runtime: Arc::new(Mutex::new(TaskRuntime::default())),
+            approval_store: None,
             event_loop_started: false,
         }
     }
@@ -1517,8 +1521,14 @@ impl Orchestrator {
             agents: HashMap::new(),
             bus,
             runtime: Arc::new(Mutex::new(TaskRuntime::with_store(store))),
+            approval_store: None,
             event_loop_started: false,
         })
+    }
+
+    /// 设置审批存储，供调度器自动创建工具审批请求。
+    pub fn set_approval_store(&mut self, approval_store: Arc<ApprovalStore>) {
+        self.approval_store = Some(approval_store);
     }
 
     /// 注册所有内置 Agent 并启动其运行循环
@@ -1575,12 +1585,19 @@ impl Orchestrator {
                 .map(|(name, runtime)| (name.clone(), runtime.sender.clone()))
                 .collect::<HashMap<_, _>>(),
         );
+        let approval_store = self.approval_store.clone();
 
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(msg) => {
-                        handle_agent_message(runtime.clone(), agent_senders.clone(), msg).await
+                        handle_agent_message(
+                            runtime.clone(),
+                            agent_senders.clone(),
+                            approval_store.clone(),
+                            msg,
+                        )
+                        .await
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!("[Orchestrator] 任务事件监听落后，跳过 {skipped} 条消息");
@@ -1791,6 +1808,22 @@ impl Orchestrator {
         runtime.record_tool_approval_resolved(approval)
     }
 
+    /// 处理通用工具审批决策；自动拦截的工具审批通过后会继续投递原步骤。
+    pub async fn resolve_tool_approval(&self, approval: &ApprovalRequest) -> Option<Task> {
+        let task = {
+            let mut runtime = self.runtime.lock().await;
+            runtime.record_tool_approval_resolved(approval)
+        };
+
+        if approval.status == ApprovalStatus::Approved {
+            if let Some(dispatch) = tool_dispatch_from_approval(approval) {
+                self.dispatch_approved_tool_action(dispatch, approval).await;
+            }
+        }
+
+        task
+    }
+
     /// 记录已审批项目命令运行结果为任务 artifact 和事件。
     pub async fn record_command_run(
         &self,
@@ -1849,7 +1882,13 @@ impl Orchestrator {
                 runtime.fail_running_step(task_id, "Planner", &format!("{}", err), None);
             }
         } else {
-            dispatch_steps(self.runtime.clone(), self.agent_senders(), retry.dispatches).await;
+            dispatch_steps(
+                self.runtime.clone(),
+                self.agent_senders(),
+                self.approval_store.clone(),
+                retry.dispatches,
+            )
+            .await;
         }
 
         let runtime = self.runtime.lock().await;
@@ -1866,6 +1905,7 @@ impl Orchestrator {
         dispatch_steps(
             self.runtime.clone(),
             self.agent_senders(),
+            self.approval_store.clone(),
             skipped.dispatches,
         )
         .await;
@@ -1895,6 +1935,47 @@ impl Orchestrator {
                 .collect(),
         )
     }
+
+    async fn dispatch_approved_tool_action(
+        &self,
+        dispatch: StepDispatch,
+        approval: &ApprovalRequest,
+    ) {
+        let context = merge_message_context(
+            dispatch.context.clone(),
+            serde_json::json!({
+                "toolApprovalId": approval.id,
+                "toolApprovalStatus": approval.status,
+            }),
+        );
+        let msg = AgentMessage::new("Orchestrator", &dispatch.agent_name, &dispatch.instruction)
+            .with_task_id(&dispatch.task_id)
+            .with_type("plan_step")
+            .with_context(context);
+
+        let result = match self.agents.get(&dispatch.agent_name) {
+            Some(runtime) => runtime.sender.send(msg).map_err(|err| {
+                format!(
+                    "无法向 Agent [{}] 恢复已审批步骤 [{}]: {}",
+                    dispatch.agent_name, dispatch.step_id, err
+                )
+            }),
+            None => Err(format!(
+                "无法恢复已审批步骤 [{}]，Agent [{}] 未注册",
+                dispatch.step_id, dispatch.agent_name
+            )),
+        };
+
+        if let Err(error) = result {
+            let mut runtime = self.runtime.lock().await;
+            runtime.fail_running_step(
+                &dispatch.task_id,
+                &dispatch.agent_name,
+                &error,
+                Some(&dispatch.context),
+            );
+        }
+    }
 }
 
 fn merge_message_context(base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
@@ -1917,6 +1998,7 @@ fn merge_message_context(base: serde_json::Value, extra: serde_json::Value) -> s
 async fn handle_agent_message(
     runtime: Arc<Mutex<TaskRuntime>>,
     agent_senders: Arc<HashMap<String, UnboundedSender<AgentMessage>>>,
+    approval_store: Option<Arc<ApprovalStore>>,
     msg: AgentMessage,
 ) {
     let Some(task_id) = msg.task_id.clone() else {
@@ -1934,7 +2016,7 @@ async fn handle_agent_message(
                         Vec::new()
                     }
                 };
-                dispatch_steps(runtime, agent_senders, dispatches).await;
+                dispatch_steps(runtime, agent_senders, approval_store, dispatches).await;
             }
             Err(err) => {
                 let mut runtime = runtime.lock().await;
@@ -1952,7 +2034,7 @@ async fn handle_agent_message(
                 let mut runtime = runtime.lock().await;
                 runtime.complete_running_step(&task_id, &msg.from, &msg.content, msg.context)
             };
-            dispatch_steps(runtime, agent_senders, dispatches).await;
+            dispatch_steps(runtime, agent_senders, approval_store, dispatches).await;
         }
         "execution_error" | "tool_error" => {
             let mut runtime = runtime.lock().await;
@@ -1965,9 +2047,32 @@ async fn handle_agent_message(
 async fn dispatch_steps(
     runtime: Arc<Mutex<TaskRuntime>>,
     agent_senders: Arc<HashMap<String, UnboundedSender<AgentMessage>>>,
+    approval_store: Option<Arc<ApprovalStore>>,
     dispatches: Vec<StepDispatch>,
 ) {
     for dispatch in dispatches {
+        if let (Some(store), Some(input)) = (
+            approval_store.as_ref(),
+            auto_tool_approval_input_from_dispatch(&dispatch),
+        ) {
+            match store.create_request(input) {
+                Ok(approval) => {
+                    let mut runtime = runtime.lock().await;
+                    runtime.record_tool_approval_requested(&approval);
+                }
+                Err(err) => {
+                    let mut runtime = runtime.lock().await;
+                    runtime.fail_running_step(
+                        &dispatch.task_id,
+                        &dispatch.agent_name,
+                        &format!("创建工具审批失败: {err}"),
+                        Some(&dispatch.context),
+                    );
+                }
+            }
+            continue;
+        }
+
         let msg = AgentMessage::new("Orchestrator", &dispatch.agent_name, &dispatch.instruction)
             .with_task_id(&dispatch.task_id)
             .with_type("plan_step")
@@ -1996,6 +2101,134 @@ async fn dispatch_steps(
             );
         }
     }
+}
+
+fn auto_tool_approval_input_from_dispatch(
+    dispatch: &StepDispatch,
+) -> Option<CreateApprovalRequest> {
+    if dispatch.agent_name != "Tool" {
+        return None;
+    }
+
+    let tool_name = inferred_tool_name_from_dispatch(dispatch);
+    if tool_name != "file_read" {
+        return None;
+    }
+
+    let args = dispatch
+        .context
+        .get("args")
+        .cloned()
+        .or_else(|| infer_file_read_args_from_content(&dispatch.instruction))
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut context = dispatch.context.clone();
+    if context.get("tool").is_none() {
+        context = merge_message_context(context, serde_json::json!({ "tool": "file_read" }));
+    }
+    if context.get("args").is_none() {
+        context = merge_message_context(context, serde_json::json!({ "args": args.clone() }));
+    }
+
+    let path = args
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let target = path.as_deref().unwrap_or("未指定路径");
+
+    Some(CreateApprovalRequest {
+        task_id: Some(dispatch.task_id.clone()),
+        step_id: Some(dispatch.step_id.clone()),
+        title: format!("ToolAgent 请求读取文件：{target}"),
+        reason: "ToolAgent 即将调用 legacy file_read，需要先确认该工具动作。".to_string(),
+        risk: RiskLevel::Medium,
+        action_type: "tool.fileRead".to_string(),
+        action_payload: serde_json::json!({
+            "tool": "file_read",
+            "path": path,
+            "args": args,
+            "autoDispatch": true,
+            "agentName": dispatch.agent_name,
+            "instruction": dispatch.instruction,
+            "context": context,
+        }),
+        requested_by: Some("ToolAgent".to_string()),
+    })
+}
+
+fn tool_dispatch_from_approval(approval: &ApprovalRequest) -> Option<StepDispatch> {
+    if !is_tool_action_approval(approval) || approval.status != ApprovalStatus::Approved {
+        return None;
+    }
+    if approval
+        .action_payload
+        .get("autoDispatch")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+
+    let task_id = approval
+        .task_id
+        .clone()
+        .or_else(|| json_string_field(&approval.action_payload, "taskId"))?;
+    let step_id = approval
+        .step_id
+        .clone()
+        .or_else(|| json_string_field(&approval.action_payload, "stepId"))?;
+    let agent_name = json_string_field(&approval.action_payload, "agentName")
+        .unwrap_or_else(|| "Tool".to_string());
+    let instruction = json_string_field(&approval.action_payload, "instruction")?;
+    let context = approval
+        .action_payload
+        .get("context")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(StepDispatch {
+        task_id,
+        step_id,
+        agent_name,
+        instruction,
+        context,
+    })
+}
+
+fn inferred_tool_name_from_dispatch(dispatch: &StepDispatch) -> String {
+    if let Some(tool) = dispatch
+        .context
+        .get("tool")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return tool.to_string();
+    }
+
+    let instruction = &dispatch.instruction;
+    let inferred = if instruction.contains("计算") || instruction.contains("calc") {
+        "calculator"
+    } else if instruction.contains("时间") || instruction.contains("日期") {
+        "datetime"
+    } else if instruction.contains("搜索") || instruction.contains("search") {
+        "web_search"
+    } else if instruction.contains("文件") || instruction.contains("file") {
+        "file_read"
+    } else {
+        "calculator"
+    };
+    inferred.to_string()
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn context_step_id(context: &serde_json::Value) -> Option<&str> {
@@ -3275,6 +3508,84 @@ mod tests {
             approval.updated_at = approval.decided_at.unwrap();
         }
         approval
+    }
+
+    #[test]
+    fn test_auto_tool_approval_input_from_dispatch_for_file_read() {
+        let dispatch = StepDispatch {
+            task_id: "task-auto-tool".to_string(),
+            step_id: "task-auto-tool-1".to_string(),
+            agent_name: "Tool".to_string(),
+            instruction: "读取文件 README.md".to_string(),
+            context: serde_json::json!({
+                "taskId": "task-auto-tool",
+                "stepId": "task-auto-tool-1",
+                "stepAttempt": 1,
+            }),
+        };
+
+        let input = auto_tool_approval_input_from_dispatch(&dispatch).unwrap();
+
+        assert_eq!(input.task_id.as_deref(), Some("task-auto-tool"));
+        assert_eq!(input.step_id.as_deref(), Some("task-auto-tool-1"));
+        assert_eq!(input.action_type, "tool.fileRead");
+        assert_eq!(input.requested_by.as_deref(), Some("ToolAgent"));
+        assert_eq!(input.action_payload["tool"], serde_json::json!("file_read"));
+        assert_eq!(input.action_payload["path"], serde_json::json!("README.md"));
+        assert_eq!(
+            input.action_payload["autoDispatch"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            input.action_payload["context"]["args"]["path"],
+            serde_json::json!("README.md")
+        );
+    }
+
+    #[test]
+    fn test_auto_tool_approval_input_keeps_search_unintercepted() {
+        let dispatch = StepDispatch {
+            task_id: "task-search-tool".to_string(),
+            step_id: "task-search-tool-1".to_string(),
+            agent_name: "Tool".to_string(),
+            instruction: "搜索 file_read 相关资料".to_string(),
+            context: serde_json::json!({}),
+        };
+
+        assert!(auto_tool_approval_input_from_dispatch(&dispatch).is_none());
+    }
+
+    #[test]
+    fn test_tool_dispatch_from_auto_approval() {
+        let dispatch = StepDispatch {
+            task_id: "task-approved-tool".to_string(),
+            step_id: "task-approved-tool-1".to_string(),
+            agent_name: "Tool".to_string(),
+            instruction: "读取文件 README.md".to_string(),
+            context: serde_json::json!({
+                "taskId": "task-approved-tool",
+                "stepId": "task-approved-tool-1",
+                "stepAttempt": 2,
+            }),
+        };
+        let input = auto_tool_approval_input_from_dispatch(&dispatch).unwrap();
+        let mut approval = ApprovalRequest::new(input).unwrap();
+        approval.status = ApprovalStatus::Approved;
+        approval.decided_by = Some("tester".to_string());
+        approval.decided_at = Some(chrono::Utc::now());
+        approval.updated_at = approval.decided_at.unwrap();
+
+        let resumed = tool_dispatch_from_approval(&approval).unwrap();
+
+        assert_eq!(resumed.task_id, "task-approved-tool");
+        assert_eq!(resumed.step_id, "task-approved-tool-1");
+        assert_eq!(resumed.agent_name, "Tool");
+        assert_eq!(resumed.instruction, "读取文件 README.md");
+        assert_eq!(resumed.context["stepAttempt"], serde_json::json!(2));
+        assert_eq!(
+            resumed.context["args"]["path"],
+            serde_json::json!("README.md")
+        );
     }
 
     fn command_run_for_approval(
