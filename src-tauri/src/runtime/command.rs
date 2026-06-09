@@ -21,6 +21,10 @@ const MAX_OUTPUT_BYTES: usize = 96 * 1024;
 pub struct ProjectCommandRunRequest {
     pub command: String,
     pub working_dir: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub step_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -592,6 +596,8 @@ mod tests {
         ProjectCommandRunRequest {
             command: command.to_string(),
             working_dir: working_dir.to_string(),
+            task_id: None,
+            step_id: None,
         }
     }
 

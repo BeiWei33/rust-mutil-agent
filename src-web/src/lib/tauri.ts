@@ -811,6 +811,7 @@ async function mockRunProjectCommand(
     createdAt: new Date().toISOString(),
   };
   MOCK_COMMAND_RUNS = [run, ...MOCK_COMMAND_RUNS].slice(0, 50);
+  updateMockCommandRun(approval, run);
   return run;
 }
 
@@ -823,8 +824,8 @@ async function mockRequestProjectCommandApproval(
   const workingDir = request.workingDir.trim();
   const approval: ApprovalRequest = {
     id: generateId(),
-    taskId: null,
-    stepId: null,
+    taskId: request.taskId ?? null,
+    stepId: request.stepId ?? null,
     title: `运行项目命令：${command}`,
     reason: `命令 [${command}] 不在受控允许列表中，需要用户确认后再进入后续执行流程。`,
     risk: "high",
@@ -833,6 +834,8 @@ async function mockRequestProjectCommandApproval(
       command,
       workingDir,
       allowedByDefault: false,
+      taskId: request.taskId ?? null,
+      stepId: request.stepId ?? null,
     },
     status: "pending",
     requestedBy: "ProjectPanel",
@@ -843,19 +846,246 @@ async function mockRequestProjectCommandApproval(
     decidedAt: null,
   };
   MOCK_APPROVALS = [approval, ...MOCK_APPROVALS].slice(0, 100);
+  updateMockCommandApprovalRequested(approval);
   return approval;
 }
 
 function commandPayload(value: unknown): ProjectCommandRunRequest | null {
   if (!value || typeof value !== "object") return null;
-  const payload = value as { command?: unknown; workingDir?: unknown };
+  const payload = value as {
+    command?: unknown;
+    workingDir?: unknown;
+    taskId?: unknown;
+    stepId?: unknown;
+  };
   if (typeof payload.command !== "string" || typeof payload.workingDir !== "string") {
     return null;
   }
   return {
     command: payload.command,
     workingDir: payload.workingDir,
+    taskId: typeof payload.taskId === "string" ? payload.taskId : null,
+    stepId: typeof payload.stepId === "string" ? payload.stepId : null,
   };
+}
+
+function appendMockTaskEvent(taskId: string, event: Omit<TaskEvent, "id" | "taskId">) {
+  MOCK_EVENTS[taskId] = [
+    ...(MOCK_EVENTS[taskId] ?? []),
+    {
+      id: generateId(),
+      taskId,
+      ...event,
+    },
+  ];
+}
+
+function hasApprovalArtifact(task: Task, kind: string, approvalId: string): boolean {
+  return task.artifacts.some((artifact) => {
+    const value = artifact as { kind?: unknown; approvalId?: unknown };
+    return value.kind === kind && value.approvalId === approvalId;
+  });
+}
+
+function updateMockCommandApprovalRequested(approval: ApprovalRequest) {
+  if (!approval.taskId || approval.actionType !== "runtime.runProjectCommand") return;
+  const payload = commandPayload(approval.actionPayload);
+  const now = approval.createdAt;
+  const artifact = {
+    kind: "commandApproval",
+    approvalId: approval.id,
+    command: payload?.command ?? approval.title,
+    workingDir: payload?.workingDir ?? null,
+    status: approval.status,
+    requestedBy: approval.requestedBy,
+    createdAt: now,
+  };
+  const target = MOCK_TASKS.find((task) => task.id === approval.taskId);
+  if (!target || hasApprovalArtifact(target, "commandApproval", approval.id)) return;
+
+  MOCK_TASKS = MOCK_TASKS.map((task) =>
+    task.id === approval.taskId
+      ? {
+          ...task,
+          status: ["completed", "failed", "cancelled"].includes(task.status)
+            ? task.status
+            : "waitingApproval",
+          updatedAt: now,
+          artifacts: [...task.artifacts, artifact],
+          steps: task.steps.map((step) =>
+            step.id === approval.stepId &&
+            ["pending", "running", "waitingApproval"].includes(step.status)
+              ? { ...step, status: "waitingApproval" as const, error: null }
+              : step
+          ),
+        }
+      : task
+  );
+  appendMockTaskEvent(approval.taskId, {
+    stepId: approval.stepId ?? null,
+    kind: "approvalRequested",
+    message: `项目命令等待审批：${payload?.command ?? approval.title}`,
+    payload: artifact,
+    createdAt: now,
+  });
+}
+
+function updateMockCommandApprovalResolved(approval: ApprovalRequest) {
+  if (!approval.taskId || approval.actionType !== "runtime.runProjectCommand") return;
+  const payload = commandPayload(approval.actionPayload);
+  const now = approval.decidedAt ?? approval.updatedAt;
+  const artifact = {
+    kind: "commandApprovalResolved",
+    approvalId: approval.id,
+    command: payload?.command ?? approval.title,
+    workingDir: payload?.workingDir ?? null,
+    status: approval.status,
+    decidedBy: approval.decidedBy,
+    decisionNote: approval.decisionNote,
+    decidedAt: approval.decidedAt,
+  };
+  const target = MOCK_TASKS.find((task) => task.id === approval.taskId);
+  if (!target || hasApprovalArtifact(target, "commandApprovalResolved", approval.id)) return;
+
+  const rejected = approval.status === "rejected";
+  const failedMessage = `项目命令审批已拒绝：${payload?.command ?? approval.title}`;
+  MOCK_TASKS = MOCK_TASKS.map((task) => {
+    if (task.id !== approval.taskId) return task;
+    const terminal = ["completed", "failed", "cancelled"].includes(task.status);
+    return {
+      ...task,
+      status:
+        approval.status === "approved" && task.status === "waitingApproval"
+          ? "running"
+          : rejected && !terminal
+            ? "failed"
+            : task.status,
+      error: rejected && !terminal ? failedMessage : task.error,
+      updatedAt: now,
+      artifacts: [...task.artifacts, artifact],
+      steps: task.steps.map((step) =>
+        step.id === approval.stepId
+          ? approval.status === "approved" && step.status === "waitingApproval"
+            ? { ...step, status: "running" as const, error: null }
+            : rejected && ["pending", "running", "waitingApproval"].includes(step.status)
+              ? { ...step, status: "failed" as const, error: failedMessage, completedAt: now }
+              : step
+          : step
+      ),
+    };
+  });
+  if (rejected) {
+    appendMockTaskEvent(approval.taskId, {
+      stepId: approval.stepId ?? null,
+      kind: "stepFailed",
+      message: failedMessage,
+      payload: artifact,
+      createdAt: now,
+    });
+  }
+  appendMockTaskEvent(approval.taskId, {
+    stepId: approval.stepId ?? null,
+    kind: "approvalResolved",
+    message: `项目命令审批${approval.status === "approved" ? "已通过" : "已拒绝"}：${
+      payload?.command ?? approval.title
+    }`,
+    payload: artifact,
+    createdAt: now,
+  });
+}
+
+function updateMockCommandRun(approval: ApprovalRequest, run: ProjectCommandRunResponse) {
+  if (!approval.taskId || approval.actionType !== "runtime.runProjectCommand") return;
+  const now = run.createdAt;
+  const artifact = {
+    kind: "commandRun",
+    approvalId: approval.id,
+    runId: run.id,
+    command: run.command,
+    workingDir: run.workingDir,
+    success: run.success,
+    exitCode: run.exitCode,
+    durationMs: run.durationMs,
+    timedOut: run.timedOut,
+    createdAt: now,
+  };
+  const target = MOCK_TASKS.find((task) => task.id === approval.taskId);
+  if (!target || hasApprovalArtifact(target, "commandRun", approval.id)) return;
+
+  const failedMessage = `项目命令执行失败：${run.command}`;
+  const targetTerminal = ["completed", "failed", "cancelled"].includes(target.status);
+  MOCK_TASKS = MOCK_TASKS.map((task) => {
+    if (task.id !== approval.taskId) return task;
+    const terminal = ["completed", "failed", "cancelled"].includes(task.status);
+    let steps = task.steps.map((step) =>
+      step.id === approval.stepId && run.success && !terminal
+        ? ["pending", "running", "waitingApproval"].includes(step.status)
+          ? {
+              ...step,
+              status: "completed" as const,
+              result: {
+                approvalId: approval.id,
+                runId: run.id,
+                command: run.command,
+                workingDir: run.workingDir,
+                success: run.success,
+                exitCode: run.exitCode,
+              },
+              completedAt: now,
+              error: null,
+            }
+          : step
+        : step
+    );
+    if (!run.success && task.status !== "cancelled") {
+      steps = steps.map((step) =>
+        step.id === approval.stepId
+          ? { ...step, status: "failed" as const, error: failedMessage, completedAt: now }
+          : step
+      );
+    }
+    const allCompleted = steps.length > 0 && steps.every((step) => step.status === "completed");
+    return {
+      ...task,
+      status: !run.success && task.status !== "cancelled"
+        ? "failed"
+        : run.success && !terminal && allCompleted
+          ? "completed"
+          : task.status,
+      output:
+        run.success && !terminal && allCompleted
+          ? `任务执行调度器已完成，共完成 ${steps.length} 个步骤。`
+          : task.output,
+      error: !run.success && task.status !== "cancelled" ? failedMessage : task.error,
+      updatedAt: now,
+      artifacts: [...task.artifacts, artifact],
+      steps,
+    };
+  });
+  if (run.success && !targetTerminal) {
+    appendMockTaskEvent(approval.taskId, {
+      stepId: approval.stepId ?? null,
+      kind: "stepCompleted",
+      message: "已审批项目命令执行通过，步骤已完成。",
+      payload: artifact,
+      createdAt: now,
+    });
+  } else {
+    appendMockTaskEvent(approval.taskId, {
+      stepId: approval.stepId ?? null,
+      kind: "stepFailed",
+      message: failedMessage,
+      payload: artifact,
+      createdAt: now,
+    });
+  }
+  appendMockTaskEvent(approval.taskId, {
+    stepId: approval.stepId ?? null,
+    kind: "artifactCreated",
+    message: `项目命令执行${run.success ? "通过" : "失败"}：${run.command}`,
+    payload: artifact,
+    createdAt: now,
+  });
 }
 
 function patchPayload(value: unknown): { patchId: string } | null {
@@ -1358,6 +1588,8 @@ async function mockApproveAction(
           : proposal
       );
     }
+  } else if (updated.actionType === "runtime.runProjectCommand") {
+    updateMockCommandApprovalResolved(updated);
   }
   return updated;
 }

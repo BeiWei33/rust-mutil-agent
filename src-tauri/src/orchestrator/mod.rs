@@ -599,6 +599,254 @@ impl TaskRuntime {
         Some(updated)
     }
 
+    fn record_command_approval_requested(&mut self, approval: &ApprovalRequest) -> Option<Task> {
+        if approval.action_type != "runtime.runProjectCommand" {
+            return None;
+        }
+        let task_id = approval_task_id(approval)?;
+        let step_id = approval_step_id(approval);
+        let artifact = command_approval_artifact(approval);
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_command_kind_artifact(task, "commandApproval", &approval.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        if !matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            task.status = TaskStatus::WaitingApproval;
+            task.touch();
+        }
+        if let Some(step_id) = step_id {
+            if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                if matches!(
+                    step.status,
+                    StepStatus::Pending | StepStatus::Running | StepStatus::WaitingApproval
+                ) {
+                    step.status = StepStatus::WaitingApproval;
+                    step.error = None;
+                }
+            }
+        }
+        let updated = task.clone();
+
+        self.push_event(TaskEvent::new(
+            task_id.to_string(),
+            step_id.map(ToString::to_string),
+            TaskEventKind::ApprovalRequested,
+            format!(
+                "项目命令等待审批：{}",
+                command_label_from_approval(approval)
+            ),
+            artifact,
+        ));
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
+    fn record_command_approval_resolved(&mut self, approval: &ApprovalRequest) -> Option<Task> {
+        if approval.action_type != "runtime.runProjectCommand" {
+            return None;
+        }
+        let task_id = approval_task_id(approval)?;
+        let step_id = approval_step_id(approval);
+        let artifact = command_approval_resolved_artifact(approval);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_command_kind_artifact(task, "commandApprovalResolved", &approval.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        match approval.status {
+            ApprovalStatus::Approved => {
+                if task.status == TaskStatus::WaitingApproval {
+                    task.status = TaskStatus::Running;
+                    task.error = None;
+                    task.touch();
+                }
+                if let Some(step_id) = step_id {
+                    if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                        if step.status == StepStatus::WaitingApproval {
+                            step.status = StepStatus::Running;
+                            step.error = None;
+                        }
+                    }
+                }
+            }
+            ApprovalStatus::Rejected => {
+                let message = format!(
+                    "项目命令审批已拒绝：{}",
+                    command_label_from_approval(approval)
+                );
+                if let Some(step_id) = step_id {
+                    if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                        if matches!(
+                            step.status,
+                            StepStatus::Pending | StepStatus::WaitingApproval | StepStatus::Running
+                        ) {
+                            step.fail(message.clone());
+                            emitted.push(TaskEvent::new(
+                                task_id.to_string(),
+                                Some(step.id.clone()),
+                                TaskEventKind::StepFailed,
+                                message.clone(),
+                                artifact.clone(),
+                            ));
+                        }
+                    }
+                }
+                if !matches!(
+                    task.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    task.fail(message.clone());
+                    emitted.push(TaskEvent::new(
+                        task_id.to_string(),
+                        None,
+                        TaskEventKind::Failed,
+                        message,
+                        artifact.clone(),
+                    ));
+                }
+            }
+            ApprovalStatus::Pending | ApprovalStatus::Cancelled => {}
+        }
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            step_id.map(ToString::to_string),
+            TaskEventKind::ApprovalResolved,
+            format!(
+                "项目命令审批{}：{}",
+                approval_status_label(&approval.status),
+                command_label_from_approval(approval)
+            ),
+            artifact,
+        ));
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
+    fn record_command_run(
+        &mut self,
+        approval: &ApprovalRequest,
+        run: &ProjectCommandRunResponse,
+    ) -> Option<Task> {
+        if approval.action_type != "runtime.runProjectCommand" {
+            return None;
+        }
+        let task_id = approval_task_id(approval)?;
+        let step_id = approval_step_id(approval);
+        let artifact = command_run_artifact(approval, run);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_command_kind_artifact(task, "commandRun", &approval.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        if !run.success && task.status != TaskStatus::Cancelled {
+            let message = format!("项目命令执行失败：{}", run.command);
+            if let Some(step_id) = step_id {
+                if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                    if step.status != StepStatus::Failed {
+                        step.fail(message.clone());
+                        emitted.push(TaskEvent::new(
+                            task_id.to_string(),
+                            Some(step.id.clone()),
+                            TaskEventKind::StepFailed,
+                            message.clone(),
+                            artifact.clone(),
+                        ));
+                    }
+                }
+            }
+            if task.status != TaskStatus::Failed {
+                task.fail(message.clone());
+                emitted.push(TaskEvent::new(
+                    task_id.to_string(),
+                    None,
+                    TaskEventKind::Failed,
+                    message,
+                    artifact.clone(),
+                ));
+            }
+        } else if run.success
+            && !matches!(
+                task.status,
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+            )
+        {
+            if let Some(step_id) = step_id {
+                if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                    if matches!(
+                        step.status,
+                        StepStatus::Pending | StepStatus::WaitingApproval | StepStatus::Running
+                    ) {
+                        let result = serde_json::json!({
+                            "approvalId": approval.id,
+                            "runId": run.id,
+                            "command": run.command,
+                            "workingDir": run.working_dir,
+                            "success": run.success,
+                            "exitCode": run.exit_code,
+                        });
+                        step.complete(result.clone());
+                        emitted.push(TaskEvent::new(
+                            task_id.to_string(),
+                            Some(step.id.clone()),
+                            TaskEventKind::StepCompleted,
+                            "已审批项目命令执行通过，步骤已完成。",
+                            result,
+                        ));
+                    }
+                }
+            }
+
+            if !task.steps.is_empty()
+                && task
+                    .steps
+                    .iter()
+                    .all(|step| step.status == StepStatus::Completed)
+            {
+                let completed_steps = task.steps.len();
+                let output = format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。");
+                task.complete(output.clone());
+                emitted.push(TaskEvent::new(
+                    task_id.to_string(),
+                    None,
+                    TaskEventKind::Completed,
+                    output,
+                    serde_json::json!({ "completedSteps": completed_steps }),
+                ));
+            }
+        }
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            step_id.map(ToString::to_string),
+            TaskEventKind::ArtifactCreated,
+            format!(
+                "项目命令执行{}：{}",
+                command_run_status_label(run),
+                run.command
+            ),
+            artifact,
+        ));
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
     fn record_patch_verification(
         &mut self,
         proposal: &PatchProposal,
@@ -1162,6 +1410,34 @@ impl Orchestrator {
         runtime.record_patch_approval_resolved(proposal, approval)
     }
 
+    /// 记录项目命令审批请求，并让关联任务/步骤进入等待审批。
+    pub async fn record_command_approval_requested(
+        &self,
+        approval: &ApprovalRequest,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_command_approval_requested(approval)
+    }
+
+    /// 记录项目命令审批决策，并恢复或失败关联任务/步骤。
+    pub async fn record_command_approval_resolved(
+        &self,
+        approval: &ApprovalRequest,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_command_approval_resolved(approval)
+    }
+
+    /// 记录已审批项目命令运行结果为任务 artifact 和事件。
+    pub async fn record_command_run(
+        &self,
+        approval: &ApprovalRequest,
+        run: &ProjectCommandRunResponse,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_command_run(approval, run)
+    }
+
     /// 记录补丁应用后的自动验证结果为任务 artifact 和事件。
     pub async fn record_patch_verification(
         &self,
@@ -1479,6 +1755,90 @@ fn patch_approval_resolved_artifact(
     })
 }
 
+fn approval_task_id(approval: &ApprovalRequest) -> Option<&str> {
+    approval
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn approval_step_id(approval: &ApprovalRequest) -> Option<&str> {
+    approval
+        .step_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn command_label_from_approval(approval: &ApprovalRequest) -> String {
+    approval
+        .action_payload
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&approval.title)
+        .to_string()
+}
+
+fn command_working_dir_from_approval(approval: &ApprovalRequest) -> Option<String> {
+    approval
+        .action_payload
+        .get("workingDir")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn command_approval_artifact(approval: &ApprovalRequest) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "commandApproval",
+        "approvalId": &approval.id,
+        "command": command_label_from_approval(approval),
+        "workingDir": command_working_dir_from_approval(approval),
+        "status": &approval.status,
+        "requestedBy": &approval.requested_by,
+        "createdAt": approval.created_at,
+    })
+}
+
+fn command_approval_resolved_artifact(approval: &ApprovalRequest) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "commandApprovalResolved",
+        "approvalId": &approval.id,
+        "command": command_label_from_approval(approval),
+        "workingDir": command_working_dir_from_approval(approval),
+        "status": &approval.status,
+        "decidedBy": &approval.decided_by,
+        "decisionNote": &approval.decision_note,
+        "decidedAt": approval.decided_at,
+    })
+}
+
+fn command_run_artifact(
+    approval: &ApprovalRequest,
+    run: &ProjectCommandRunResponse,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "commandRun",
+        "approvalId": &approval.id,
+        "runId": &run.id,
+        "command": &run.command,
+        "workingDir": &run.working_dir,
+        "success": run.success,
+        "exitCode": run.exit_code,
+        "durationMs": run.duration_ms,
+        "timedOut": run.timed_out,
+        "stdoutTruncated": run.stdout_truncated,
+        "stderrTruncated": run.stderr_truncated,
+        "stdoutPreview": output_preview(&run.stdout),
+        "stderrPreview": output_preview(&run.stderr),
+        "createdAt": &run.created_at,
+    })
+}
+
 fn patch_verification_artifact(
     proposal: &PatchProposal,
     approval_id: &str,
@@ -1586,6 +1946,25 @@ fn approval_status_label(status: &ApprovalStatus) -> &'static str {
     }
 }
 
+fn command_run_status_label(run: &ProjectCommandRunResponse) -> &'static str {
+    if run.timed_out {
+        "超时"
+    } else if run.success {
+        "通过"
+    } else {
+        "失败"
+    }
+}
+
+fn output_preview(output: &str) -> String {
+    const PREVIEW_CHARS: usize = 2_000;
+    let mut preview = output.chars().take(PREVIEW_CHARS).collect::<String>();
+    if output.chars().nth(PREVIEW_CHARS).is_some() {
+        preview.push_str("\n[preview truncated]");
+    }
+    preview
+}
+
 fn patch_verification_failure_message(
     proposal: &PatchProposal,
     auto_rollback: Option<&PatchAutoRollbackResult>,
@@ -1618,6 +1997,16 @@ fn has_patch_kind_artifact(task: &Task, kind: &str, patch_id: &str) -> bool {
     task.artifacts.iter().any(|artifact| {
         artifact.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
             && artifact.get("patchId").and_then(serde_json::Value::as_str) == Some(patch_id)
+    })
+}
+
+fn has_command_kind_artifact(task: &Task, kind: &str, approval_id: &str) -> bool {
+    task.artifacts.iter().any(|artifact| {
+        artifact.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
+            && artifact
+                .get("approvalId")
+                .and_then(serde_json::Value::as_str)
+                == Some(approval_id)
     })
 }
 
@@ -2166,6 +2555,49 @@ mod tests {
         approval
     }
 
+    fn approval_for_command(task_id: &str, status: ApprovalStatus) -> ApprovalRequest {
+        let mut approval = ApprovalRequest::new(crate::approval::CreateApprovalRequest {
+            task_id: Some(task_id.to_string()),
+            step_id: Some(format!("{task_id}-1")),
+            title: "运行项目命令：cargo clippy".to_string(),
+            reason: "需要确认项目命令。".to_string(),
+            risk: crate::agent::action::RiskLevel::High,
+            action_type: "runtime.runProjectCommand".to_string(),
+            action_payload: serde_json::json!({
+                "command": "cargo clippy",
+                "workingDir": "src-tauri",
+                "allowedByDefault": false,
+            }),
+            requested_by: Some("test".to_string()),
+        })
+        .unwrap();
+        approval.id = "command-approval-1".to_string();
+        if status != ApprovalStatus::Pending {
+            approval.status = status;
+            approval.decided_by = Some("tester".to_string());
+            approval.decided_at = Some(chrono::Utc::now());
+            approval.updated_at = approval.decided_at.unwrap();
+        }
+        approval
+    }
+
+    fn command_run_for_approval(
+        approval: &ApprovalRequest,
+        success: bool,
+    ) -> ProjectCommandRunResponse {
+        ProjectCommandRunResponse {
+            approval_id: Some(approval.id.clone()),
+            success,
+            exit_code: Some(if success { 0 } else { 101 }),
+            stderr: if success {
+                String::new()
+            } else {
+                "clippy failed".to_string()
+            },
+            ..command_run("cargo clippy", success)
+        }
+    }
+
     fn task_with_running_executor_step(task_id: &str) -> Task {
         let mut task = Task::new(task_id, "应用补丁审批");
         let mut step = TaskStep::new(
@@ -2180,6 +2612,154 @@ mod tests {
         task.steps = vec![step];
         task.status = TaskStatus::Running;
         task
+    }
+
+    #[test]
+    fn test_record_command_approval_requested_marks_linked_step_waiting() {
+        let task_id = "task-command-approval-requested";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let approval = approval_for_command(task_id, ApprovalStatus::Pending);
+
+        let task = runtime
+            .record_command_approval_requested(&approval)
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::WaitingApproval);
+        assert_eq!(task.steps[0].status, StepStatus::WaitingApproval);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("commandApproval")
+                && artifact["approvalId"] == serde_json::json!(approval.id)
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::ApprovalRequested));
+    }
+
+    #[test]
+    fn test_record_command_approval_approved_restores_running_step() {
+        let task_id = "task-command-approval-approved";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let pending = approval_for_command(task_id, ApprovalStatus::Pending);
+        runtime.record_command_approval_requested(&pending);
+        let approved = approval_for_command(task_id, ApprovalStatus::Approved);
+
+        let task = runtime.record_command_approval_resolved(&approved).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("commandApprovalResolved")
+                && artifact["status"] == serde_json::json!("approved")
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::ApprovalResolved));
+    }
+
+    #[test]
+    fn test_record_command_approval_rejected_marks_task_retryable() {
+        let task_id = "task-command-approval-rejected";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let pending = approval_for_command(task_id, ApprovalStatus::Pending);
+        runtime.record_command_approval_requested(&pending);
+        let rejected = approval_for_command(task_id, ApprovalStatus::Rejected);
+
+        let task = runtime.record_command_approval_resolved(&rejected).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::Failed);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::Failed));
+
+        let retry = runtime.retry_task(task_id, "重新提交命令审批").unwrap();
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+    }
+
+    #[test]
+    fn test_record_command_run_success_completes_linked_step() {
+        let task_id = "task-command-run-success";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let pending = approval_for_command(task_id, ApprovalStatus::Pending);
+        runtime.record_command_approval_requested(&pending);
+        let approved = approval_for_command(task_id, ApprovalStatus::Approved);
+        runtime.record_command_approval_resolved(&approved);
+        let run = command_run_for_approval(&approved, true);
+
+        let task = runtime.record_command_run(&approved, &run).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert_eq!(task.steps[0].status, StepStatus::Completed);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("commandRun")
+                && artifact["runId"] == serde_json::json!(run.id)
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::StepCompleted));
+    }
+
+    #[test]
+    fn test_record_command_run_failure_marks_linked_step_retryable() {
+        let task_id = "task-command-run-failure";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let pending = approval_for_command(task_id, ApprovalStatus::Pending);
+        runtime.record_command_approval_requested(&pending);
+        let approved = approval_for_command(task_id, ApprovalStatus::Approved);
+        runtime.record_command_approval_resolved(&approved);
+        let run = command_run_for_approval(&approved, false);
+
+        let task = runtime.record_command_run(&approved, &run).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::Failed);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::StepFailed));
+
+        let retry = runtime.retry_task(task_id, "修复命令失败").unwrap();
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+    }
+
+    #[test]
+    fn test_record_command_run_is_idempotent_for_same_approval() {
+        let task_id = "task-command-run-idempotent";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let approved = approval_for_command(task_id, ApprovalStatus::Approved);
+        let run = command_run_for_approval(&approved, true);
+
+        runtime.record_command_run(&approved, &run).unwrap();
+        runtime.record_command_run(&approved, &run).unwrap();
+
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            runtime
+                .get_events(task_id)
+                .iter()
+                .filter(|event| event.kind == TaskEventKind::ArtifactCreated)
+                .count(),
+            1
+        );
     }
 
     #[test]

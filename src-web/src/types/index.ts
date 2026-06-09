@@ -266,6 +266,8 @@ export interface ProjectCommand {
 export interface ProjectCommandRunRequest {
   command: string;
   workingDir: string;
+  taskId?: string | null;
+  stepId?: string | null;
 }
 
 /** 运行受控项目命令响应 */

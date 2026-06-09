@@ -184,6 +184,29 @@ interface PatchApprovalArtifact {
   decidedAt?: string;
 }
 
+interface CommandApprovalArtifact {
+  kind: "commandApproval" | "commandApprovalResolved";
+  approvalId: string;
+  command: string;
+  workingDir?: string | null;
+  status?: string;
+  createdAt?: string;
+  decidedAt?: string;
+}
+
+interface CommandRunArtifact {
+  kind: "commandRun";
+  approvalId: string;
+  runId?: string;
+  command: string;
+  workingDir?: string;
+  success: boolean;
+  exitCode?: number | null;
+  durationMs?: number;
+  timedOut?: boolean;
+  createdAt?: string;
+}
+
 interface PatchVerificationRun {
   id?: string;
   command: string;
@@ -278,6 +301,74 @@ function patchApprovalArtifact(value: unknown): PatchApprovalArtifact | null {
     status: typeof artifact.status === "string" ? artifact.status : undefined,
     createdAt: typeof artifact.createdAt === "string" ? artifact.createdAt : undefined,
     decidedAt: typeof artifact.decidedAt === "string" ? artifact.decidedAt : undefined,
+  };
+}
+
+function commandApprovalArtifact(value: unknown): CommandApprovalArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as {
+    kind?: unknown;
+    approvalId?: unknown;
+    command?: unknown;
+    workingDir?: unknown;
+    status?: unknown;
+    createdAt?: unknown;
+    decidedAt?: unknown;
+  };
+  if (
+    (artifact.kind !== "commandApproval" && artifact.kind !== "commandApprovalResolved") ||
+    typeof artifact.approvalId !== "string" ||
+    typeof artifact.command !== "string"
+  ) {
+    return null;
+  }
+  return {
+    kind: artifact.kind,
+    approvalId: artifact.approvalId,
+    command: artifact.command,
+    workingDir:
+      typeof artifact.workingDir === "string" || artifact.workingDir === null
+        ? artifact.workingDir
+        : undefined,
+    status: typeof artifact.status === "string" ? artifact.status : undefined,
+    createdAt: typeof artifact.createdAt === "string" ? artifact.createdAt : undefined,
+    decidedAt: typeof artifact.decidedAt === "string" ? artifact.decidedAt : undefined,
+  };
+}
+
+function commandRunArtifact(value: unknown): CommandRunArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as {
+    kind?: unknown;
+    approvalId?: unknown;
+    runId?: unknown;
+    command?: unknown;
+    workingDir?: unknown;
+    success?: unknown;
+    exitCode?: unknown;
+    durationMs?: unknown;
+    timedOut?: unknown;
+    createdAt?: unknown;
+  };
+  if (
+    artifact.kind !== "commandRun" ||
+    typeof artifact.approvalId !== "string" ||
+    typeof artifact.command !== "string" ||
+    typeof artifact.success !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    kind: "commandRun",
+    approvalId: artifact.approvalId,
+    runId: typeof artifact.runId === "string" ? artifact.runId : undefined,
+    command: artifact.command,
+    workingDir: typeof artifact.workingDir === "string" ? artifact.workingDir : undefined,
+    success: artifact.success,
+    exitCode: typeof artifact.exitCode === "number" ? artifact.exitCode : null,
+    durationMs: typeof artifact.durationMs === "number" ? artifact.durationMs : undefined,
+    timedOut: typeof artifact.timedOut === "boolean" ? artifact.timedOut : undefined,
+    createdAt: typeof artifact.createdAt === "string" ? artifact.createdAt : undefined,
   };
 }
 
@@ -414,6 +505,75 @@ function verificationStatusLabel(status?: string): { label: string; className: s
 }
 
 function ArtifactRow({ artifact }: { artifact: unknown }) {
+  const commandApproval = commandApprovalArtifact(artifact);
+  if (commandApproval) {
+    const resolved = commandApproval.kind === "commandApprovalResolved";
+    const statusLabel =
+      commandApproval.status === "approved"
+        ? "已通过"
+        : commandApproval.status === "rejected"
+          ? "已拒绝"
+          : "待审批";
+    const statusClass =
+      commandApproval.status === "approved"
+        ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+        : commandApproval.status === "rejected"
+          ? "border-red-500/20 bg-red-500/10 text-red-200"
+          : "border-amber-500/20 bg-amber-500/10 text-amber-200";
+
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <code className="block truncate text-sm font-medium text-primary-200">
+              {commandApproval.command}
+            </code>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {resolved ? "命令审批决策" : "命令审批请求"}
+              {commandApproval.workingDir && ` · ${commandApproval.workingDir}`}
+              {(commandApproval.decidedAt || commandApproval.createdAt) &&
+                ` · ${formatTime(commandApproval.decidedAt ?? commandApproval.createdAt ?? "")}`}
+            </div>
+          </div>
+          <span className={`rounded-md border px-2 py-0.5 text-[11px] ${statusClass}`}>
+            {statusLabel}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  const commandRun = commandRunArtifact(artifact);
+  if (commandRun) {
+    const statusLabel = commandRun.timedOut ? "超时" : commandRun.success ? "通过" : "失败";
+    const statusClass = commandRun.success
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+      : "border-amber-500/20 bg-amber-500/10 text-amber-200";
+
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <code className="block truncate text-sm font-medium text-primary-200">
+              {commandRun.command}
+            </code>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {commandRun.workingDir ?? "workspace"}
+              {commandRun.durationMs !== undefined && ` · ${commandRun.durationMs}ms`}
+              {commandRun.exitCode !== null &&
+                commandRun.exitCode !== undefined &&
+                ` · exit ${commandRun.exitCode}`}
+              {commandRun.createdAt && ` · ${formatTime(commandRun.createdAt)}`}
+            </div>
+          </div>
+          <span className={`rounded-md border px-2 py-0.5 text-[11px] ${statusClass}`}>
+            {statusLabel}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   const approvalArtifact = patchApprovalArtifact(artifact);
   if (approvalArtifact) {
     const resolved = approvalArtifact.kind === "patchApprovalResolved";

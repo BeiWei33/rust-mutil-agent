@@ -557,6 +557,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           // 审批状态已更新，补丁列表刷新失败不阻断主流程。
         });
       }
+      if (updated?.taskId) {
+        await get().fetchTask(updated.taskId).catch(() => {
+          // 审批状态已更新，任务刷新失败不阻断主流程。
+        });
+      }
     } catch (err: unknown) {
       set({
         approvalsError: getErrorMessage(err, "处理审批请求失败"),
@@ -566,6 +571,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   runApprovedCommand: async (approvalId) => {
+    const linkedTaskId =
+      get().approvals.find((approval) => approval.id === approvalId)?.taskId ?? null;
     set({ approvalExecutionLoadingId: approvalId, approvalsError: null });
     try {
       const result = await api.runApprovedProjectCommand({ approvalId });
@@ -575,6 +582,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         approvalExecutionLoadingId: null,
         approvalsError: null,
       }));
+      if (linkedTaskId) {
+        await get().fetchTask(linkedTaskId).catch(() => {
+          // 命令执行结果已返回，任务刷新失败不阻断主流程。
+        });
+      }
     } catch (err: unknown) {
       set({
         approvalsError: getErrorMessage(err, "执行已审批命令失败"),

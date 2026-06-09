@@ -983,6 +983,8 @@ async fn run_patch_auto_verification(
         let request = ProjectCommandRunRequest {
             command: command.command.clone(),
             working_dir: command.working_dir.clone(),
+            task_id: None,
+            step_id: None,
         };
         match crate::runtime::run_project_command(request).await {
             Ok(run) => {
@@ -1055,10 +1057,11 @@ fn failed_auto_rollback_result(error: AgentError) -> PatchAutoRollbackResult {
 
 fn build_project_command_approval_input(
     inspection: &ProjectCommandInspection,
+    request: &ProjectCommandRunRequest,
 ) -> CreateApprovalRequest {
     CreateApprovalRequest {
-        task_id: None,
-        step_id: None,
+        task_id: request.task_id.clone(),
+        step_id: request.step_id.clone(),
         title: format!("运行项目命令：{}", inspection.command),
         reason: format!(
             "命令 [{}] 不在受控允许列表中，需要用户确认后再进入后续执行流程。",
@@ -1070,6 +1073,8 @@ fn build_project_command_approval_input(
             "command": inspection.command.clone(),
             "workingDir": inspection.working_dir.clone(),
             "allowedByDefault": inspection.allowed,
+            "taskId": request.task_id.clone(),
+            "stepId": request.step_id.clone(),
         }),
         requested_by: Some("ProjectPanel".to_string()),
     }
@@ -1095,10 +1100,17 @@ pub async fn request_project_command_approval(
         ));
     }
 
-    state
+    let approval = state
         .approval_store
-        .create_request(build_project_command_approval_input(&inspection))
-        .map_err(|err| ApiError::approval_failed(format!("{}", err)))
+        .create_request(build_project_command_approval_input(&inspection, &request))
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))?;
+
+    {
+        let orch = state.orchestrator.lock().await;
+        orch.record_command_approval_requested(&approval).await;
+    }
+
+    Ok(approval)
 }
 
 fn project_command_request_from_approval(
@@ -1133,6 +1145,8 @@ fn project_command_request_from_approval(
     Ok(ProjectCommandRunRequest {
         command: command.to_string(),
         working_dir: working_dir.to_string(),
+        task_id: approval.task_id.clone(),
+        step_id: approval.step_id.clone(),
     })
 }
 
@@ -1163,6 +1177,10 @@ pub async fn run_approved_project_command(
         .get_run_by_approval_id(&approval.id)
         .map_err(|err| ApiError::command_failed(format!("{}", err)))?
     {
+        {
+            let orch = state.orchestrator.lock().await;
+            orch.record_command_run(&approval, &existing).await;
+        }
         return Ok(existing);
     }
 
@@ -1176,6 +1194,10 @@ pub async fn run_approved_project_command(
         .command_store
         .append_run(&result)
         .map_err(|err| ApiError::command_failed(format!("{}", err)))?;
+    {
+        let orch = state.orchestrator.lock().await;
+        orch.record_command_run(&approval, &result).await;
+    }
 
     Ok(result)
 }
@@ -1512,6 +1534,11 @@ pub async fn approve_action(
         })?;
 
     if let Some(approval) = &updated {
+        if approval.action_type == "runtime.runProjectCommand" {
+            let orch = state.orchestrator.lock().await;
+            orch.record_command_approval_resolved(approval).await;
+        }
+
         if let (Some(patch_id), Some(status)) = (
             patch_id_from_approval(approval),
             patch_status_from_approval(&approval.status),
@@ -1650,11 +1677,19 @@ mod tests {
             working_dir: "src-tauri".to_string(),
             allowed: false,
         };
+        let request = ProjectCommandRunRequest {
+            command: "cargo clippy".to_string(),
+            working_dir: "src-tauri".to_string(),
+            task_id: Some("task-1".to_string()),
+            step_id: Some("step-1".to_string()),
+        };
 
-        let input = build_project_command_approval_input(&inspection);
+        let input = build_project_command_approval_input(&inspection, &request);
 
         assert_eq!(input.risk, RiskLevel::High);
         assert_eq!(input.action_type, "runtime.runProjectCommand");
+        assert_eq!(input.task_id.as_deref(), Some("task-1"));
+        assert_eq!(input.step_id.as_deref(), Some("step-1"));
         assert_eq!(input.requested_by.as_deref(), Some("ProjectPanel"));
         assert_eq!(
             input.action_payload["command"],
@@ -1668,6 +1703,8 @@ mod tests {
             input.action_payload["allowedByDefault"],
             serde_json::json!(false)
         );
+        assert_eq!(input.action_payload["taskId"], serde_json::json!("task-1"));
+        assert_eq!(input.action_payload["stepId"], serde_json::json!("step-1"));
     }
 
     #[test]

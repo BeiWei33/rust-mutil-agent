@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、任务产物记录和验证失败任务/步骤标记已经落地；通用工具审批暂停、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、任务产物记录和验证失败任务/步骤标记已经落地；通用工具审批暂停、验证失败自动返工和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -18,7 +18,7 @@
 | Planner 规划 | 部分实现 | 默认使用规则/项目上下文规划；可通过环境变量或前端请求级配置启用 LLM JSON 规划并自动降级。 |
 | LLM Client | 部分实现 | 支持 Mock、OpenAI、DeepSeek 和自定义 OpenAI-compatible 端点；`LlamaCpp` 仍为预留。 |
 | 受控命令运行 | 已实现 | 只允许低风险验证命令，执行不经过 shell，结果写入命令审计 SQLite。 |
-| 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护、非 allowlist 命令手动审批和已审批命令执行。 |
+| 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护、非 allowlist 命令手动审批、任务关联命令审批等待/恢复和已审批命令执行结果回写。 |
 | 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、任务 artifact 写回和验证失败任务/步骤 failed 标记；通用工具审批暂停、验证失败自动返工和 ReviewAgent 尚未接入。 |
 
 ## 功能概览
@@ -28,7 +28,7 @@
 - 持久化：任务、任务事件、聊天历史、命令运行记录、审批请求和补丁提案都使用 SQLite 本地保存。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令、最近运行记录和补丁提案草稿。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
-- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，命令审批通过后可从审批面板执行并写入命令审计，补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，并可通过重试入口重新调度。
+- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，并可通过重试入口重新调度。
 - 请求级 LLM 设置：前端可传模型、Base URL、max tokens、temperature 和 API Key；API Key 只进入请求期临时上下文，不写入持久化数据。
 - 浏览器降级：前端单独运行 Vite 时自动使用 mock API，方便开发 UI。
 - 结构化错误：后端返回 `ApiError`，前端统一转换为中文错误提示和技术详情。
@@ -294,7 +294,7 @@ cp .env.example .env
 
 命令执行使用 `tokio::process::Command`，不经过 shell；工作目录必须解析在 workspace 内；包含 shell 控制字符或父目录穿越会被拒绝。执行超时为 120 秒，stdout/stderr 最多返回前 96 KB，并带截断标记。
 
-非 allowlist 命令不会直接执行；项目面板可调用 `request_project_command_approval` 创建高风险审批请求，审批 payload 会记录归一化命令、工作目录和默认 allowlist 判定。审批通过后，审批面板可调用 `run_approved_project_command` 按 approvalId 执行原审批 payload 中的命令，不经过 shell，继续限制在 workspace 内，并在 `command_runs.approval_id` 中写入审计关联。
+非 allowlist 命令不会直接执行；项目面板可调用 `request_project_command_approval` 创建高风险审批请求，审批 payload 会记录归一化命令、工作目录、默认 allowlist 判定和可选 `taskId` / `stepId`。若审批关联任务/步骤，创建审批会写入 `commandApproval` artifact、发出 `approvalRequested` 事件并把关联任务/步骤置为 `waitingApproval`；审批通过会写入 `commandApprovalResolved` artifact 并恢复运行态，拒绝会把关联任务/步骤标记为 `failed`。审批通过后，审批面板可调用 `run_approved_project_command` 按 approvalId 执行原审批 payload 中的命令，不经过 shell，继续限制在 workspace 内，并在 `command_runs.approval_id` 中写入审计关联；执行结果会按 approvalId 幂等写入 `commandRun` artifact 和事件，成功时完成关联步骤，失败时标记任务/步骤 failed，便于通过 `retry_task` 重新调度。
 
 ## 补丁提案与 diff 审批
 
@@ -305,7 +305,7 @@ cp .env.example .env
 ## 已知限制
 
 1. `Executor` 还没有接入真实代码修改或沙箱写入，补丁应用仍需要用户在审批面板手动触发。
-2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、已审批命令执行和补丁提案 diff 审批/应用；补丁审批已能挂起/恢复关联任务步骤，但尚未自动拦截通用文件写入。
+2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、已审批命令执行结果回写和补丁提案 diff 审批/应用；命令与补丁审批已能挂起/恢复关联任务步骤，但尚未自动拦截通用文件写入。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
 4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 仍需补齐同等级别权限控制。
@@ -316,11 +316,10 @@ cp .env.example .env
 
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
-1. 把已具备的 patch/diff 审批、手动回滚、失败回滚默认策略、补丁审批等待/恢复和验证失败可重试状态继续推进到验证失败自动返工。
+1. 把已具备的命令/patch 审批等待恢复、手动回滚、失败回滚默认策略和验证失败可重试状态继续推进到验证失败自动返工。
 2. 增强调度器控制面：步骤超时、单步骤跳过和通用工具审批暂停/恢复。
-3. 将已审批命令执行结果也回写到任务事件和步骤状态，形成更完整的端到端暂停/恢复链路。
-4. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
-5. 统一前端设置、安全存储和后端 LLMClient 配置。
+3. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
+4. 统一前端设置、安全存储和后端 LLMClient 配置。
 
 ## 文档
 
