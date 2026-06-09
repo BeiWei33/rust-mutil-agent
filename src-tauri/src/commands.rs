@@ -13,8 +13,8 @@ use crate::chat::ChatMessage as StoredChatMessage;
 use crate::error::AgentError;
 use crate::project::ProjectSnapshot;
 use crate::runtime::{
-    ProjectCommandInspection, ProjectCommandRunListResponse, ProjectCommandRunRequest,
-    ProjectCommandRunResponse,
+    CommandRunStore, ProjectCommandInspection, ProjectCommandRunListResponse,
+    ProjectCommandRunRequest, ProjectCommandRunResponse,
 };
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{
@@ -951,6 +951,54 @@ pub async fn run_project_command(
     Ok(result)
 }
 
+async fn run_patch_auto_verification(
+    command_store: &CommandRunStore,
+) -> (Vec<ProjectCommandRunResponse>, Vec<Value>) {
+    let snapshot = match crate::project::scan_project() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return (
+                Vec::new(),
+                vec![serde_json::json!({
+                    "phase": "scanProject",
+                    "error": format!("{}", err),
+                })],
+            );
+        }
+    };
+
+    let mut runs = Vec::new();
+    let mut errors = Vec::new();
+    for command in snapshot.recommended_commands {
+        let request = ProjectCommandRunRequest {
+            command: command.command.clone(),
+            working_dir: command.working_dir.clone(),
+        };
+        match crate::runtime::run_project_command(request).await {
+            Ok(run) => {
+                if let Err(err) = command_store.append_run(&run) {
+                    errors.push(serde_json::json!({
+                        "phase": "audit",
+                        "runId": &run.id,
+                        "command": &run.command,
+                        "workingDir": &run.working_dir,
+                        "error": format!("{}", err),
+                    }));
+                }
+                runs.push(run);
+            }
+            Err(err) => errors.push(serde_json::json!({
+                "phase": "runCommand",
+                "command": command.command,
+                "workingDir": command.working_dir,
+                "error": format!("{}", err),
+            })),
+        }
+    }
+
+    (runs, errors)
+}
+
 fn build_project_command_approval_input(
     inspection: &ProjectCommandInspection,
 ) -> CreateApprovalRequest {
@@ -1279,6 +1327,19 @@ pub async fn apply_approved_patch(
         let orch = state.orchestrator.lock().await;
         orch.record_patch_applied(&proposal, &result, &approval.id)
             .await;
+    }
+    if !result.already_applied {
+        let command_store = state.command_store.clone();
+        let (verification_runs, verification_errors) =
+            run_patch_auto_verification(command_store.as_ref()).await;
+        let orch = state.orchestrator.lock().await;
+        orch.record_patch_verification(
+            &proposal,
+            &approval.id,
+            &verification_runs,
+            &verification_errors,
+        )
+        .await;
     }
 
     Ok(result)

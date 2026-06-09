@@ -14,6 +14,7 @@ use crate::agent::tool_agent::ToolAgent;
 use crate::agent::traits::{Agent, AgentMessage};
 use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
+use crate::runtime::ProjectCommandRunResponse;
 use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep, TaskStore};
 use crate::workspace::{self, PatchApplyResult, PatchProposal};
 use std::collections::HashMap;
@@ -458,6 +459,50 @@ impl TaskRuntime {
         Some(updated)
     }
 
+    fn record_patch_verification(
+        &mut self,
+        proposal: &PatchProposal,
+        approval_id: &str,
+        runs: &[ProjectCommandRunResponse],
+        errors: &[serde_json::Value],
+    ) -> Option<Task> {
+        let task_id = proposal.task_id.as_deref()?.trim();
+        if task_id.is_empty() {
+            return None;
+        }
+
+        let artifact = patch_verification_artifact(proposal, approval_id, runs, errors);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_patch_kind_artifact(task, "patchVerification", &proposal.id) {
+            return Some(task.clone());
+        }
+
+        let status = artifact
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("skipped");
+        task.add_artifact(artifact.clone());
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            proposal.step_id.clone(),
+            TaskEventKind::ArtifactCreated,
+            format!(
+                "补丁验证{}：{}",
+                patch_verification_status_label(status),
+                proposal.summary
+            ),
+            artifact,
+        ));
+
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
     fn fail_running_step(
         &mut self,
         task_id: &str,
@@ -846,6 +891,18 @@ impl Orchestrator {
         runtime.record_patch_applied(proposal, result, approval_id)
     }
 
+    /// 记录补丁应用后的自动验证结果为任务 artifact 和事件。
+    pub async fn record_patch_verification(
+        &self,
+        proposal: &PatchProposal,
+        approval_id: &str,
+        runs: &[ProjectCommandRunResponse],
+        errors: &[serde_json::Value],
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_patch_verification(proposal, approval_id, runs, errors)
+    }
+
     /// 取消任务。
     pub async fn cancel_task(&self, task_id: &str, reason: &str) -> Option<Task> {
         let mut runtime = self.runtime.lock().await;
@@ -1108,9 +1165,74 @@ fn patch_apply_artifact(
     })
 }
 
+fn patch_verification_artifact(
+    proposal: &PatchProposal,
+    approval_id: &str,
+    runs: &[ProjectCommandRunResponse],
+    errors: &[serde_json::Value],
+) -> serde_json::Value {
+    let status = patch_verification_status(runs, errors);
+    let success_count = runs.iter().filter(|run| run.success).count();
+    let failed_count = runs.iter().filter(|run| !run.success).count() + errors.len();
+    let run_summaries = runs
+        .iter()
+        .map(|run| {
+            serde_json::json!({
+                "id": &run.id,
+                "command": &run.command,
+                "workingDir": &run.working_dir,
+                "success": run.success,
+                "exitCode": run.exit_code,
+                "durationMs": run.duration_ms,
+                "timedOut": run.timed_out,
+                "createdAt": &run.created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "kind": "patchVerification",
+        "patchId": &proposal.id,
+        "approvalId": approval_id,
+        "summary": &proposal.summary,
+        "status": status,
+        "verifiedAt": chrono::Utc::now(),
+        "commandCount": runs.len() + errors.len(),
+        "successCount": success_count,
+        "failedCount": failed_count,
+        "runs": run_summaries,
+        "errors": errors,
+    })
+}
+
+fn patch_verification_status(
+    runs: &[ProjectCommandRunResponse],
+    errors: &[serde_json::Value],
+) -> &'static str {
+    if !errors.is_empty() || runs.iter().any(|run| !run.success) {
+        "failed"
+    } else if runs.is_empty() {
+        "skipped"
+    } else {
+        "passed"
+    }
+}
+
+fn patch_verification_status_label(status: &str) -> &'static str {
+    match status {
+        "passed" => "通过",
+        "failed" => "失败",
+        _ => "跳过",
+    }
+}
+
 fn has_patch_artifact(task: &Task, patch_id: &str) -> bool {
+    has_patch_kind_artifact(task, "patchApplied", patch_id)
+}
+
+fn has_patch_kind_artifact(task: &Task, kind: &str, patch_id: &str) -> bool {
     task.artifacts.iter().any(|artifact| {
-        artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patchApplied")
+        artifact.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
             && artifact.get("patchId").and_then(serde_json::Value::as_str) == Some(patch_id)
     })
 }
@@ -1615,6 +1737,24 @@ mod tests {
         }
     }
 
+    fn command_run(command: &str, success: bool) -> ProjectCommandRunResponse {
+        ProjectCommandRunResponse {
+            id: format!("run-{command}").replace(' ', "-"),
+            approval_id: None,
+            command: command.to_string(),
+            working_dir: "src-tauri".to_string(),
+            exit_code: Some(if success { 0 } else { 101 }),
+            success,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 12,
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            created_at: "2026-06-09T02:00:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn test_record_patch_applied_adds_task_artifact_and_event() {
         let task_id = "task-patch-artifact";
@@ -1676,6 +1816,70 @@ mod tests {
             .unwrap();
         runtime
             .record_patch_applied(&proposal, &result, "approval-1")
+            .unwrap();
+
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            runtime
+                .get_events(task_id)
+                .iter()
+                .filter(|event| event.kind == TaskEventKind::ArtifactCreated)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_record_patch_verification_adds_artifact_and_event() {
+        let task_id = "task-patch-verification";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "验证补丁"));
+        let proposal = patch_proposal_for_task(task_id);
+        let runs = vec![
+            command_run("cargo test", true),
+            command_run("npm run build", false),
+        ];
+
+        let task = runtime
+            .record_patch_verification(&proposal, "approval-1", &runs, &[])
+            .unwrap();
+
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            task.artifacts[0]["kind"],
+            serde_json::json!("patchVerification")
+        );
+        assert_eq!(task.artifacts[0]["status"], serde_json::json!("failed"));
+        assert_eq!(task.artifacts[0]["commandCount"], serde_json::json!(2));
+        assert_eq!(task.artifacts[0]["successCount"], serde_json::json!(1));
+        assert_eq!(task.artifacts[0]["failedCount"], serde_json::json!(1));
+
+        let events = runtime.get_events(task_id);
+        let event = events
+            .iter()
+            .find(|event| event.kind == TaskEventKind::ArtifactCreated)
+            .unwrap();
+        assert!(event.message.contains("补丁验证失败"));
+        assert_eq!(
+            event.payload["kind"],
+            serde_json::json!("patchVerification")
+        );
+    }
+
+    #[test]
+    fn test_record_patch_verification_is_idempotent_for_same_patch() {
+        let task_id = "task-patch-verification-idempotent";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "重复验证补丁"));
+        let proposal = patch_proposal_for_task(task_id);
+        let runs = vec![command_run("cargo check", true)];
+
+        runtime
+            .record_patch_verification(&proposal, "approval-1", &runs, &[])
+            .unwrap();
+        runtime
+            .record_patch_verification(&proposal, "approval-1", &runs, &[])
             .unwrap();
 
         let task = runtime.get_task(task_id).unwrap();

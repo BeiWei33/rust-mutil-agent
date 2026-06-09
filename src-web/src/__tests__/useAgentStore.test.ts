@@ -891,12 +891,14 @@ describe("useAgentStore", () => {
         },
       ],
     });
+    mockApi.listProjectCommandRuns.mockResolvedValue({ runs: [] });
 
     await getState().applyApprovedPatch("approval-patch-apply-1");
 
     expect(mockApi.applyApprovedPatch).toHaveBeenCalledWith({
       approvalId: "approval-patch-apply-1",
     });
+    expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(10);
     expect(getState().patchApplyLoadingId).toBeNull();
     expect(getState().approvalsError).toBeNull();
     expect(getState().lastPatchApplyResult).toEqual(result);
@@ -951,6 +953,27 @@ describe("useAgentStore", () => {
           files: ["README.md"],
           appliedAt: "2026-06-09T12:02:00Z",
         },
+        {
+          kind: "patchVerification",
+          patchId: "patch-task-1",
+          summary: "更新任务文件",
+          status: "passed",
+          commandCount: 1,
+          successCount: 1,
+          failedCount: 0,
+          verifiedAt: "2026-06-09T12:03:00Z",
+          runs: [
+            {
+              id: "run-1",
+              command: "cargo test",
+              workingDir: "src-tauri",
+              success: true,
+              exitCode: 0,
+              durationMs: 1200,
+              timedOut: false,
+            },
+          ],
+        },
       ],
       output: "完成",
       error: null,
@@ -976,11 +999,31 @@ describe("useAgentStore", () => {
     useAgentStore.setState({ patchProposals: [proposal], lastPatchProposal: proposal });
     mockApi.applyApprovedPatch.mockResolvedValue(result);
     mockApi.listPatchProposals.mockResolvedValue({ proposals: [] });
+    mockApi.listProjectCommandRuns.mockResolvedValue({
+      runs: [
+        {
+          id: "run-1",
+          approvalId: null,
+          command: "cargo test",
+          workingDir: "src-tauri",
+          exitCode: 0,
+          success: true,
+          stdout: "ok",
+          stderr: "",
+          durationMs: 1200,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          createdAt: "2026-06-09T12:03:00Z",
+        },
+      ],
+    });
     mockApi.getTask.mockResolvedValue(task);
     mockApi.getTaskEvents.mockResolvedValue([event]);
 
     await getState().applyApprovedPatch("approval-patch-task-1");
 
+    expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(10);
     expect(mockApi.getTask).toHaveBeenCalledWith("task-1");
     expect(mockApi.getTaskEvents).toHaveBeenCalledWith("task-1");
     expect(getState().selectedTask).toEqual(task);

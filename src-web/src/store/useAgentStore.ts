@@ -607,6 +607,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       get().fetchPatchProposals(10).catch(() => {
         // 应用结果已返回，列表刷新失败不影响审批面板状态。
       });
+      get().fetchCommandRuns(10).catch(() => {
+        // 自动验证结果刷新失败不影响补丁应用主流程。
+      });
       if (linkedTaskId) {
         await get().fetchTask(linkedTaskId).catch(() => {
           // 任务 artifact 刷新失败不影响补丁应用主流程。

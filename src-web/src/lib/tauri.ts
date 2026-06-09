@@ -1030,6 +1030,44 @@ async function mockApplyApprovedPatch(
     alreadyApplied,
   };
 
+  const verificationRuns: ProjectCommandRunResponse[] = alreadyApplied
+    ? []
+    : [
+        {
+          id: generateId(),
+          approvalId: null,
+          command: "cargo test",
+          workingDir: "src-tauri",
+          exitCode: 0,
+          success: true,
+          stdout: "mock patch verification passed",
+          stderr: "",
+          durationMs: 450,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          id: generateId(),
+          approvalId: null,
+          command: "npm test -- --run",
+          workingDir: "src-web",
+          exitCode: 0,
+          success: true,
+          stdout: "mock frontend verification passed",
+          stderr: "",
+          durationMs: 380,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          createdAt: new Date().toISOString(),
+        },
+      ];
+  if (verificationRuns.length > 0) {
+    MOCK_COMMAND_RUNS = [...verificationRuns, ...MOCK_COMMAND_RUNS].slice(0, 50);
+  }
+
   if (updated.taskId) {
     const artifact = {
       kind: "patchApplied",
@@ -1044,12 +1082,12 @@ async function mockApplyApprovedPatch(
       unifiedDiff: updated.unifiedDiff,
     };
     const targetTask = MOCK_TASKS.find((task) => task.id === updated.taskId);
-    const hasArtifact = (task: Task) =>
+    const hasArtifact = (task: Task, kind: string) =>
       task.artifacts.some((item) => {
         const value = item as { kind?: unknown; patchId?: unknown };
-        return value.kind === "patchApplied" && value.patchId === updated.id;
+        return value.kind === kind && value.patchId === updated.id;
       });
-    const shouldAppendArtifact = !!targetTask && !hasArtifact(targetTask);
+    const shouldAppendArtifact = !!targetTask && !hasArtifact(targetTask, "patchApplied");
     MOCK_TASKS = MOCK_TASKS.map((task) =>
       task.id === updated.taskId && shouldAppendArtifact
         ? {
@@ -1070,6 +1108,56 @@ async function mockApplyApprovedPatch(
           message: `补丁已应用：${updated.summary}`,
           payload: artifact,
           createdAt: appliedAt,
+        },
+      ];
+    }
+    const verificationArtifact = {
+      kind: "patchVerification",
+      patchId: updated.id,
+      approvalId: approval.id,
+      summary: updated.summary,
+      status: verificationRuns.every((run) => run.success) ? "passed" : "failed",
+      verifiedAt: new Date().toISOString(),
+      commandCount: verificationRuns.length,
+      successCount: verificationRuns.filter((run) => run.success).length,
+      failedCount: verificationRuns.filter((run) => !run.success).length,
+      runs: verificationRuns.map((run) => ({
+        id: run.id,
+        command: run.command,
+        workingDir: run.workingDir,
+        success: run.success,
+        exitCode: run.exitCode,
+        durationMs: run.durationMs,
+        timedOut: run.timedOut,
+        createdAt: run.createdAt,
+      })),
+      errors: [],
+    };
+    const refreshedTargetTask = MOCK_TASKS.find((task) => task.id === updated.taskId);
+    const shouldAppendVerification =
+      verificationRuns.length > 0 &&
+      !!refreshedTargetTask &&
+      !hasArtifact(refreshedTargetTask, "patchVerification");
+    MOCK_TASKS = MOCK_TASKS.map((task) =>
+      task.id === updated.taskId && shouldAppendVerification
+        ? {
+            ...task,
+            artifacts: [...task.artifacts, verificationArtifact],
+            updatedAt: verificationArtifact.verifiedAt,
+          }
+        : task
+    );
+    if (shouldAppendVerification) {
+      MOCK_EVENTS[updated.taskId] = [
+        ...(MOCK_EVENTS[updated.taskId] ?? []),
+        {
+          id: generateId(),
+          taskId: updated.taskId,
+          stepId: updated.stepId ?? null,
+          kind: "artifactCreated",
+          message: `补丁验证通过：${updated.summary}`,
+          payload: verificationArtifact,
+          createdAt: verificationArtifact.verifiedAt,
         },
       ];
     }

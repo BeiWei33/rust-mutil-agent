@@ -174,6 +174,29 @@ interface PatchAppliedArtifact {
   appliedAt?: string;
 }
 
+interface PatchVerificationRun {
+  id?: string;
+  command: string;
+  workingDir: string;
+  success: boolean;
+  exitCode?: number | null;
+  durationMs?: number;
+  timedOut?: boolean;
+}
+
+interface PatchVerificationArtifact {
+  kind: "patchVerification";
+  patchId: string;
+  approvalId?: string;
+  summary?: string;
+  status?: "passed" | "failed" | "skipped" | string;
+  verifiedAt?: string;
+  commandCount?: number;
+  successCount?: number;
+  failedCount?: number;
+  runs?: PatchVerificationRun[];
+}
+
 function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
   if (!value || typeof value !== "object") return null;
   const artifact = value as {
@@ -197,6 +220,81 @@ function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
       : undefined,
     appliedAt: typeof artifact.appliedAt === "string" ? artifact.appliedAt : undefined,
   };
+}
+
+function patchVerificationArtifact(value: unknown): PatchVerificationArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as {
+    kind?: unknown;
+    patchId?: unknown;
+    approvalId?: unknown;
+    summary?: unknown;
+    status?: unknown;
+    verifiedAt?: unknown;
+    commandCount?: unknown;
+    successCount?: unknown;
+    failedCount?: unknown;
+    runs?: unknown;
+  };
+  if (artifact.kind !== "patchVerification" || typeof artifact.patchId !== "string") {
+    return null;
+  }
+
+  const runs = Array.isArray(artifact.runs)
+    ? artifact.runs
+        .map((run) => {
+          if (!run || typeof run !== "object") return null;
+          const item = run as {
+            id?: unknown;
+            command?: unknown;
+            workingDir?: unknown;
+            success?: unknown;
+            exitCode?: unknown;
+            durationMs?: unknown;
+            timedOut?: unknown;
+          };
+          if (
+            typeof item.command !== "string" ||
+            typeof item.workingDir !== "string" ||
+            typeof item.success !== "boolean"
+          ) {
+            return null;
+          }
+          return {
+            id: typeof item.id === "string" ? item.id : undefined,
+            command: item.command,
+            workingDir: item.workingDir,
+            success: item.success,
+            exitCode: typeof item.exitCode === "number" ? item.exitCode : null,
+            durationMs: typeof item.durationMs === "number" ? item.durationMs : undefined,
+            timedOut: typeof item.timedOut === "boolean" ? item.timedOut : undefined,
+          };
+        })
+        .filter((run): run is PatchVerificationRun => run !== null)
+    : undefined;
+
+  return {
+    kind: "patchVerification",
+    patchId: artifact.patchId,
+    approvalId: typeof artifact.approvalId === "string" ? artifact.approvalId : undefined,
+    summary: typeof artifact.summary === "string" ? artifact.summary : undefined,
+    status: typeof artifact.status === "string" ? artifact.status : undefined,
+    verifiedAt: typeof artifact.verifiedAt === "string" ? artifact.verifiedAt : undefined,
+    commandCount: typeof artifact.commandCount === "number" ? artifact.commandCount : undefined,
+    successCount: typeof artifact.successCount === "number" ? artifact.successCount : undefined,
+    failedCount: typeof artifact.failedCount === "number" ? artifact.failedCount : undefined,
+    runs,
+  };
+}
+
+function verificationStatusLabel(status?: string): { label: string; className: string } {
+  if (status === "passed") {
+    return { label: "验证通过", className: "border-emerald-500/20 bg-emerald-500/10 text-emerald-200" };
+  }
+  if (status === "failed") {
+    return { label: "验证失败", className: "border-amber-500/20 bg-amber-500/10 text-amber-200" };
+  }
+  return { label: "验证跳过", className: "border-zinc-700 bg-zinc-800/60 text-zinc-300" };
 }
 
 function ArtifactRow({ artifact }: { artifact: unknown }) {
@@ -227,6 +325,45 @@ function ArtifactRow({ artifact }: { artifact: unknown }) {
               >
                 {file}
               </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const verificationArtifact = patchVerificationArtifact(artifact);
+  if (verificationArtifact) {
+    const status = verificationStatusLabel(verificationArtifact.status);
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-zinc-200">
+              {verificationArtifact.summary || verificationArtifact.patchId}
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {verificationArtifact.successCount ?? 0}/{verificationArtifact.commandCount ?? 0} 通过
+              {verificationArtifact.verifiedAt && ` · ${formatTime(verificationArtifact.verifiedAt)}`}
+            </div>
+          </div>
+          <span className={`rounded-md border px-2 py-0.5 text-[11px] ${status.className}`}>
+            {status.label}
+          </span>
+        </div>
+        {verificationArtifact.runs && verificationArtifact.runs.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {verificationArtifact.runs.map((run) => (
+              <div
+                key={run.id ?? `${run.workingDir}:${run.command}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px]"
+              >
+                <code className="min-w-0 truncate text-primary-200">{run.command}</code>
+                <span className={run.success ? "text-emerald-300" : "text-amber-300"}>
+                  {run.timedOut ? "超时" : run.success ? "通过" : "失败"}
+                  {run.durationMs !== undefined && ` · ${run.durationMs}ms`}
+                </span>
+              </div>
             ))}
           </div>
         )}
