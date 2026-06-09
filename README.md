@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` 自动审批拦截、任务产物记录和验证失败任务/步骤标记已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` 自动审批拦截和 workspace 路径沙箱、任务产物记录和验证失败任务/步骤标记已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -19,7 +19,7 @@
 | LLM Client | 部分实现 | 支持 Mock、OpenAI、DeepSeek 和自定义 OpenAI-compatible 端点；`LlamaCpp` 仍为预留。 |
 | 受控命令运行 | 已实现 | 只允许低风险验证命令，执行不经过 shell，结果写入命令审计 SQLite。 |
 | 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护、非 allowlist 命令手动审批、通用 `tool.*` 工具审批、任务关联审批等待/恢复和已审批命令执行结果回写。 |
-| 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、legacy `file_read` 自动审批拦截、任务 artifact 写回和验证失败任务/步骤 failed 标记；更多 ToolAgent 工具权限、验证失败自动返工和 ReviewAgent 尚未接入。 |
+| 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、legacy `file_read` 自动审批拦截和 workspace 路径沙箱、任务 artifact 写回和验证失败任务/步骤 failed 标记；更多 ToolAgent 工具权限、验证失败自动返工和 ReviewAgent 尚未接入。 |
 
 ## 功能概览
 
@@ -308,7 +308,7 @@ cp .env.example .env
 
 `request_tool_action_approval` 可为 `tool.*` 动作创建审批请求，调用方需提供标题、原因、动作类型、payload、风险等级和可选 `taskId` / `stepId`。后端会拒绝非 `tool.` 前缀的动作类型；若请求关联任务/步骤，创建审批会写入 `toolApproval` artifact、发出 `approvalRequested` 事件，并把关联任务/步骤置为 `waitingApproval`。
 
-用户通过或拒绝审批时，`approve_action` 会为 `tool.*` 请求写入 `toolApprovalResolved` artifact 和 `approvalResolved` 事件；通过会把等待中的任务/步骤恢复为 `running`，拒绝会把关联任务/步骤标记为 `failed`，便于后续通过 `retry_task` 重新调度。调度器会在 Tool 步骤即将调用 legacy `file_read` 时自动创建 `tool.fileRead` 审批；通过后会按审批 payload 恢复原 Tool 步骤投递，拒绝则保留失败可重试状态。当前仍需把同类机制扩展到更多高风险工具、路径沙箱和完整审计策略。
+用户通过或拒绝审批时，`approve_action` 会为 `tool.*` 请求写入 `toolApprovalResolved` artifact 和 `approvalResolved` 事件；通过会把等待中的任务/步骤恢复为 `running`，拒绝会把关联任务/步骤标记为 `failed`，便于后续通过 `retry_task` 重新调度。调度器会在 Tool 步骤即将调用 legacy `file_read` 时自动创建 `tool.fileRead` 审批；通过后会按审批 payload 恢复原 Tool 步骤投递，拒绝则保留失败可重试状态。legacy `file_read` 会复用 workspace 只读文件能力，限制父目录穿越、绝对路径、敏感文件和超大文件。当前仍需把同类机制扩展到更多高风险工具和完整审计策略。
 
 ## 已知限制
 
@@ -316,7 +316,7 @@ cp .env.example .env
 2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、通用 `tool.*` 工具审批、legacy `file_read` 自动审批拦截、已审批命令执行结果回写和补丁提案 diff 审批/应用；命令、补丁和通用工具审批已能挂起/恢复关联任务步骤，但尚未覆盖所有 ToolAgent 工具或通用文件写入。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
 4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
-5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已接入自动审批拦截，但仍需补齐路径权限、沙箱和更完整审计。
+5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截，但仍需补齐更完整审计。
 6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
 7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
 
@@ -325,7 +325,7 @@ cp .env.example .env
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
 1. 把已具备的命令/patch 审批等待恢复、手动回滚、失败回滚默认策略和验证失败可重试状态继续推进到验证失败自动返工。
-2. 将 `tool.*` 自动审批拦截从 legacy `file_read` 扩展到更多 ToolAgent 高风险动作，并补齐路径沙箱与审计。
+2. 将 `tool.*` 自动审批拦截从 legacy `file_read` 扩展到更多 ToolAgent 高风险动作，并补齐审计。
 3. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
 4. 统一前端设置、安全存储和后端 LLMClient 配置。
 

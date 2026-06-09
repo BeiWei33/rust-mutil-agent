@@ -172,29 +172,27 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
         },
     );
 
-    // --- 3. 文件读取（占位） ---
+    // --- 3. Workspace 沙箱文件读取 ---
     registry.register(
         ToolDescription {
             name: "file_read".to_string(),
-            description: "读取文本文件内容".to_string(),
+            description: "读取 workspace 内的普通文本文件内容".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "文件路径" }
+                    "path": { "type": "string", "description": "workspace 内相对文件路径" }
                 },
                 "required": ["path"]
             }),
         },
         |args| {
             let path = args["path"].as_str().ok_or("缺少 path 参数")?;
-            match std::fs::read_to_string(path) {
-                Ok(content) => Ok(serde_json::json!({
-                    "content": content,
-                    "path": path,
-                    "size": content.len()
-                })),
-                Err(e) => Err(format!("读取文件失败: {e}")),
-            }
+            let file = crate::workspace::read_file(path).map_err(|e| format!("{}", e))?;
+            Ok(serde_json::json!({
+                "content": file.content,
+                "path": file.path,
+                "size": file.size_bytes,
+            }))
         },
     );
 
@@ -622,6 +620,42 @@ mod tests {
             .unwrap();
 
         assert!(result["datetime"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_file_read_uses_workspace_sandbox() {
+        let mut registry = ToolRegistry::new();
+        register_builtin_tools(&mut registry);
+
+        let result = registry
+            .call("file_read", serde_json::json!({ "path": "README.md" }))
+            .unwrap();
+
+        assert_eq!(result["path"], serde_json::json!("README.md"));
+        assert!(result["content"]
+            .as_str()
+            .unwrap()
+            .contains("多 Agent 协同智能体"));
+        assert!(result["size"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_file_read_rejects_workspace_escape() {
+        let mut registry = ToolRegistry::new();
+        register_builtin_tools(&mut registry);
+
+        let parent_result =
+            registry.call("file_read", serde_json::json!({ "path": "../Cargo.toml" }));
+        assert!(parent_result.is_err());
+        assert!(format!("{}", parent_result.unwrap_err()).contains("workspace 外部"));
+
+        let absolute_path = crate::workspace::workspace_root().join("README.md");
+        let absolute_result = registry.call(
+            "file_read",
+            serde_json::json!({ "path": absolute_path.to_string_lossy() }),
+        );
+        assert!(absolute_result.is_err());
+        assert!(format!("{}", absolute_result.unwrap_err()).contains("workspace 外部"));
     }
 
     #[tokio::test]

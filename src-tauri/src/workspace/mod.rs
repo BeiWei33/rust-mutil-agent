@@ -79,6 +79,12 @@ pub fn list_files(max_files: Option<usize>) -> Result<Vec<WorkspaceEntry>, Agent
 pub fn read_file(path: &str) -> Result<FileReadResponse, AgentError> {
     let root = workspace_root();
     let file_path = resolve_existing_path(&root, path)?;
+    let canonical_root = root.canonicalize().map_err(|e| {
+        AgentError::Internal(format!(
+            "解析 workspace root 失败 [{}]: {e}",
+            root.display()
+        ))
+    })?;
     let metadata = fs::metadata(&file_path)
         .map_err(|e| AgentError::Internal(format!("读取文件元数据失败 [{}]: {e}", path)))?;
 
@@ -104,7 +110,7 @@ pub fn read_file(path: &str) -> Result<FileReadResponse, AgentError> {
     let content = fs::read_to_string(&file_path)
         .map_err(|e| AgentError::Internal(format!("读取文本文件失败 [{}]: {e}", path)))?;
     Ok(FileReadResponse {
-        path: relative_path(&root, &file_path),
+        path: relative_path(&canonical_root, &file_path),
         content,
         size_bytes: metadata.len(),
     })
@@ -396,6 +402,13 @@ mod tests {
     fn read_file_rejects_parent_traversal() {
         let result = read_file("../Cargo.toml");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_file_returns_workspace_relative_path() {
+        let result = read_file("README.md").unwrap();
+        assert_eq!(result.path, "README.md");
+        assert!(result.content.contains("多 Agent 协同智能体"));
     }
 
     #[test]
