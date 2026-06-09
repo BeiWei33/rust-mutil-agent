@@ -901,7 +901,6 @@ describe("useAgentStore", () => {
 
     expect(mockApi.applyApprovedPatch).toHaveBeenCalledWith({
       approvalId: "approval-patch-apply-1",
-      autoRollbackOnVerificationFailure: false,
     });
     expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(10);
     expect(getState().patchApplyLoadingId).toBeNull();

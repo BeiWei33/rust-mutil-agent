@@ -81,7 +81,7 @@ pub struct RunApprovedProjectCommandRequest {
 pub struct ApplyApprovedPatchRequest {
     pub approval_id: String,
     #[serde(default)]
-    pub auto_rollback_on_verification_failure: bool,
+    pub auto_rollback_on_verification_failure: Option<bool>,
 }
 
 /// 回滚已应用补丁请求。
@@ -1013,6 +1013,28 @@ fn patch_verification_failed(runs: &[ProjectCommandRunResponse], errors: &[Value
     !errors.is_empty() || runs.iter().any(|run| !run.success)
 }
 
+const PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE_ENV: &str =
+    "PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE";
+
+fn parse_bool_flag(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
+}
+
+fn default_auto_rollback_on_verification_failure() -> bool {
+    parse_bool_flag(
+        std::env::var(PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn resolve_auto_rollback_on_verification_failure(request_value: Option<bool>) -> bool {
+    request_value.unwrap_or_else(default_auto_rollback_on_verification_failure)
+}
+
 fn successful_auto_rollback_result(result: PatchRevertResult) -> PatchAutoRollbackResult {
     PatchAutoRollbackResult {
         triggered_by: "verificationFailure".to_string(),
@@ -1209,6 +1231,7 @@ fn build_patch_approval_input(proposal: &PatchProposal) -> CreateApprovalRequest
             "summary": &proposal.summary,
             "files": files,
             "unifiedDiff": &proposal.unified_diff,
+            "defaultAutoRollbackOnVerificationFailure": default_auto_rollback_on_verification_failure(),
         }),
         requested_by: Some(proposal.requested_by.clone()),
     }
@@ -1367,7 +1390,11 @@ pub async fn apply_approved_patch(
         let mut auto_rollback = None;
         let mut reverted = None;
 
-        if request.auto_rollback_on_verification_failure
+        let auto_rollback_on_verification_failure = resolve_auto_rollback_on_verification_failure(
+            request.auto_rollback_on_verification_failure,
+        );
+
+        if auto_rollback_on_verification_failure
             && patch_verification_failed(&verification_runs, &verification_errors)
         {
             match crate::workspace::revert_patch_proposal(&mut proposal, Some("auto-verification"))
@@ -1730,18 +1757,43 @@ mod tests {
         );
         assert_eq!(input.action_payload["unifiedDiff"], serde_json::json!(diff));
         assert_eq!(
+            input.action_payload["defaultAutoRollbackOnVerificationFailure"],
+            serde_json::json!(default_auto_rollback_on_verification_failure())
+        );
+        assert_eq!(
             input.action_payload["files"][0]["path"],
             serde_json::json!("README.md")
         );
     }
 
     #[test]
-    fn test_apply_patch_request_defaults_auto_rollback_disabled() {
+    fn test_apply_patch_request_keeps_auto_rollback_optional() {
         let request: ApplyApprovedPatchRequest =
             serde_json::from_value(serde_json::json!({ "approvalId": "approval-1" })).unwrap();
 
         assert_eq!(request.approval_id, "approval-1");
-        assert!(!request.auto_rollback_on_verification_failure);
+        assert_eq!(request.auto_rollback_on_verification_failure, None);
+
+        let request: ApplyApprovedPatchRequest = serde_json::from_value(serde_json::json!({
+            "approvalId": "approval-1",
+            "autoRollbackOnVerificationFailure": false
+        }))
+        .unwrap();
+
+        assert_eq!(request.auto_rollback_on_verification_failure, Some(false));
+    }
+
+    #[test]
+    fn test_auto_rollback_policy_parses_truthy_flags_and_respects_overrides() {
+        for value in ["true", "1", "yes", "on", " TRUE "] {
+            assert!(parse_bool_flag(Some(value)));
+        }
+        for value in ["false", "0", "no", "off", "", "maybe"] {
+            assert!(!parse_bool_flag(Some(value)));
+        }
+        assert!(!parse_bool_flag(None));
+        assert!(resolve_auto_rollback_on_verification_failure(Some(true)));
+        assert!(!resolve_auto_rollback_on_verification_failure(Some(false)));
     }
 
     #[test]

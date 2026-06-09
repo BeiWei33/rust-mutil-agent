@@ -70,6 +70,7 @@ interface PatchApprovalPayload {
   summary?: string;
   files: { path: string; diff?: string }[];
   unifiedDiff: string;
+  defaultAutoRollbackOnVerificationFailure?: boolean;
 }
 
 function patchApprovalPayload(value: unknown): PatchApprovalPayload | null {
@@ -79,6 +80,7 @@ function patchApprovalPayload(value: unknown): PatchApprovalPayload | null {
     summary?: unknown;
     files?: unknown;
     unifiedDiff?: unknown;
+    defaultAutoRollbackOnVerificationFailure?: unknown;
   };
   if (typeof payload.patchId !== "string" || typeof payload.unifiedDiff !== "string") {
     return null;
@@ -101,6 +103,10 @@ function patchApprovalPayload(value: unknown): PatchApprovalPayload | null {
     summary: typeof payload.summary === "string" ? payload.summary : undefined,
     files,
     unifiedDiff: payload.unifiedDiff,
+    defaultAutoRollbackOnVerificationFailure:
+      typeof payload.defaultAutoRollbackOnVerificationFailure === "boolean"
+        ? payload.defaultAutoRollbackOnVerificationFailure
+        : undefined,
   };
 }
 
@@ -366,7 +372,9 @@ export default function ApprovalPanel() {
   const applyApprovedPatch = useAgentStore((s) => s.applyApprovedPatch);
   const revertAppliedPatch = useAgentStore((s) => s.revertAppliedPatch);
   const [filter, setFilter] = useState<ApprovalStatus | undefined>("pending");
-  const [autoRollbackPatchIds, setAutoRollbackPatchIds] = useState<Set<string>>(() => new Set());
+  const [autoRollbackOverrides, setAutoRollbackOverrides] = useState<Map<string, boolean>>(
+    () => new Map()
+  );
 
   useEffect(() => {
     fetchApprovals(filter);
@@ -447,16 +455,19 @@ export default function ApprovalPanel() {
                   ? lastPatchRevertResult
                   : null;
               const autoRollbackOnFailure =
-                !!patchPayload && autoRollbackPatchIds.has(patchPayload.patchId);
+                !!patchPayload &&
+                (autoRollbackOverrides.get(patchPayload.patchId) ??
+                  patchPayload.defaultAutoRollbackOnVerificationFailure ??
+                  false);
               const toggleAutoRollback = () => {
                 if (!patchPayload) return;
-                setAutoRollbackPatchIds((current) => {
-                  const next = new Set(current);
-                  if (next.has(patchPayload.patchId)) {
-                    next.delete(patchPayload.patchId);
-                  } else {
-                    next.add(patchPayload.patchId);
-                  }
+                setAutoRollbackOverrides((current) => {
+                  const next = new Map(current);
+                  const currentValue =
+                    next.get(patchPayload.patchId) ??
+                    patchPayload.defaultAutoRollbackOnVerificationFailure ??
+                    false;
+                  next.set(patchPayload.patchId, !currentValue);
                   return next;
                 });
               };

@@ -586,11 +586,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   applyApprovedPatch: async (approvalId, options) => {
     set({ patchApplyLoadingId: approvalId, approvalsError: null });
     try {
-      const result = await api.applyApprovedPatch({
+      const request = {
         approvalId,
-        autoRollbackOnVerificationFailure:
-          options?.autoRollbackOnVerificationFailure ?? false,
-      });
+        ...(options?.autoRollbackOnVerificationFailure === undefined
+          ? {}
+          : {
+              autoRollbackOnVerificationFailure:
+                options.autoRollbackOnVerificationFailure,
+            }),
+      };
+      const result = await api.applyApprovedPatch(request);
       const linkedTaskId =
         get().patchProposals.find((proposal) => proposal.id === result.patchId)?.taskId ??
         (get().lastPatchProposal?.id === result.patchId ? get().lastPatchProposal?.taskId : null);
