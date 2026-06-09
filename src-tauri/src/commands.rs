@@ -1307,6 +1307,19 @@ fn patch_verification_failed(runs: &[ProjectCommandRunResponse], errors: &[Value
     !errors.is_empty() || runs.iter().any(|run| !run.success)
 }
 
+fn patch_verification_status_for_knowledge(
+    runs: &[ProjectCommandRunResponse],
+    errors: &[Value],
+) -> &'static str {
+    if patch_verification_failed(runs, errors) {
+        "failed"
+    } else if runs.is_empty() {
+        "skipped"
+    } else {
+        "passed"
+    }
+}
+
 fn preview_for_knowledge(value: &str) -> String {
     const PREVIEW_CHARS: usize = 600;
     let trimmed = value.trim();
@@ -1410,6 +1423,74 @@ fn patch_verification_failure_knowledge(
     ))
 }
 
+fn successful_command_summary(run: &ProjectCommandRunResponse) -> String {
+    let mut line = format!(
+        "- `{}` in `{}` passed in {}ms",
+        run.command, run.working_dir, run.duration_ms
+    );
+    let stdout = preview_for_knowledge(&run.stdout);
+    if !stdout.is_empty() {
+        line.push_str(&format!("\n  stdout:\n{}", stdout));
+    }
+    line
+}
+
+fn patch_project_fact_knowledge(
+    proposal: &PatchProposal,
+    approval_id: &str,
+    runs: &[ProjectCommandRunResponse],
+    errors: &[Value],
+) -> Option<(String, String, Option<String>, Vec<String>)> {
+    if patch_verification_failed(runs, errors) {
+        return None;
+    }
+
+    let status = patch_verification_status_for_knowledge(runs, errors);
+    let files = proposal
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let task_id = proposal.task_id.as_deref().unwrap_or("unlinked");
+    let step_id = proposal.step_id.as_deref().unwrap_or("unlinked");
+    let command_section = if runs.is_empty() {
+        "未运行自动验证命令。".to_string()
+    } else {
+        runs.iter()
+            .map(successful_command_summary)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let reusable_summary = match status {
+        "passed" => "该补丁已通过推荐验证命令，可作为后续同类改动的项目事实参考。",
+        "skipped" => "该补丁未发现可运行的自动验证命令，后续同类改动仍需要人工补充验证。",
+        _ => "该补丁验证状态未知。",
+    };
+    let title = format!("ProjectFact: {}", proposal.summary);
+    let content = format!(
+        "项目事实\n\n任务: {task_id}\n步骤: {step_id}\n补丁: {}\n审批: {approval_id}\n摘要: {}\n文件: {}\n验证状态: {status}\n\n验证命令:\n{}\n\n可复用结论: {}",
+        proposal.id, proposal.summary, files, command_section, reusable_summary
+    );
+    let mut tags = vec![
+        "ProjectFact".to_string(),
+        "patchVerification".to_string(),
+        "autoExperience".to_string(),
+    ];
+    tags.push(match status {
+        "passed" => "verificationPassed".to_string(),
+        "skipped" => "verificationSkipped".to_string(),
+        _ => "verificationUnknown".to_string(),
+    });
+
+    Some((
+        title,
+        content,
+        Some(format!("patch:{};approval:{}", proposal.id, approval_id)),
+        tags,
+    ))
+}
+
 fn store_patch_verification_failure_knowledge(
     knowledge_base: &KnowledgeBase,
     proposal: &PatchProposal,
@@ -1420,6 +1501,24 @@ fn store_patch_verification_failure_knowledge(
 ) -> Result<Option<String>, AgentError> {
     let Some((title, content, source, tags)) =
         patch_verification_failure_knowledge(proposal, approval_id, runs, errors, auto_rollback)
+    else {
+        return Ok(None);
+    };
+
+    knowledge_base
+        .store_knowledge(&title, &content, source.as_deref(), Some(&tags))
+        .map(Some)
+}
+
+fn store_patch_project_fact_knowledge(
+    knowledge_base: &KnowledgeBase,
+    proposal: &PatchProposal,
+    approval_id: &str,
+    runs: &[ProjectCommandRunResponse],
+    errors: &[Value],
+) -> Result<Option<String>, AgentError> {
+    let Some((title, content, source, tags)) =
+        patch_project_fact_knowledge(proposal, approval_id, runs, errors)
     else {
         return Ok(None);
     };
@@ -1950,6 +2049,15 @@ pub async fn apply_approved_patch(
             auto_rollback.as_ref(),
         ) {
             tracing::warn!("写入补丁验证失败经验失败: {}", err);
+        }
+        if let Err(err) = store_patch_project_fact_knowledge(
+            state.knowledge_base.as_ref(),
+            &proposal,
+            &approval.id,
+            &verification_runs,
+            &verification_errors,
+        ) {
+            tracing::warn!("写入补丁项目事实失败: {}", err);
         }
         result.auto_rollback = auto_rollback;
     }
@@ -2583,6 +2691,16 @@ mod tests {
     }
 
     #[test]
+    fn test_patch_project_fact_knowledge_skips_failure() {
+        let proposal = test_patch_proposal("更新 README");
+        let runs = vec![test_command_run("cargo test", false)];
+
+        let note = patch_project_fact_knowledge(&proposal, "approval-1", &runs, &[]);
+
+        assert!(note.is_none());
+    }
+
+    #[test]
     fn test_store_patch_verification_failure_knowledge_writes_failure_case() {
         let kb = KnowledgeBase::new(":memory:");
         kb.initialize().unwrap();
@@ -2616,6 +2734,36 @@ mod tests {
         assert!(item.content.contains("assertion failed in verification"));
         assert!(item.content.contains("audit failed"));
         assert!(item.content.contains("retry_task"));
+    }
+
+    #[test]
+    fn test_store_patch_project_fact_knowledge_writes_project_fact() {
+        let kb = KnowledgeBase::new(":memory:");
+        kb.initialize().unwrap();
+        let proposal = test_patch_proposal("更新 README");
+        let runs = vec![test_command_run("cargo test", true)];
+
+        let id = store_patch_project_fact_knowledge(&kb, &proposal, "approval-1", &runs, &[])
+            .unwrap()
+            .unwrap();
+
+        assert!(!id.is_empty());
+        let results = kb.search_knowledge("ProjectFact", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        let item = &results[0];
+        assert!(item.title.contains("更新 README"));
+        assert_eq!(
+            item.source.as_deref(),
+            Some("patch:patch-test-1;approval:approval-1")
+        );
+        assert!(item.tags.contains(&"ProjectFact".to_string()));
+        assert!(item.tags.contains(&"patchVerification".to_string()));
+        assert!(item.tags.contains(&"autoExperience".to_string()));
+        assert!(item.tags.contains(&"verificationPassed".to_string()));
+        assert!(item.content.contains("README.md"));
+        assert!(item.content.contains("验证状态: passed"));
+        assert!(item.content.contains("cargo test"));
+        assert!(item.content.contains("可复用结论"));
     }
 
     #[test]

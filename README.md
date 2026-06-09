@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、规划前 KnowledgeBase 经验注入、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录、验证失败任务/步骤标记和补丁验证失败 `FailureCase` 经验沉淀已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、规划前 KnowledgeBase 经验注入、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录、验证失败任务/步骤标记、补丁验证失败 `FailureCase` 和验证通过/跳过补丁 `ProjectFact` 经验沉淀已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -13,7 +13,7 @@
 | Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
 | 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
 | 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
-| 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已提供结构化知识存储/搜索 IPC；补丁验证失败会自动写入 `FailureCase`；Planner 请求前会检索相关 ProjectFact / FailureCase 并注入上下文；初始化失败时回退到短期记忆或内存知识库。 |
+| 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已提供结构化知识存储/搜索 IPC；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会写入 `ProjectFact`；Planner 请求前会检索相关 ProjectFact / FailureCase 并注入上下文；初始化失败时回退到短期记忆或内存知识库。 |
 | 项目理解 | 已实现 | 扫描 Rust/Tauri/React/Vite 项目，生成技术栈、Manifest、关键文件和推荐命令。 |
 | Workspace 只读能力 | 已实现 | 支持项目内文件列表、文本读取和源码搜索，并限制路径逃逸和敏感文件读取。 |
 | Planner 规划 | 部分实现 | 默认使用规则、项目上下文和长期经验摘要规划；可通过环境变量或前端请求级配置启用 LLM JSON 规划并自动降级。 |
@@ -276,10 +276,10 @@ cp .env.example .env
 | `run_approved_project_command` | 已实现 | 通过 approvalId 执行已通过审批的项目命令，并关联写入命令审计。 |
 | `list_project_command_runs` | 已实现 | 查询最近命令运行记录。 |
 | `list_tool_invocations` | 已实现 | 查询最近 ToolAgent 工具调用审计记录，包含任务/步骤、approvalId、脱敏参数摘要、成功状态、错误和耗时。 |
-| `store_knowledge` / `search_knowledge` | 已实现 | 写入和检索长期知识条目，支持标题、内容、来源和标签，用于 ProjectFact / FailureCase 经验沉淀；补丁验证失败会自动写入 `FailureCase`。 |
+| `store_knowledge` / `search_knowledge` | 已实现 | 写入和检索长期知识条目，支持标题、内容、来源和标签，用于 ProjectFact / FailureCase 经验沉淀；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会自动写入 `ProjectFact`。 |
 | `create_patch_proposal` | 已实现 | 为现有文本文件生成补丁提案、持久化 diff，创建 `workspace.applyPatch` 审批请求，并让关联任务/步骤进入待审批状态。 |
 | `list_patch_proposals` / `get_patch_proposal` | 已实现 | 查询最近补丁提案或指定补丁提案。 |
-| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，把提案状态更新为 `applied`，运行推荐验证命令，并在关联任务中写入 patch/verification artifact 与事件；验证失败会标记关联任务/步骤 failed，自动写入 `FailureCase`，可按后端默认策略或单次请求开启验证失败自动回滚。 |
+| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，把提案状态更新为 `applied`，运行推荐验证命令，并在关联任务中写入 patch/verification artifact 与事件；验证失败会标记关联任务/步骤 failed 并自动写入 `FailureCase`，验证通过或跳过会自动写入 `ProjectFact`，可按后端默认策略或单次请求开启验证失败自动回滚。 |
 | `revert_applied_patch` | 已实现 | 通过 patchId 回滚已应用补丁；回滚前校验当前文件内容仍等于补丁应用结果，成功后写入 `patchReverted` artifact 与事件。 |
 | `list_approval_requests` | 已实现 | 查询审批请求，可按状态过滤。 |
 | `approve_action` | 已实现 | 对审批请求执行通过或拒绝；命令、`workspace.applyPatch` 和通用 `tool.*` 审批会恢复或失败关联任务/步骤，补丁审批还会同步补丁提案状态。 |
@@ -319,7 +319,7 @@ cp .env.example .env
 1. `Executor` 还没有接入真实代码修改或沙箱写入，补丁应用仍需要用户在审批面板手动触发。
 2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、通用 `tool.*` 工具审批、legacy `file_read` / `web_search` 自动审批拦截、已审批命令执行结果回写、ToolAgent 调用审计和补丁提案 diff 审批/应用；命令、补丁和通用工具审批已能挂起/恢复关联任务步骤，但尚未覆盖所有 ToolAgent 工具或通用文件写入。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
-4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；补丁验证失败会自动沉淀 `FailureCase`，Planner 请求前会注入相关长期经验；后续还需要补齐 ProjectFact 自动生成和更精细的经验排序/引用策略。
+4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；补丁验证失败会自动沉淀 `FailureCase`，验证通过或跳过会自动沉淀补丁级 `ProjectFact`，Planner 请求前会注入相关长期经验；后续还需要补齐完整任务级 ProjectFact 生成和更精细的经验排序/引用策略。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截和工具调用审计。
 6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
 7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
