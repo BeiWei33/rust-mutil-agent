@@ -18,9 +18,9 @@ use crate::runtime::{
 };
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{
-    CreatePatchProposalRequest, FileReadResponse, PatchApplyResult, PatchProposal,
-    PatchProposalListResponse, PatchProposalStatus, PatchRevertResult, SearchResponse,
-    WorkspaceEntry,
+    CreatePatchProposalRequest, FileReadResponse, PatchApplyResult, PatchAutoRollbackResult,
+    PatchProposal, PatchProposalListResponse, PatchProposalStatus, PatchRevertResult,
+    SearchResponse, WorkspaceEntry,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,8 @@ pub struct RunApprovedProjectCommandRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyApprovedPatchRequest {
     pub approval_id: String,
+    #[serde(default)]
+    pub auto_rollback_on_verification_failure: bool,
 }
 
 /// 回滚已应用补丁请求。
@@ -1007,6 +1009,28 @@ async fn run_patch_auto_verification(
     (runs, errors)
 }
 
+fn patch_verification_failed(runs: &[ProjectCommandRunResponse], errors: &[Value]) -> bool {
+    !errors.is_empty() || runs.iter().any(|run| !run.success)
+}
+
+fn successful_auto_rollback_result(result: PatchRevertResult) -> PatchAutoRollbackResult {
+    PatchAutoRollbackResult {
+        triggered_by: "verificationFailure".to_string(),
+        reverted: true,
+        error: None,
+        result: Some(result),
+    }
+}
+
+fn failed_auto_rollback_result(error: AgentError) -> PatchAutoRollbackResult {
+    PatchAutoRollbackResult {
+        triggered_by: "verificationFailure".to_string(),
+        reverted: false,
+        error: Some(error.to_string()),
+        result: None,
+    }
+}
+
 fn build_project_command_approval_input(
     inspection: &ProjectCommandInspection,
 ) -> CreateApprovalRequest {
@@ -1325,7 +1349,7 @@ pub async fn apply_approved_patch(
         ));
     }
 
-    let result = crate::workspace::apply_patch_proposal(&mut proposal, Some("user"))
+    let mut result = crate::workspace::apply_patch_proposal(&mut proposal, Some("user"))
         .map_err(map_patch_error)?;
     state
         .patch_store
@@ -1340,14 +1364,42 @@ pub async fn apply_approved_patch(
         let command_store = state.command_store.clone();
         let (verification_runs, verification_errors) =
             run_patch_auto_verification(command_store.as_ref()).await;
+        let mut auto_rollback = None;
+        let mut reverted = None;
+
+        if request.auto_rollback_on_verification_failure
+            && patch_verification_failed(&verification_runs, &verification_errors)
+        {
+            match crate::workspace::revert_patch_proposal(&mut proposal, Some("auto-verification"))
+            {
+                Ok(revert_result) => {
+                    state
+                        .patch_store
+                        .save_proposal(&proposal)
+                        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+                    result.status = proposal.status.clone();
+                    reverted = Some(revert_result.clone());
+                    auto_rollback = Some(successful_auto_rollback_result(revert_result));
+                }
+                Err(err) => {
+                    auto_rollback = Some(failed_auto_rollback_result(err));
+                }
+            }
+        }
+
         let orch = state.orchestrator.lock().await;
         orch.record_patch_verification(
             &proposal,
             &approval.id,
             &verification_runs,
             &verification_errors,
+            auto_rollback.as_ref(),
         )
         .await;
+        if let Some(revert_result) = reverted.as_ref() {
+            orch.record_patch_reverted(&proposal, revert_result).await;
+        }
+        result.auto_rollback = auto_rollback;
     }
 
     Ok(result)
@@ -1681,6 +1733,46 @@ mod tests {
             input.action_payload["files"][0]["path"],
             serde_json::json!("README.md")
         );
+    }
+
+    #[test]
+    fn test_apply_patch_request_defaults_auto_rollback_disabled() {
+        let request: ApplyApprovedPatchRequest =
+            serde_json::from_value(serde_json::json!({ "approvalId": "approval-1" })).unwrap();
+
+        assert_eq!(request.approval_id, "approval-1");
+        assert!(!request.auto_rollback_on_verification_failure);
+    }
+
+    #[test]
+    fn test_patch_verification_failed_detects_run_failure_or_errors() {
+        let success = ProjectCommandRunResponse {
+            id: "run-1".to_string(),
+            approval_id: None,
+            command: "cargo test".to_string(),
+            working_dir: "src-tauri".to_string(),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 42,
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            created_at: "2026-06-09T12:00:00Z".to_string(),
+        };
+        let failure = ProjectCommandRunResponse {
+            success: false,
+            exit_code: Some(101),
+            ..success.clone()
+        };
+
+        assert!(!patch_verification_failed(&[success], &[]));
+        assert!(patch_verification_failed(&[failure], &[]));
+        assert!(patch_verification_failed(
+            &[],
+            &[serde_json::json!({ "phase": "runCommand", "error": "boom" })]
+        ));
     }
 
     #[test]

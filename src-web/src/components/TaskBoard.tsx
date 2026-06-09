@@ -184,6 +184,15 @@ interface PatchVerificationRun {
   timedOut?: boolean;
 }
 
+interface PatchAutoRollbackArtifact {
+  triggeredBy: string;
+  reverted: boolean;
+  error?: string | null;
+  result?: {
+    revertedAt?: string;
+  } | null;
+}
+
 interface PatchVerificationArtifact {
   kind: "patchVerification";
   patchId: string;
@@ -195,6 +204,7 @@ interface PatchVerificationArtifact {
   successCount?: number;
   failedCount?: number;
   runs?: PatchVerificationRun[];
+  autoRollback?: PatchAutoRollbackArtifact;
 }
 
 interface PatchRevertedArtifact {
@@ -204,6 +214,7 @@ interface PatchRevertedArtifact {
   summary?: string;
   files?: string[];
   revertedAt?: string;
+  revertedBy?: string;
 }
 
 function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
@@ -253,6 +264,7 @@ function patchRevertedArtifact(value: unknown): PatchRevertedArtifact | null {
       ? artifact.files.filter((file): file is string => typeof file === "string")
       : undefined,
     revertedAt: typeof artifact.revertedAt === "string" ? artifact.revertedAt : undefined,
+    revertedBy: typeof artifact.revertedBy === "string" ? artifact.revertedBy : undefined,
   };
 }
 
@@ -269,6 +281,7 @@ function patchVerificationArtifact(value: unknown): PatchVerificationArtifact | 
     successCount?: unknown;
     failedCount?: unknown;
     runs?: unknown;
+    autoRollback?: unknown;
   };
   if (artifact.kind !== "patchVerification" || typeof artifact.patchId !== "string") {
     return null;
@@ -306,6 +319,35 @@ function patchVerificationArtifact(value: unknown): PatchVerificationArtifact | 
         })
         .filter((run): run is PatchVerificationRun => run !== null)
     : undefined;
+  const autoRollback =
+    artifact.autoRollback && typeof artifact.autoRollback === "object"
+      ? (() => {
+          const value = artifact.autoRollback as {
+            triggeredBy?: unknown;
+            reverted?: unknown;
+            error?: unknown;
+            result?: unknown;
+          };
+          if (typeof value.triggeredBy !== "string" || typeof value.reverted !== "boolean") {
+            return undefined;
+          }
+          const result =
+            value.result && typeof value.result === "object"
+              ? {
+                  revertedAt:
+                    typeof (value.result as { revertedAt?: unknown }).revertedAt === "string"
+                      ? (value.result as { revertedAt: string }).revertedAt
+                      : undefined,
+                }
+              : null;
+          return {
+            triggeredBy: value.triggeredBy,
+            reverted: value.reverted,
+            error: typeof value.error === "string" ? value.error : null,
+            result,
+          };
+        })()
+      : undefined;
 
   return {
     kind: "patchVerification",
@@ -318,6 +360,7 @@ function patchVerificationArtifact(value: unknown): PatchVerificationArtifact | 
     successCount: typeof artifact.successCount === "number" ? artifact.successCount : undefined,
     failedCount: typeof artifact.failedCount === "number" ? artifact.failedCount : undefined,
     runs,
+    autoRollback,
   };
 }
 
@@ -381,7 +424,7 @@ function ArtifactRow({ artifact }: { artifact: unknown }) {
             </div>
           </div>
           <span className="rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-200">
-            Rollback
+            {revertedArtifact.revertedBy === "auto-verification" ? "Auto Rollback" : "Rollback"}
           </span>
         </div>
         {revertedArtifact.files && revertedArtifact.files.length > 0 && (
@@ -433,6 +476,22 @@ function ArtifactRow({ artifact }: { artifact: unknown }) {
                 </span>
               </div>
             ))}
+          </div>
+        )}
+        {verificationArtifact.autoRollback && (
+          <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-300">
+            自动回滚：
+            <span
+              className={
+                verificationArtifact.autoRollback.reverted
+                  ? "ml-1 text-emerald-300"
+                  : "ml-1 text-amber-300"
+              }
+            >
+              {verificationArtifact.autoRollback.reverted ? "已完成" : "失败"}
+            </span>
+            {verificationArtifact.autoRollback.result?.revertedAt &&
+              ` · ${formatTime(verificationArtifact.autoRollback.result.revertedAt)}`}
           </div>
         )}
       </div>

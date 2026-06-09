@@ -401,6 +401,7 @@ export interface PatchProposalListResponse {
 /** 应用已审批补丁请求 */
 export interface ApplyApprovedPatchRequest {
   approvalId: string;
+  autoRollbackOnVerificationFailure?: boolean;
 }
 
 /** 回滚已应用补丁请求 */
@@ -415,6 +416,7 @@ export interface PatchApplyResult {
   files: string[];
   appliedAt: string;
   alreadyApplied: boolean;
+  autoRollback?: PatchAutoRollbackResult | null;
 }
 
 /** 回滚补丁结果 */
@@ -424,6 +426,14 @@ export interface PatchRevertResult {
   files: string[];
   revertedAt: string;
   alreadyReverted: boolean;
+}
+
+/** 自动回滚结果 */
+export interface PatchAutoRollbackResult {
+  triggeredBy: string;
+  reverted: boolean;
+  error?: string | null;
+  result?: PatchRevertResult | null;
 }
 
 /** 项目快照 */

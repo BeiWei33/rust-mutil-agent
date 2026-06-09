@@ -1043,7 +1043,7 @@ async function mockApplyApprovedPatch(
     item.id === updated.id ? updated : item
   );
 
-  const result: PatchApplyResult = {
+  let result: PatchApplyResult = {
     patchId: updated.id,
     status: updated.status,
     files: updated.files.map((file) => file.path),
@@ -1051,6 +1051,8 @@ async function mockApplyApprovedPatch(
     alreadyApplied,
   };
 
+  const mockVerificationFails =
+    updated.summary.toLowerCase().includes("fail") || updated.summary.includes("失败");
   const verificationRuns: ProjectCommandRunResponse[] = alreadyApplied
     ? []
     : [
@@ -1074,10 +1076,10 @@ async function mockApplyApprovedPatch(
           approvalId: null,
           command: "npm test -- --run",
           workingDir: "src-web",
-          exitCode: 0,
-          success: true,
-          stdout: "mock frontend verification passed",
-          stderr: "",
+          exitCode: mockVerificationFails ? 1 : 0,
+          success: !mockVerificationFails,
+          stdout: mockVerificationFails ? "" : "mock frontend verification passed",
+          stderr: mockVerificationFails ? "mock frontend verification failed" : "",
           durationMs: 380,
           timedOut: false,
           stdoutTruncated: false,
@@ -1181,6 +1183,48 @@ async function mockApplyApprovedPatch(
           createdAt: verificationArtifact.verifiedAt,
         },
       ];
+    }
+  }
+
+  if (
+    request.autoRollbackOnVerificationFailure &&
+    verificationRuns.some((run) => !run.success)
+  ) {
+    const rollback = await mockRevertAppliedPatch({ patchId: updated.id });
+    const autoRollback = {
+      triggeredBy: "verificationFailure",
+      reverted: rollback.status === "reverted",
+      error: null,
+      result: rollback,
+    };
+    result = {
+      ...result,
+      status: rollback.status,
+      autoRollback,
+    };
+    if (updated.taskId) {
+      const withAutoRollback = (artifact: unknown) => {
+        const value = artifact as { kind?: unknown; patchId?: unknown };
+        return value.kind === "patchVerification" && value.patchId === updated.id
+          ? { ...(artifact as object), autoRollback }
+          : artifact;
+      };
+      MOCK_TASKS = MOCK_TASKS.map((task) =>
+        task.id === updated.taskId
+          ? {
+              ...task,
+              artifacts: task.artifacts.map(withAutoRollback),
+            }
+          : task
+      );
+      MOCK_EVENTS[updated.taskId] = (MOCK_EVENTS[updated.taskId] ?? []).map((event) =>
+        event.kind === "artifactCreated"
+          ? {
+              ...event,
+              payload: withAutoRollback(event.payload),
+            }
+          : event
+      );
     }
   }
 

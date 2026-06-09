@@ -16,7 +16,9 @@ use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
 use crate::runtime::ProjectCommandRunResponse;
 use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep, TaskStore};
-use crate::workspace::{self, PatchApplyResult, PatchProposal, PatchRevertResult};
+use crate::workspace::{
+    self, PatchApplyResult, PatchAutoRollbackResult, PatchProposal, PatchRevertResult,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
@@ -465,13 +467,15 @@ impl TaskRuntime {
         approval_id: &str,
         runs: &[ProjectCommandRunResponse],
         errors: &[serde_json::Value],
+        auto_rollback: Option<&PatchAutoRollbackResult>,
     ) -> Option<Task> {
         let task_id = proposal.task_id.as_deref()?.trim();
         if task_id.is_empty() {
             return None;
         }
 
-        let artifact = patch_verification_artifact(proposal, approval_id, runs, errors);
+        let artifact =
+            patch_verification_artifact(proposal, approval_id, runs, errors, auto_rollback);
         let mut emitted = Vec::new();
         let task = self.tasks.get_mut(task_id)?;
 
@@ -932,9 +936,10 @@ impl Orchestrator {
         approval_id: &str,
         runs: &[ProjectCommandRunResponse],
         errors: &[serde_json::Value],
+        auto_rollback: Option<&PatchAutoRollbackResult>,
     ) -> Option<Task> {
         let mut runtime = self.runtime.lock().await;
-        runtime.record_patch_verification(proposal, approval_id, runs, errors)
+        runtime.record_patch_verification(proposal, approval_id, runs, errors, auto_rollback)
     }
 
     /// 记录已回滚补丁为任务 artifact 和事件。
@@ -1214,6 +1219,7 @@ fn patch_verification_artifact(
     approval_id: &str,
     runs: &[ProjectCommandRunResponse],
     errors: &[serde_json::Value],
+    auto_rollback: Option<&PatchAutoRollbackResult>,
 ) -> serde_json::Value {
     let status = patch_verification_status(runs, errors);
     let success_count = runs.iter().filter(|run| run.success).count();
@@ -1234,7 +1240,7 @@ fn patch_verification_artifact(
         })
         .collect::<Vec<_>>();
 
-    serde_json::json!({
+    let mut artifact = serde_json::json!({
         "kind": "patchVerification",
         "patchId": &proposal.id,
         "approvalId": approval_id,
@@ -1246,7 +1252,12 @@ fn patch_verification_artifact(
         "failedCount": failed_count,
         "runs": run_summaries,
         "errors": errors,
-    })
+    });
+    if let Some(auto_rollback) = auto_rollback {
+        artifact["autoRollback"] =
+            serde_json::to_value(auto_rollback).unwrap_or(serde_json::Value::Null);
+    }
+    artifact
 }
 
 fn patch_revert_artifact(
@@ -1844,6 +1855,7 @@ mod tests {
             files: vec!["README.md".to_string()],
             applied_at: proposal.applied_at.unwrap(),
             already_applied: false,
+            auto_rollback: None,
         };
 
         let task = runtime
@@ -1886,6 +1898,7 @@ mod tests {
             files: vec!["README.md".to_string()],
             applied_at: proposal.applied_at.unwrap(),
             already_applied: false,
+            auto_rollback: None,
         };
 
         runtime
@@ -1919,7 +1932,7 @@ mod tests {
         ];
 
         let task = runtime
-            .record_patch_verification(&proposal, "approval-1", &runs, &[])
+            .record_patch_verification(&proposal, "approval-1", &runs, &[], None)
             .unwrap();
 
         assert_eq!(task.artifacts.len(), 1);
@@ -1945,6 +1958,46 @@ mod tests {
     }
 
     #[test]
+    fn test_record_patch_verification_records_auto_rollback_metadata() {
+        let task_id = "task-patch-verification-auto-rollback";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "验证失败自动回滚"));
+        let proposal = patch_proposal_for_task(task_id);
+        let reverted_at = chrono::Utc::now();
+        let revert_result = PatchRevertResult {
+            patch_id: proposal.id.clone(),
+            status: crate::workspace::PatchProposalStatus::Reverted,
+            files: vec!["README.md".to_string()],
+            reverted_at,
+            already_reverted: false,
+        };
+        let auto_rollback = PatchAutoRollbackResult {
+            triggered_by: "verificationFailure".to_string(),
+            reverted: true,
+            error: None,
+            result: Some(revert_result),
+        };
+        let runs = vec![command_run("cargo test", false)];
+
+        let task = runtime
+            .record_patch_verification(&proposal, "approval-1", &runs, &[], Some(&auto_rollback))
+            .unwrap();
+
+        assert_eq!(
+            task.artifacts[0]["autoRollback"]["triggeredBy"],
+            serde_json::json!("verificationFailure")
+        );
+        assert_eq!(
+            task.artifacts[0]["autoRollback"]["reverted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            task.artifacts[0]["autoRollback"]["result"]["status"],
+            serde_json::json!("reverted")
+        );
+    }
+
+    #[test]
     fn test_record_patch_verification_is_idempotent_for_same_patch() {
         let task_id = "task-patch-verification-idempotent";
         let mut runtime = TaskRuntime::default();
@@ -1953,10 +2006,10 @@ mod tests {
         let runs = vec![command_run("cargo check", true)];
 
         runtime
-            .record_patch_verification(&proposal, "approval-1", &runs, &[])
+            .record_patch_verification(&proposal, "approval-1", &runs, &[], None)
             .unwrap();
         runtime
-            .record_patch_verification(&proposal, "approval-1", &runs, &[])
+            .record_patch_verification(&proposal, "approval-1", &runs, &[], None)
             .unwrap();
 
         let task = runtime.get_task(task_id).unwrap();

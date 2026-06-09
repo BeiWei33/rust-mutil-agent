@@ -148,7 +148,10 @@ interface AgentState {
   /** 执行已通过审批的项目命令 */
   runApprovedCommand: (approvalId: string) => Promise<void>;
   /** 应用已通过审批的补丁 */
-  applyApprovedPatch: (approvalId: string) => Promise<void>;
+  applyApprovedPatch: (
+    approvalId: string,
+    options?: { autoRollbackOnVerificationFailure?: boolean }
+  ) => Promise<void>;
   /** 回滚已应用的补丁 */
   revertAppliedPatch: (patchId: string) => Promise<void>;
 
@@ -580,15 +583,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  applyApprovedPatch: async (approvalId) => {
+  applyApprovedPatch: async (approvalId, options) => {
     set({ patchApplyLoadingId: approvalId, approvalsError: null });
     try {
-      const result = await api.applyApprovedPatch({ approvalId });
+      const result = await api.applyApprovedPatch({
+        approvalId,
+        autoRollbackOnVerificationFailure:
+          options?.autoRollbackOnVerificationFailure ?? false,
+      });
       const linkedTaskId =
         get().patchProposals.find((proposal) => proposal.id === result.patchId)?.taskId ??
         (get().lastPatchProposal?.id === result.patchId ? get().lastPatchProposal?.taskId : null);
+      const rollbackResult = result.autoRollback?.result ?? null;
       set((s) => ({
         lastPatchApplyResult: result,
+        lastPatchRevertResult: rollbackResult ?? s.lastPatchRevertResult,
         patchApplyLoadingId: null,
         approvalsError: null,
         patchProposals: s.patchProposals.map((proposal) =>
@@ -597,7 +606,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                 ...proposal,
                 status: result.status,
                 appliedAt: result.appliedAt,
-                updatedAt: result.appliedAt,
+                revertedAt: rollbackResult?.revertedAt ?? proposal.revertedAt,
+                updatedAt: rollbackResult?.revertedAt ?? result.appliedAt,
               }
             : proposal
         ),
@@ -607,7 +617,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                 ...s.lastPatchProposal,
                 status: result.status,
                 appliedAt: result.appliedAt,
-                updatedAt: result.appliedAt,
+                revertedAt: rollbackResult?.revertedAt ?? s.lastPatchProposal.revertedAt,
+                updatedAt: rollbackResult?.revertedAt ?? result.appliedAt,
               }
             : s.lastPatchProposal,
       }));

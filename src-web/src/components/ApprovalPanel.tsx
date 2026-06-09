@@ -119,10 +119,12 @@ function ApprovalItem({
   patchProposal,
   patchApplyResult,
   patchRevertResult,
+  autoRollbackOnFailure,
   onApprove,
   onReject,
   onExecute,
   onApplyPatch,
+  onToggleAutoRollback,
   onRevertPatch,
 }: {
   approval: ApprovalRequest;
@@ -134,10 +136,12 @@ function ApprovalItem({
   patchProposal?: PatchProposal;
   patchApplyResult?: PatchApplyResult | null;
   patchRevertResult?: PatchRevertResult | null;
+  autoRollbackOnFailure: boolean;
   onApprove: () => void;
   onReject: () => void;
   onExecute: () => void;
   onApplyPatch: () => void;
+  onToggleAutoRollback: () => void;
   onRevertPatch: () => void;
 }) {
   const pending = approval.status === "pending";
@@ -210,14 +214,26 @@ function ApprovalItem({
               </button>
             )}
             {canApplyPatch && (
-              <button
-                type="button"
-                onClick={onApplyPatch}
-                disabled={patchApplyLoading}
-                className="rounded-md border border-primary-500/20 bg-primary-500/10 px-3 py-1.5 text-xs text-primary-200 transition-colors hover:border-primary-400/40 hover:bg-primary-500/15 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {patchApplyLoading ? "应用中..." : "应用补丁"}
-              </button>
+              <>
+                <label className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={autoRollbackOnFailure}
+                    onChange={onToggleAutoRollback}
+                    disabled={patchApplyLoading}
+                    className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-900 text-primary-500"
+                  />
+                  失败回滚
+                </label>
+                <button
+                  type="button"
+                  onClick={onApplyPatch}
+                  disabled={patchApplyLoading}
+                  className="rounded-md border border-primary-500/20 bg-primary-500/10 px-3 py-1.5 text-xs text-primary-200 transition-colors hover:border-primary-400/40 hover:bg-primary-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {patchApplyLoading ? "应用中..." : "应用补丁"}
+                </button>
+              </>
             )}
             {canRevertPatch && (
               <button
@@ -350,6 +366,7 @@ export default function ApprovalPanel() {
   const applyApprovedPatch = useAgentStore((s) => s.applyApprovedPatch);
   const revertAppliedPatch = useAgentStore((s) => s.revertAppliedPatch);
   const [filter, setFilter] = useState<ApprovalStatus | undefined>("pending");
+  const [autoRollbackPatchIds, setAutoRollbackPatchIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     fetchApprovals(filter);
@@ -429,6 +446,20 @@ export default function ApprovalPanel() {
                 lastPatchRevertResult?.patchId === patchPayload?.patchId
                   ? lastPatchRevertResult
                   : null;
+              const autoRollbackOnFailure =
+                !!patchPayload && autoRollbackPatchIds.has(patchPayload.patchId);
+              const toggleAutoRollback = () => {
+                if (!patchPayload) return;
+                setAutoRollbackPatchIds((current) => {
+                  const next = new Set(current);
+                  if (next.has(patchPayload.patchId)) {
+                    next.delete(patchPayload.patchId);
+                  } else {
+                    next.add(patchPayload.patchId);
+                  }
+                  return next;
+                });
+              };
 
               return (
                 <ApprovalItem
@@ -444,10 +475,16 @@ export default function ApprovalPanel() {
                   patchProposal={patchProposal}
                   patchApplyResult={patchApplyResult}
                   patchRevertResult={patchRevertResult}
+                  autoRollbackOnFailure={autoRollbackOnFailure}
                   onApprove={() => decideApproval(approval.id, true)}
                   onReject={() => decideApproval(approval.id, false)}
                   onExecute={() => runApprovedCommand(approval.id)}
-                  onApplyPatch={() => applyApprovedPatch(approval.id)}
+                  onApplyPatch={() =>
+                    applyApprovedPatch(approval.id, {
+                      autoRollbackOnVerificationFailure: autoRollbackOnFailure,
+                    })
+                  }
+                  onToggleAutoRollback={toggleAutoRollback}
                   onRevertPatch={() => patchPayload && revertAppliedPatch(patchPayload.patchId)}
                 />
               );

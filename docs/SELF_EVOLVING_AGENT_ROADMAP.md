@@ -253,7 +253,7 @@ src-tauri/src/workspace/diff.rs
 | `workspace.get_diff` | 获取当前 diff |
 | `workspace.revert_patch` | 回滚指定 patch |
 
-当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与 `artifactCreated` 事件写回；前端项目页、审批页和任务看板已能展示对应状态。验证失败返工、自动回滚策略和任务调度联动仍未实现。
+当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、显式开启的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与 `artifactCreated` 事件写回；前端项目页、审批页和任务看板已能展示对应状态。验证失败返工、默认自动回滚策略和任务调度联动仍未实现。
 
 安全要求：
 
@@ -592,7 +592,7 @@ task://completed
 
 目标：CoderAgent 能提出代码修改，但先不自动应用高风险改动。
 
-当前状态：补丁提案存储、单文件 diff 预览、审批请求链路、审批后手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚和任务 artifact 写回已完成第一版；尚未由 CoderAgent 自动生成 proposal，也尚未接入验证失败返工和自动回滚策略。
+当前状态：补丁提案存储、单文件 diff 预览、审批请求链路、审批后手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、显式开启的验证失败自动回滚和任务 artifact 写回已完成第一版；尚未由 CoderAgent 自动生成 proposal，也尚未接入验证失败返工和默认自动回滚策略。
 
 任务：
 
@@ -622,7 +622,7 @@ task://completed
 
 验收标准：
 
-- patch 应用后自动运行推荐验证命令。（已部分完成：`apply_approved_patch` 首次应用成功后会运行项目推荐 allowlist 命令并写入命令审计；已应用补丁可手动安全回滚，验证失败后的自动回滚仍待接入）
+- patch 应用后自动运行推荐验证命令。（已部分完成：`apply_approved_patch` 首次应用成功后会运行项目推荐 allowlist 命令并写入命令审计；已应用补丁可手动安全回滚，也可在调用时显式开启验证失败自动回滚）
 - 测试失败能被记录并反馈给 CoderAgent。
 - Review 通过且验证通过后任务完成。
 

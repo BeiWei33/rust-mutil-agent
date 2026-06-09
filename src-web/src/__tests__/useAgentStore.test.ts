@@ -901,6 +901,7 @@ describe("useAgentStore", () => {
 
     expect(mockApi.applyApprovedPatch).toHaveBeenCalledWith({
       approvalId: "approval-patch-apply-1",
+      autoRollbackOnVerificationFailure: false,
     });
     expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(10);
     expect(getState().patchApplyLoadingId).toBeNull();
@@ -914,6 +915,76 @@ describe("useAgentStore", () => {
     expect(getState().lastPatchProposal).toMatchObject({
       id: "patch-apply-1",
       status: "applied",
+    });
+  });
+
+  /// 测试 — applyApprovedPatch 开启验证失败自动回滚时同步回滚状态
+  /// 验证：后端返回 autoRollback 后，store 同步 proposal/revert result
+  it("applyApprovedPatch 自动回滚成功时应更新补丁为 reverted", async () => {
+    const proposal = {
+      id: "patch-auto-rollback-1",
+      taskId: null,
+      stepId: null,
+      approvalId: "approval-auto-rollback-1",
+      summary: "失败后回滚 README",
+      status: "approved" as const,
+      files: [
+        {
+          path: "README.md",
+          changeType: "modify" as const,
+          oldContent: "old",
+          newContent: "new",
+          diff: "diff --git a/README.md b/README.md\n-old\n+new",
+        },
+      ],
+      unifiedDiff: "diff --git a/README.md b/README.md\n-old\n+new",
+      requestedBy: "ProjectPanel",
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:01:00Z",
+      appliedAt: null,
+      appliedBy: null,
+      revertedAt: null,
+      revertedBy: null,
+    };
+    const rollback = {
+      patchId: "patch-auto-rollback-1",
+      status: "reverted" as const,
+      files: ["README.md"],
+      revertedAt: "2026-06-09T12:04:00Z",
+      alreadyReverted: false,
+    };
+    const result = {
+      patchId: "patch-auto-rollback-1",
+      status: "reverted" as const,
+      files: ["README.md"],
+      appliedAt: "2026-06-09T12:02:00Z",
+      alreadyApplied: false,
+      autoRollback: {
+        triggeredBy: "verificationFailure",
+        reverted: true,
+        error: null,
+        result: rollback,
+      },
+    };
+    useAgentStore.setState({ patchProposals: [proposal], lastPatchProposal: proposal });
+    mockApi.applyApprovedPatch.mockResolvedValue(result);
+    mockApi.listPatchProposals.mockResolvedValue({ proposals: [] });
+    mockApi.listProjectCommandRuns.mockResolvedValue({ runs: [] });
+
+    await getState().applyApprovedPatch("approval-auto-rollback-1", {
+      autoRollbackOnVerificationFailure: true,
+    });
+
+    expect(mockApi.applyApprovedPatch).toHaveBeenCalledWith({
+      approvalId: "approval-auto-rollback-1",
+      autoRollbackOnVerificationFailure: true,
+    });
+    expect(getState().lastPatchRevertResult).toEqual(rollback);
+    expect(getState().patchProposals[0]).toMatchObject({
+      id: "patch-auto-rollback-1",
+      status: "reverted",
+      revertedAt: rollback.revertedAt,
+      updatedAt: rollback.revertedAt,
     });
   });
 

@@ -97,6 +97,8 @@ pub struct PatchApplyResult {
     pub files: Vec<String>,
     pub applied_at: DateTime<Utc>,
     pub already_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_rollback: Option<PatchAutoRollbackResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,6 +109,15 @@ pub struct PatchRevertResult {
     pub files: Vec<String>,
     pub reverted_at: DateTime<Utc>,
     pub already_reverted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchAutoRollbackResult {
+    pub triggered_by: String,
+    pub reverted: bool,
+    pub error: Option<String>,
+    pub result: Option<PatchRevertResult>,
 }
 
 /// SQLite-backed patch proposal store.
@@ -329,6 +340,7 @@ pub fn apply_patch_proposal(
                 .collect(),
             applied_at,
             already_applied: true,
+            auto_rollback: None,
         });
     }
 
@@ -374,6 +386,7 @@ pub fn apply_patch_proposal(
             .collect(),
         applied_at,
         already_applied: false,
+        auto_rollback: None,
     })
 }
 
