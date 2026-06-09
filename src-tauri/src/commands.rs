@@ -1299,6 +1299,11 @@ pub async fn create_patch_proposal(
         .patch_store
         .save_proposal(&proposal)
         .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+    {
+        let orch = state.orchestrator.lock().await;
+        orch.record_patch_approval_requested(&proposal, &approval)
+            .await;
+    }
 
     Ok(CreatePatchProposalResponse { proposal, approval })
 }
@@ -1511,10 +1516,15 @@ pub async fn approve_action(
             patch_id_from_approval(approval),
             patch_status_from_approval(&approval.status),
         ) {
-            state
+            let proposal = state
                 .patch_store
                 .update_status(&patch_id, status)
                 .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+            if let Some(proposal) = proposal {
+                let orch = state.orchestrator.lock().await;
+                orch.record_patch_approval_resolved(&proposal, approval)
+                    .await;
+            }
         }
     }
 

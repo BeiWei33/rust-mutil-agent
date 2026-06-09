@@ -174,6 +174,16 @@ interface PatchAppliedArtifact {
   appliedAt?: string;
 }
 
+interface PatchApprovalArtifact {
+  kind: "patchApproval" | "patchApprovalResolved";
+  patchId: string;
+  approvalId?: string;
+  summary?: string;
+  status?: string;
+  createdAt?: string;
+  decidedAt?: string;
+}
+
 interface PatchVerificationRun {
   id?: string;
   command: string;
@@ -239,6 +249,35 @@ function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
       ? artifact.files.filter((file): file is string => typeof file === "string")
       : undefined,
     appliedAt: typeof artifact.appliedAt === "string" ? artifact.appliedAt : undefined,
+  };
+}
+
+function patchApprovalArtifact(value: unknown): PatchApprovalArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as {
+    kind?: unknown;
+    patchId?: unknown;
+    approvalId?: unknown;
+    summary?: unknown;
+    status?: unknown;
+    createdAt?: unknown;
+    decidedAt?: unknown;
+  };
+  if (
+    (artifact.kind !== "patchApproval" && artifact.kind !== "patchApprovalResolved") ||
+    typeof artifact.patchId !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    kind: artifact.kind,
+    patchId: artifact.patchId,
+    approvalId: typeof artifact.approvalId === "string" ? artifact.approvalId : undefined,
+    summary: typeof artifact.summary === "string" ? artifact.summary : undefined,
+    status: typeof artifact.status === "string" ? artifact.status : undefined,
+    createdAt: typeof artifact.createdAt === "string" ? artifact.createdAt : undefined,
+    decidedAt: typeof artifact.decidedAt === "string" ? artifact.decidedAt : undefined,
   };
 }
 
@@ -375,6 +414,43 @@ function verificationStatusLabel(status?: string): { label: string; className: s
 }
 
 function ArtifactRow({ artifact }: { artifact: unknown }) {
+  const approvalArtifact = patchApprovalArtifact(artifact);
+  if (approvalArtifact) {
+    const resolved = approvalArtifact.kind === "patchApprovalResolved";
+    const statusLabel =
+      approvalArtifact.status === "approved"
+        ? "已通过"
+        : approvalArtifact.status === "rejected"
+          ? "已拒绝"
+          : "待审批";
+    const statusClass =
+      approvalArtifact.status === "approved"
+        ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+        : approvalArtifact.status === "rejected"
+          ? "border-red-500/20 bg-red-500/10 text-red-200"
+          : "border-amber-500/20 bg-amber-500/10 text-amber-200";
+
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-zinc-200">
+              {approvalArtifact.summary || approvalArtifact.patchId}
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {resolved ? "审批决策" : "审批请求"}
+              {(approvalArtifact.decidedAt || approvalArtifact.createdAt) &&
+                ` · ${formatTime(approvalArtifact.decidedAt ?? approvalArtifact.createdAt ?? "")}`}
+            </div>
+          </div>
+          <span className={`rounded-md border px-2 py-0.5 text-[11px] ${statusClass}`}>
+            {statusLabel}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   const patchArtifact = patchAppliedArtifact(artifact);
   if (patchArtifact) {
     return (

@@ -183,6 +183,8 @@ export type TaskEventKind =
   | "failed"
   | "cancelled"
   | "retried"
+  | "approvalRequested"
+  | "approvalResolved"
   | "artifactCreated";
 
 /** 任务事件 */

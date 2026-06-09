@@ -12,6 +12,7 @@ use crate::agent::memory_agent::MemoryAgent;
 use crate::agent::planner_agent::{PlannerAgent, TaskPlan};
 use crate::agent::tool_agent::ToolAgent;
 use crate::agent::traits::{Agent, AgentMessage};
+use crate::approval::{ApprovalRequest, ApprovalStatus};
 use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
 use crate::runtime::ProjectCommandRunResponse;
@@ -461,6 +462,143 @@ impl TaskRuntime {
         Some(updated)
     }
 
+    fn record_patch_approval_requested(
+        &mut self,
+        proposal: &PatchProposal,
+        approval: &ApprovalRequest,
+    ) -> Option<Task> {
+        let task_id = proposal.task_id.as_deref()?.trim();
+        if task_id.is_empty() {
+            return None;
+        }
+
+        let artifact = patch_approval_artifact(proposal, approval);
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_patch_kind_artifact(task, "patchApproval", &proposal.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        if !matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            task.status = TaskStatus::WaitingApproval;
+            task.touch();
+        }
+        if let Some(step_id) = proposal.step_id.as_deref() {
+            if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                if matches!(
+                    step.status,
+                    StepStatus::Pending | StepStatus::Running | StepStatus::WaitingApproval
+                ) {
+                    step.status = StepStatus::WaitingApproval;
+                    step.error = None;
+                }
+            }
+        }
+        let updated = task.clone();
+
+        self.push_event(TaskEvent::new(
+            task_id.to_string(),
+            proposal.step_id.clone(),
+            TaskEventKind::ApprovalRequested,
+            format!("补丁等待审批：{}", proposal.summary),
+            artifact,
+        ));
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
+    fn record_patch_approval_resolved(
+        &mut self,
+        proposal: &PatchProposal,
+        approval: &ApprovalRequest,
+    ) -> Option<Task> {
+        let task_id = proposal.task_id.as_deref()?.trim();
+        if task_id.is_empty() {
+            return None;
+        }
+
+        let artifact = patch_approval_resolved_artifact(proposal, approval);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_patch_kind_artifact(task, "patchApprovalResolved", &proposal.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        match approval.status {
+            ApprovalStatus::Approved => {
+                if task.status == TaskStatus::WaitingApproval {
+                    task.status = TaskStatus::Running;
+                    task.error = None;
+                    task.touch();
+                }
+                if let Some(step_id) = proposal.step_id.as_deref() {
+                    if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                        if step.status == StepStatus::WaitingApproval {
+                            step.status = StepStatus::Running;
+                            step.error = None;
+                        }
+                    }
+                }
+            }
+            ApprovalStatus::Rejected => {
+                let message = format!("补丁审批已拒绝：{}", proposal.summary);
+                if let Some(step_id) = proposal.step_id.as_deref() {
+                    if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                        if matches!(
+                            step.status,
+                            StepStatus::Pending | StepStatus::WaitingApproval | StepStatus::Running
+                        ) {
+                            step.fail(message.clone());
+                            emitted.push(TaskEvent::new(
+                                task_id.to_string(),
+                                Some(step.id.clone()),
+                                TaskEventKind::StepFailed,
+                                message.clone(),
+                                artifact.clone(),
+                            ));
+                        }
+                    }
+                }
+                if !matches!(
+                    task.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    task.fail(message.clone());
+                    emitted.push(TaskEvent::new(
+                        task_id.to_string(),
+                        None,
+                        TaskEventKind::Failed,
+                        message,
+                        artifact.clone(),
+                    ));
+                }
+            }
+            ApprovalStatus::Pending | ApprovalStatus::Cancelled => {}
+        }
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            proposal.step_id.clone(),
+            TaskEventKind::ApprovalResolved,
+            format!(
+                "补丁审批{}：{}",
+                approval_status_label(&approval.status),
+                proposal.summary
+            ),
+            artifact,
+        ));
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
     fn record_patch_verification(
         &mut self,
         proposal: &PatchProposal,
@@ -512,6 +650,54 @@ impl TaskRuntime {
                     TaskEventKind::Failed,
                     message,
                     patch_verification_failure_payload(proposal, status, auto_rollback),
+                ));
+            }
+        } else if !matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            if let Some(step_id) = proposal.step_id.as_deref() {
+                if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                    if matches!(
+                        step.status,
+                        StepStatus::Pending | StepStatus::WaitingApproval | StepStatus::Running
+                    ) {
+                        let result = serde_json::json!({
+                            "patchId": proposal.id,
+                            "approvalId": approval_id,
+                            "summary": proposal.summary,
+                            "verificationStatus": status,
+                        });
+                        step.complete(result.clone());
+                        emitted.push(TaskEvent::new(
+                            task_id.to_string(),
+                            Some(step.id.clone()),
+                            TaskEventKind::StepCompleted,
+                            format!(
+                                "补丁验证{}，步骤已恢复并完成。",
+                                patch_verification_status_label(status)
+                            ),
+                            result,
+                        ));
+                    }
+                }
+            }
+
+            if !task.steps.is_empty()
+                && task
+                    .steps
+                    .iter()
+                    .all(|step| step.status == StepStatus::Completed)
+            {
+                let completed_steps = task.steps.len();
+                let output = format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。");
+                task.complete(output.clone());
+                emitted.push(TaskEvent::new(
+                    task_id.to_string(),
+                    None,
+                    TaskEventKind::Completed,
+                    output,
+                    serde_json::json!({ "completedSteps": completed_steps }),
                 ));
             }
         }
@@ -956,6 +1142,26 @@ impl Orchestrator {
         runtime.record_patch_applied(proposal, result, approval_id)
     }
 
+    /// 记录补丁审批请求，并让关联任务/步骤进入等待审批。
+    pub async fn record_patch_approval_requested(
+        &self,
+        proposal: &PatchProposal,
+        approval: &ApprovalRequest,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_patch_approval_requested(proposal, approval)
+    }
+
+    /// 记录补丁审批决策，并恢复或失败关联任务/步骤。
+    pub async fn record_patch_approval_resolved(
+        &self,
+        proposal: &PatchProposal,
+        approval: &ApprovalRequest,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_patch_approval_resolved(proposal, approval)
+    }
+
     /// 记录补丁应用后的自动验证结果为任务 artifact 和事件。
     pub async fn record_patch_verification(
         &self,
@@ -1241,6 +1447,38 @@ fn patch_apply_artifact(
     })
 }
 
+fn patch_approval_artifact(
+    proposal: &PatchProposal,
+    approval: &ApprovalRequest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "patchApproval",
+        "patchId": &proposal.id,
+        "approvalId": &approval.id,
+        "summary": &proposal.summary,
+        "status": &approval.status,
+        "requestedBy": &approval.requested_by,
+        "createdAt": approval.created_at,
+        "unifiedDiff": &proposal.unified_diff,
+    })
+}
+
+fn patch_approval_resolved_artifact(
+    proposal: &PatchProposal,
+    approval: &ApprovalRequest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "patchApprovalResolved",
+        "patchId": &proposal.id,
+        "approvalId": &approval.id,
+        "summary": &proposal.summary,
+        "status": &approval.status,
+        "decidedBy": &approval.decided_by,
+        "decisionNote": &approval.decision_note,
+        "decidedAt": approval.decided_at,
+    })
+}
+
 fn patch_verification_artifact(
     proposal: &PatchProposal,
     approval_id: &str,
@@ -1336,6 +1574,15 @@ fn patch_verification_status_label(status: &str) -> &'static str {
         "passed" => "通过",
         "failed" => "失败",
         _ => "跳过",
+    }
+}
+
+fn approval_status_label(status: &ApprovalStatus) -> &'static str {
+    match status {
+        ApprovalStatus::Pending => "等待中",
+        ApprovalStatus::Approved => "已通过",
+        ApprovalStatus::Rejected => "已拒绝",
+        ApprovalStatus::Cancelled => "已取消",
     }
 }
 
@@ -1892,6 +2139,150 @@ mod tests {
             stderr_truncated: false,
             created_at: "2026-06-09T02:00:00Z".to_string(),
         }
+    }
+
+    fn approval_for_patch(proposal: &PatchProposal, status: ApprovalStatus) -> ApprovalRequest {
+        let mut approval = ApprovalRequest::new(crate::approval::CreateApprovalRequest {
+            task_id: proposal.task_id.clone(),
+            step_id: proposal.step_id.clone(),
+            title: format!("应用补丁：{}", proposal.summary),
+            reason: "需要确认补丁 diff。".to_string(),
+            risk: crate::agent::action::RiskLevel::High,
+            action_type: "workspace.applyPatch".to_string(),
+            action_payload: serde_json::json!({ "patchId": proposal.id }),
+            requested_by: Some("test".to_string()),
+        })
+        .unwrap();
+        approval.id = proposal
+            .approval_id
+            .clone()
+            .unwrap_or_else(|| "approval-1".to_string());
+        if status != ApprovalStatus::Pending {
+            approval.status = status;
+            approval.decided_by = Some("tester".to_string());
+            approval.decided_at = Some(chrono::Utc::now());
+            approval.updated_at = approval.decided_at.unwrap();
+        }
+        approval
+    }
+
+    fn task_with_running_executor_step(task_id: &str) -> Task {
+        let mut task = Task::new(task_id, "应用补丁审批");
+        let mut step = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Executor",
+            "应用补丁",
+            vec![],
+        );
+        step.start();
+        task.steps = vec![step];
+        task.status = TaskStatus::Running;
+        task
+    }
+
+    #[test]
+    fn test_record_patch_approval_requested_marks_linked_step_waiting() {
+        let task_id = "task-patch-approval-requested";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let proposal = patch_proposal_for_task(task_id);
+        let approval = approval_for_patch(&proposal, ApprovalStatus::Pending);
+
+        let task = runtime
+            .record_patch_approval_requested(&proposal, &approval)
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::WaitingApproval);
+        assert_eq!(task.steps[0].status, StepStatus::WaitingApproval);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("patchApproval")
+                && artifact["patchId"] == serde_json::json!(proposal.id)
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::ApprovalRequested));
+    }
+
+    #[test]
+    fn test_record_patch_approval_approved_restores_running_step() {
+        let task_id = "task-patch-approval-approved";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let proposal = patch_proposal_for_task(task_id);
+        let pending = approval_for_patch(&proposal, ApprovalStatus::Pending);
+        runtime.record_patch_approval_requested(&proposal, &pending);
+        let approved = approval_for_patch(&proposal, ApprovalStatus::Approved);
+
+        let task = runtime
+            .record_patch_approval_resolved(&proposal, &approved)
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("patchApprovalResolved")
+                && artifact["status"] == serde_json::json!("approved")
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::ApprovalResolved));
+    }
+
+    #[test]
+    fn test_record_patch_approval_rejected_marks_task_retryable() {
+        let task_id = "task-patch-approval-rejected";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let proposal = patch_proposal_for_task(task_id);
+        let pending = approval_for_patch(&proposal, ApprovalStatus::Pending);
+        runtime.record_patch_approval_requested(&proposal, &pending);
+        let rejected = approval_for_patch(&proposal, ApprovalStatus::Rejected);
+
+        let task = runtime
+            .record_patch_approval_resolved(&proposal, &rejected)
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::Failed);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::Failed));
+
+        let retry = runtime.retry_task(task_id, "重新提交审批").unwrap();
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+    }
+
+    #[test]
+    fn test_record_patch_verification_success_completes_waiting_step() {
+        let task_id = "task-patch-verification-complete";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let proposal = patch_proposal_for_task(task_id);
+        let pending = approval_for_patch(&proposal, ApprovalStatus::Pending);
+        runtime.record_patch_approval_requested(&proposal, &pending);
+        let approved = approval_for_patch(&proposal, ApprovalStatus::Approved);
+        runtime.record_patch_approval_resolved(&proposal, &approved);
+        let runs = vec![command_run("cargo test", true)];
+
+        let task = runtime
+            .record_patch_verification(&proposal, "approval-1", &runs, &[], None)
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert_eq!(task.steps[0].status, StepStatus::Completed);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::StepCompleted));
     }
 
     #[test]

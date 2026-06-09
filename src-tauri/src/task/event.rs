@@ -16,6 +16,8 @@ pub enum TaskEventKind {
     Failed,
     Cancelled,
     Retried,
+    ApprovalRequested,
+    ApprovalResolved,
     ArtifactCreated,
 }
 
