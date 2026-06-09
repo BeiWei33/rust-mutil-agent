@@ -23,6 +23,7 @@ vi.mock("@/lib/tauri", () => ({
     clearHistory: vi.fn(),
     runProjectCommand: vi.fn(),
     requestProjectCommandApproval: vi.fn(),
+    runApprovedProjectCommand: vi.fn(),
     listProjectCommandRuns: vi.fn(),
     listApprovalRequests: vi.fn(),
     approveAction: vi.fn(),
@@ -40,6 +41,7 @@ const mockApi = api as unknown as {
   clearHistory: ReturnType<typeof vi.fn>;
   runProjectCommand: ReturnType<typeof vi.fn>;
   requestProjectCommandApproval: ReturnType<typeof vi.fn>;
+  runApprovedProjectCommand: ReturnType<typeof vi.fn>;
   listProjectCommandRuns: ReturnType<typeof vi.fn>;
   listApprovalRequests: ReturnType<typeof vi.fn>;
   approveAction: ReturnType<typeof vi.fn>;
@@ -103,6 +105,7 @@ describe("useAgentStore", () => {
       approvalsLoading: false,
       approvalsError: null,
       approvalDecisionLoadingId: null,
+      approvalExecutionLoadingId: null,
       settings: {
         model: "deepseek-v4-pro",
         apiKey: "",
@@ -729,5 +732,36 @@ describe("useAgentStore", () => {
     });
     expect(getState().approvalDecisionLoadingId).toBeNull();
     expect(getState().approvals).toEqual([approved]);
+  });
+
+  /// 测试 — runApprovedCommand 成功时写入最近命令结果
+  /// 验证：已审批命令执行后可在命令审计列表中看到关联 approvalId
+  it("runApprovedCommand 成功时应保存命令审计结果", async () => {
+    const run = {
+      id: "run-approved-1",
+      approvalId: "approval-2",
+      command: "cargo clippy",
+      workingDir: "src-tauri",
+      exitCode: 0,
+      success: true,
+      stdout: "ok",
+      stderr: "",
+      durationMs: 120,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      createdAt: "2026-06-09T12:02:00Z",
+    };
+    mockApi.runApprovedProjectCommand.mockResolvedValue(run);
+
+    await getState().runApprovedCommand("approval-2");
+
+    expect(mockApi.runApprovedProjectCommand).toHaveBeenCalledWith({
+      approvalId: "approval-2",
+    });
+    expect(getState().approvalExecutionLoadingId).toBeNull();
+    expect(getState().approvalsError).toBeNull();
+    expect(getState().latestCommandRun).toEqual(run);
+    expect(getState().commandRuns).toEqual([run]);
   });
 });

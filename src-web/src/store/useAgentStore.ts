@@ -132,10 +132,13 @@ interface AgentState {
   approvalsLoading: boolean;
   approvalsError: string | null;
   approvalDecisionLoadingId: string | null;
+  approvalExecutionLoadingId: string | null;
   /** 获取审批请求列表 */
   fetchApprovals: (status?: ApprovalStatus) => Promise<void>;
   /** 审批或拒绝动作 */
   decideApproval: (approvalId: string, approved: boolean, note?: string) => Promise<void>;
+  /** 执行已通过审批的项目命令 */
+  runApprovedCommand: (approvalId: string) => Promise<void>;
 
   // ===== 项目理解 =====
   projectSnapshot: ProjectSnapshot | null;
@@ -486,6 +489,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   approvalsLoading: false,
   approvalsError: null,
   approvalDecisionLoadingId: null,
+  approvalExecutionLoadingId: null,
 
   fetchApprovals: async (status) => {
     set({ approvalsLoading: true, approvalsError: null });
@@ -525,6 +529,24 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set({
         approvalsError: getErrorMessage(err, "处理审批请求失败"),
         approvalDecisionLoadingId: null,
+      });
+    }
+  },
+
+  runApprovedCommand: async (approvalId) => {
+    set({ approvalExecutionLoadingId: approvalId, approvalsError: null });
+    try {
+      const result = await api.runApprovedProjectCommand({ approvalId });
+      set((s) => ({
+        latestCommandRun: result,
+        commandRuns: [result, ...s.commandRuns.filter((run) => run.id !== result.id)].slice(0, 10),
+        approvalExecutionLoadingId: null,
+        approvalsError: null,
+      }));
+    } catch (err: unknown) {
+      set({
+        approvalsError: getErrorMessage(err, "执行已审批命令失败"),
+        approvalExecutionLoadingId: null,
       });
     }
   },

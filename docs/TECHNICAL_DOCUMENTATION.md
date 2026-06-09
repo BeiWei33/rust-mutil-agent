@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计、审批请求基础和非 allowlist 命令审批入口已具备；补丁写入、高风险动作审批后恢复执行和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计、审批请求基础、非 allowlist 命令审批入口和已审批命令执行已具备；补丁写入、调度器审批等待/恢复和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -84,7 +84,8 @@ Rust Tauri Commands
   ├─ get_task_result
   ├─ cancel_task / retry_task
   ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
-  ├─ run_project_command / request_project_command_approval / list_project_command_runs
+  ├─ run_project_command / request_project_command_approval / run_approved_project_command
+  ├─ list_project_command_runs
   ├─ list_approval_requests / approve_action
   ├─ health_check
   ├─ get_history
@@ -317,6 +318,7 @@ Planner LLM 相关环境变量：
 | `search_project_text` | `{ request: { query, maxResults? } }` | `SearchResponse` | 已实现只读搜索 |
 | `run_project_command` | `{ request: { command, workingDir } }` | `ProjectCommandRunResponse` | 已实现 allowlist 受控运行 |
 | `request_project_command_approval` | `{ request: { command, workingDir } }` | `ApprovalRequest` | 已实现非 allowlist 命令审批创建 |
+| `run_approved_project_command` | `{ request: { approvalId } }` | `ProjectCommandRunResponse` | 已实现已审批命令执行和审计关联 |
 | `list_project_command_runs` | `{ limit? }` | `{ runs }` | 已实现最近命令审计读取 |
 | `list_approval_requests` | `{ status?, limit? }` | `{ approvals }` | 已实现审批请求读取 |
 | `approve_action` | `{ request: { approvalId, approved, note?, decidedBy? } }` | `ApprovalRequest` 或 `null` | 已实现审批/拒绝决策 |
@@ -334,11 +336,11 @@ Planner LLM 相关环境变量：
 
 该命令不会经过 shell；工作目录会解析到 workspace 内部，拒绝父目录穿越和 shell 控制字符；执行超时为 120 秒，stdout/stderr 会截断到前 96 KB 并返回截断标记。
 
-每次成功进入 allowlist 的命令运行都会写入 `command_runs` 审计表，保存命令、工作目录、退出码、是否成功、stdout/stderr、耗时、超时标记、截断标记和创建时间。前端项目面板会通过 `list_project_command_runs` 展示最近记录。
+每次成功进入 allowlist 的命令运行都会写入 `command_runs` 审计表，保存命令、工作目录、退出码、是否成功、stdout/stderr、耗时、超时标记、截断标记、创建时间和可选 `approval_id`。前端项目面板会通过 `list_project_command_runs` 展示最近记录。
 
 非 allowlist 命令不会直接执行。前端项目面板可调用 `request_project_command_approval` 创建高风险审批请求；后端会复用命令解析逻辑，仍然拒绝空命令、shell 控制字符、父目录穿越和 workspace 外目录。审批 payload 记录归一化命令、工作目录和默认 allowlist 判定。
 
-审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护和非 allowlist 命令手动审批；尚未把补丁应用或审批通过后的命令执行自动接入调度恢复。
+审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护和非 allowlist 命令手动审批。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令；后端不会接受前端重新传入命令文本，并会把执行结果以 `approval_id` 关联写入命令审计。尚未把补丁应用或审批执行结果自动接入任务调度恢复。
 
 ### send_message 路由规则
 
@@ -380,7 +382,7 @@ Planner LLM 相关环境变量：
 | --- | --- | --- |
 | 对话 | `ChatWindow` | 消息展示、Markdown 渲染、Agent 选择、发送/重试 |
 | 项目 | `ProjectPanel` | 项目快照、文件检索、只读预览、推荐验证命令运行和非 allowlist 命令审批 |
-| 审批 | `ApprovalPanel` | 高风险动作审批请求列表、通过/拒绝 |
+| 审批 | `ApprovalPanel` | 高风险动作审批请求列表、通过/拒绝、执行已审批命令 |
 | Agent | `AgentPanel` | Agent 状态列表、能力展示、5 秒轮询 |
 | 设置 | `SettingsPanel` | 模型、API Key、Base URL、max tokens、temperature |
 
@@ -397,7 +399,7 @@ Planner LLM 相关环境变量：
 - `healthy` / `healthVersion`
 - `settings`
 - `projectSnapshot` / `projectFiles` / `latestCommandRun` / `lastCommandApproval`
-- `approvals` / `approvalsLoading` / `approvalDecisionLoadingId`
+- `approvals` / `approvalsLoading` / `approvalDecisionLoadingId` / `approvalExecutionLoadingId`
 
 设置项保存在浏览器 `localStorage` 的 `app-settings` 键中。
 
@@ -572,7 +574,7 @@ npm test
 
 1. 增强调度器控制面：实现步骤超时、单步骤跳过和人工审批状态流转。
 2. 扩展请求级真实 LLM：在 Planner 临时 LLMClient 基础上，继续让 Executor/Tool 使用受控工具调用，并接入安全存储。
-3. 扩展工具执行层：在受控验证命令运行、审计和审批请求基础上，引入审批通过后的动作恢复、补丁生成、差异审查和高风险动作自动暂停。
+3. 扩展工具执行层：在受控验证命令运行、审计和审批请求基础上，引入补丁生成、差异审查和高风险动作自动暂停。
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。
 5. 强化工具权限：对 `file_read`、命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。

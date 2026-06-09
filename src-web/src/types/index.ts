@@ -268,6 +268,7 @@ export interface ProjectCommandRunRequest {
 /** 运行受控项目命令响应 */
 export interface ProjectCommandRunResponse {
   id: string;
+  approvalId?: string | null;
   command: string;
   workingDir: string;
   exitCode?: number | null;
@@ -322,6 +323,11 @@ export interface ApprovalDecisionRequest {
   approved: boolean;
   note?: string;
   decidedBy?: string;
+}
+
+/** 执行已审批项目命令请求 */
+export interface RunApprovedProjectCommandRequest {
+  approvalId: string;
 }
 
 /** 项目快照 */

@@ -32,6 +32,7 @@ import type {
   ApprovalListResponse,
   ApprovalRequest,
   ApprovalStatus,
+  RunApprovedProjectCommandRequest,
 } from "@/types";
 
 /**
@@ -217,6 +218,19 @@ export async function requestProjectCommandApproval(
   request: ProjectCommandRunRequest
 ): Promise<ApprovalRequest> {
   return invoke<ApprovalRequest>(`${CMD_PREFIX}request_project_command_approval`, {
+    request,
+  });
+}
+
+/**
+ * 执行已通过审批的项目命令
+ * @param request 审批 ID
+ * @returns 命令运行结果
+ */
+export async function runApprovedProjectCommand(
+  request: RunApprovedProjectCommandRequest
+): Promise<ProjectCommandRunResponse> {
+  return invoke<ProjectCommandRunResponse>(`${CMD_PREFIX}run_approved_project_command`, {
     request,
   });
 }
@@ -711,6 +725,7 @@ async function mockRunProjectCommand(
   await new Promise((r) => setTimeout(r, 300));
   const run = {
     id: generateId(),
+    approvalId: null,
     command: request.command,
     workingDir: request.workingDir,
     exitCode: 0,
@@ -757,6 +772,53 @@ async function mockRequestProjectCommandApproval(
   };
   MOCK_APPROVALS = [approval, ...MOCK_APPROVALS].slice(0, 100);
   return approval;
+}
+
+function commandPayload(value: unknown): ProjectCommandRunRequest | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as { command?: unknown; workingDir?: unknown };
+  if (typeof payload.command !== "string" || typeof payload.workingDir !== "string") {
+    return null;
+  }
+  return {
+    command: payload.command,
+    workingDir: payload.workingDir,
+  };
+}
+
+async function mockRunApprovedProjectCommand(
+  request: RunApprovedProjectCommandRequest
+): Promise<ProjectCommandRunResponse> {
+  await new Promise((r) => setTimeout(r, 300));
+  const existing = MOCK_COMMAND_RUNS.find((run) => run.approvalId === request.approvalId);
+  if (existing) return existing;
+
+  const approval = MOCK_APPROVALS.find((item) => item.id === request.approvalId);
+  if (!approval) throw new Error("找不到对应的审批请求。");
+  if (approval.status !== "approved") throw new Error("审批请求尚未通过，不能执行对应命令。");
+  if (approval.actionType !== "runtime.runProjectCommand") {
+    throw new Error("这条审批不是项目命令执行请求，不能作为命令运行。");
+  }
+  const payload = commandPayload(approval.actionPayload);
+  if (!payload) throw new Error("审批 payload 缺少命令内容或工作目录。");
+
+  const run: ProjectCommandRunResponse = {
+    id: generateId(),
+    approvalId: request.approvalId,
+    command: payload.command,
+    workingDir: payload.workingDir,
+    exitCode: 0,
+    success: true,
+    stdout: `mock approved run passed\n${payload.workingDir}$ ${payload.command}`,
+    stderr: "",
+    durationMs: 300,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    createdAt: new Date().toISOString(),
+  };
+  MOCK_COMMAND_RUNS = [run, ...MOCK_COMMAND_RUNS].slice(0, 50);
+  return run;
 }
 
 async function mockListProjectCommandRuns(
@@ -838,6 +900,9 @@ export const api = {
   requestProjectCommandApproval: isTauri()
     ? requestProjectCommandApproval
     : mockRequestProjectCommandApproval,
+  runApprovedProjectCommand: isTauri()
+    ? runApprovedProjectCommand
+    : mockRunApprovedProjectCommand,
   listProjectCommandRuns: isTauri() ? listProjectCommandRuns : mockListProjectCommandRuns,
   listApprovalRequests: isTauri() ? listApprovalRequests : mockListApprovalRequests,
   approveAction: isTauri() ? approveAction : mockApproveAction,

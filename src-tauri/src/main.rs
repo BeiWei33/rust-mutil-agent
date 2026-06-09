@@ -138,6 +138,7 @@ async fn main() {
             commands::search_project_text,
             commands::run_project_command,
             commands::request_project_command_approval,
+            commands::run_approved_project_command,
             commands::list_project_command_runs,
             commands::list_approval_requests,
             commands::approve_action,

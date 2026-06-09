@@ -27,6 +27,7 @@ pub struct ProjectCommandRunRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectCommandRunResponse {
     pub id: String,
+    pub approval_id: Option<String>,
     pub command: String,
     pub working_dir: String,
     pub exit_code: Option<i32>,
@@ -69,7 +70,8 @@ struct AllowedCommand {
 
 #[derive(Debug, Clone)]
 struct PreparedCommand {
-    spec: AllowedCommand,
+    program: String,
+    args: Vec<String>,
     working_dir_path: PathBuf,
     display_command: String,
     display_working_dir: String,
@@ -106,10 +108,25 @@ pub async fn run_project_command(
     request: ProjectCommandRunRequest,
 ) -> Result<ProjectCommandRunResponse, AgentError> {
     let prepared = prepare_project_command(&request)?;
+    execute_prepared_command(prepared, None).await
+}
+
+pub async fn run_approved_project_command(
+    request: ProjectCommandRunRequest,
+    approval_id: String,
+) -> Result<ProjectCommandRunResponse, AgentError> {
+    let prepared = prepare_approved_project_command(&request)?;
+    execute_prepared_command(prepared, Some(approval_id)).await
+}
+
+async fn execute_prepared_command(
+    prepared: PreparedCommand,
+    approval_id: Option<String>,
+) -> Result<ProjectCommandRunResponse, AgentError> {
     let start = Instant::now();
-    let mut command = Command::new(platform_program(prepared.spec.program));
+    let mut command = Command::new(platform_program(&prepared.program));
     command
-        .args(prepared.spec.args)
+        .args(&prepared.args)
         .current_dir(&prepared.working_dir_path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -127,6 +144,7 @@ pub async fn run_project_command(
         Err(_) => {
             return Ok(ProjectCommandRunResponse {
                 id: uuid::Uuid::new_v4().to_string(),
+                approval_id,
                 command: prepared.display_command,
                 working_dir: prepared.display_working_dir,
                 exit_code: None,
@@ -148,6 +166,7 @@ pub async fn run_project_command(
 
     Ok(ProjectCommandRunResponse {
         id: uuid::Uuid::new_v4().to_string(),
+        approval_id,
         command: prepared.display_command,
         working_dir: prepared.display_working_dir,
         exit_code,
@@ -184,6 +203,7 @@ impl CommandRunStore {
             "
             CREATE TABLE IF NOT EXISTS command_runs (
                 id TEXT PRIMARY KEY,
+                approval_id TEXT,
                 command TEXT NOT NULL,
                 working_dir TEXT NOT NULL,
                 exit_code INTEGER,
@@ -201,6 +221,15 @@ impl CommandRunStore {
                 ON command_runs(created_at);
             ",
         )?;
+        if !has_column(&conn, "command_runs", "approval_id")? {
+            conn.execute("ALTER TABLE command_runs ADD COLUMN approval_id TEXT", [])?;
+        }
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_command_runs_approval_id
+                ON command_runs(approval_id);
+            ",
+        )?;
         Ok(())
     }
 
@@ -208,11 +237,12 @@ impl CommandRunStore {
         let conn = self.conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO command_runs
-             (id, command, working_dir, exit_code, success, stdout, stderr, duration_ms,
-              timed_out, stdout_truncated, stderr_truncated, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (id, approval_id, command, working_dir, exit_code, success, stdout, stderr,
+              duration_ms, timed_out, stdout_truncated, stderr_truncated, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 run.id,
+                run.approval_id,
                 run.command,
                 run.working_dir,
                 run.exit_code,
@@ -236,7 +266,7 @@ impl CommandRunStore {
         let limit = limit.unwrap_or(20).clamp(1, 100);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, command, working_dir, exit_code, success, stdout, stderr,
+            "SELECT id, approval_id, command, working_dir, exit_code, success, stdout, stderr,
                     duration_ms, timed_out, stdout_truncated, stderr_truncated, created_at
              FROM command_runs
              ORDER BY created_at DESC, rowid DESC
@@ -245,17 +275,18 @@ impl CommandRunStore {
         let rows = stmt.query_map(params![limit as i64], |row| {
             Ok(ProjectCommandRunResponse {
                 id: row.get(0)?,
-                command: row.get(1)?,
-                working_dir: row.get(2)?,
-                exit_code: row.get(3)?,
-                success: row.get(4)?,
-                stdout: row.get(5)?,
-                stderr: row.get(6)?,
-                duration_ms: row.get(7)?,
-                timed_out: row.get(8)?,
-                stdout_truncated: row.get(9)?,
-                stderr_truncated: row.get(10)?,
-                created_at: row.get(11)?,
+                approval_id: row.get(1)?,
+                command: row.get(2)?,
+                working_dir: row.get(3)?,
+                exit_code: row.get(4)?,
+                success: row.get(5)?,
+                stdout: row.get(6)?,
+                stderr: row.get(7)?,
+                duration_ms: row.get(8)?,
+                timed_out: row.get(9)?,
+                stdout_truncated: row.get(10)?,
+                stderr_truncated: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })?;
 
@@ -264,6 +295,46 @@ impl CommandRunStore {
             runs.push(row?);
         }
         Ok(runs)
+    }
+
+    pub fn get_run_by_approval_id(
+        &self,
+        approval_id: &str,
+    ) -> Result<Option<ProjectCommandRunResponse>, AgentError> {
+        let approval_id = approval_id.trim();
+        if approval_id.is_empty() {
+            return Ok(None);
+        }
+
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, approval_id, command, working_dir, exit_code, success, stdout, stderr,
+                    duration_ms, timed_out, stdout_truncated, stderr_truncated, created_at
+             FROM command_runs
+             WHERE approval_id = ?1
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![approval_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        Ok(Some(ProjectCommandRunResponse {
+            id: row.get(0)?,
+            approval_id: row.get(1)?,
+            command: row.get(2)?,
+            working_dir: row.get(3)?,
+            exit_code: row.get(4)?,
+            success: row.get(5)?,
+            stdout: row.get(6)?,
+            stderr: row.get(7)?,
+            duration_ms: row.get(8)?,
+            timed_out: row.get(9)?,
+            stdout_truncated: row.get(10)?,
+            stderr_truncated: row.get(11)?,
+            created_at: row.get(12)?,
+        }))
     }
 
     fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, AgentError> {
@@ -291,7 +362,27 @@ fn prepare_project_command(
         })?;
 
     Ok(PreparedCommand {
-        spec,
+        program: spec.program.to_string(),
+        args: spec.args.iter().map(|arg| (*arg).to_string()).collect(),
+        working_dir_path,
+        display_command: inspection.command,
+        display_working_dir: inspection.working_dir,
+    })
+}
+
+fn prepare_approved_project_command(
+    request: &ProjectCommandRunRequest,
+) -> Result<PreparedCommand, AgentError> {
+    let (inspection, working_dir_path) = inspect_project_command_request_with_path(request)?;
+    let tokens = split_command_args(&inspection.command)?;
+    let (program, args) = tokens
+        .split_first()
+        .ok_or_else(|| AgentError::MessageFormat("项目命令不能为空".to_string()))?;
+    validate_program_name(program)?;
+
+    Ok(PreparedCommand {
+        program: program.to_string(),
+        args: args.to_vec(),
         working_dir_path,
         display_command: inspection.command,
         display_working_dir: inspection.working_dir,
@@ -405,6 +496,76 @@ fn platform_program(program: &str) -> &str {
     }
 }
 
+fn validate_program_name(program: &str) -> Result<(), AgentError> {
+    let path = Path::new(program);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        || program.contains('/')
+        || program.contains('\\')
+    {
+        return Err(AgentError::MessageFormat(format!(
+            "已审批命令的程序名 [{}] 不能包含路径",
+            program
+        )));
+    }
+    Ok(())
+}
+
+fn split_command_args(command: &str) -> Result<Vec<String>, AgentError> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+
+    for ch in command.chars() {
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if let Some(active_quote) = quote {
+        return Err(AgentError::MessageFormat(format!(
+            "项目命令包含未闭合的引号 [{}]",
+            active_quote
+        )));
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, AgentError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 fn decode_output(bytes: &[u8]) -> (String, bool) {
     let truncated = bytes.len() > MAX_OUTPUT_BYTES;
     let slice = if truncated {
@@ -439,7 +600,8 @@ mod tests {
         let prepared = prepare_project_command(&request(" cargo   check ", "src-tauri")).unwrap();
         assert_eq!(prepared.display_command, "cargo check");
         assert_eq!(prepared.display_working_dir, "src-tauri");
-        assert_eq!(prepared.spec.args, &["check"]);
+        assert_eq!(prepared.program, "cargo");
+        assert_eq!(prepared.args, vec!["check"]);
     }
 
     #[test]
@@ -447,7 +609,8 @@ mod tests {
         let prepared = prepare_project_command(&request("npm test -- --run", "src-web")).unwrap();
         assert_eq!(prepared.display_command, "npm test -- --run");
         assert_eq!(prepared.display_working_dir, "src-web");
-        assert_eq!(prepared.spec.args, &["test", "--", "--run"]);
+        assert_eq!(prepared.program, "npm");
+        assert_eq!(prepared.args, vec!["test", "--", "--run"]);
     }
 
     #[test]
@@ -473,6 +636,24 @@ mod tests {
     }
 
     #[test]
+    fn prepares_approved_command_without_shell() {
+        let prepared = prepare_approved_project_command(&request(
+            "cargo clippy -- \"-D warnings\"",
+            "src-tauri",
+        ))
+        .unwrap();
+        assert_eq!(prepared.program, "cargo");
+        assert_eq!(prepared.args, vec!["clippy", "--", "-D warnings"]);
+        assert_eq!(prepared.display_command, "cargo clippy -- \"-D warnings\"");
+    }
+
+    #[test]
+    fn approved_command_rejects_program_paths() {
+        let err = prepare_approved_project_command(&request("./script", "src-tauri")).unwrap_err();
+        assert!(err.to_string().contains("不能包含路径"));
+    }
+
+    #[test]
     fn rejects_parent_traversal_working_dir() {
         let err = prepare_project_command(&request("cargo test", "../src-tauri")).unwrap_err();
         assert!(err.to_string().contains("workspace 外部"));
@@ -491,6 +672,7 @@ mod tests {
         let store = CommandRunStore::open(":memory:").unwrap();
         let first = ProjectCommandRunResponse {
             id: "run-1".to_string(),
+            approval_id: None,
             command: "cargo check".to_string(),
             working_dir: "src-tauri".to_string(),
             exit_code: Some(0),
@@ -505,6 +687,7 @@ mod tests {
         };
         let second = ProjectCommandRunResponse {
             id: "run-2".to_string(),
+            approval_id: Some("approval-1".to_string()),
             command: "cargo test".to_string(),
             working_dir: "src-tauri".to_string(),
             exit_code: Some(101),
@@ -524,7 +707,11 @@ mod tests {
         let runs = store.list_runs(Some(1)).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "run-2");
+        assert_eq!(runs[0].approval_id.as_deref(), Some("approval-1"));
         assert_eq!(runs[0].exit_code, Some(101));
         assert!(!runs[0].success);
+
+        let approved_run = store.get_run_by_approval_id("approval-1").unwrap().unwrap();
+        assert_eq!(approved_run.id, "run-2");
     }
 }

@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础和非 allowlist 命令审批入口已经落地；补丁写入、diff 审查、高风险动作自动恢复执行和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口和已审批命令执行已经落地；补丁写入、diff 审查、任务调度器自动审批等待/恢复和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -18,7 +18,7 @@
 | Planner 规划 | 部分实现 | 默认使用规则/项目上下文规划；可通过环境变量或前端请求级配置启用 LLM JSON 规划并自动降级。 |
 | LLM Client | 部分实现 | 支持 Mock、OpenAI、DeepSeek 和自定义 OpenAI-compatible 端点；`LlamaCpp` 仍为预留。 |
 | 受控命令运行 | 已实现 | 只允许低风险验证命令，执行不经过 shell，结果写入命令审计 SQLite。 |
-| 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护和非 allowlist 命令手动审批；尚未自动执行已审批动作。 |
+| 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护、非 allowlist 命令手动审批和已审批命令执行。 |
 | 工程修改闭环 | 待实现 | 代码 patch、diff 预览、自动审批暂停、测试返工和 ReviewAgent 尚未接入。 |
 
 ## 功能概览
@@ -28,7 +28,7 @@
 - 持久化：任务、任务事件、聊天历史、命令运行记录和审批请求都使用 SQLite 本地保存。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令和最近运行记录。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
-- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令创建审批请求。
+- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令创建审批请求，审批通过后可从审批面板执行并写入命令审计。
 - 请求级 LLM 设置：前端可传模型、Base URL、max tokens、temperature 和 API Key；API Key 只进入请求期临时上下文，不写入持久化数据。
 - 浏览器降级：前端单独运行 Vite 时自动使用 mock API，方便开发 UI。
 - 结构化错误：后端返回 `ApiError`，前端统一转换为中文错误提示和技术详情。
@@ -113,7 +113,8 @@ Rust Commands
   ├─ get_task / list_tasks / get_task_events
   ├─ cancel_task / retry_task
   ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
-  ├─ run_project_command / request_project_command_approval / list_project_command_runs
+  ├─ run_project_command / request_project_command_approval / run_approved_project_command
+  ├─ list_project_command_runs
   ├─ list_approval_requests / approve_action
   ├─ get_history / clear_history
   └─ list_agents / health_check
@@ -263,6 +264,7 @@ cp .env.example .env
 | `search_project_text` | 已实现 | 搜索 workspace 内文本内容。 |
 | `run_project_command` | 已实现 | 运行 allowlist 内低风险验证命令并写审计。 |
 | `request_project_command_approval` | 已实现 | 为非 allowlist 项目命令创建待审批请求。 |
+| `run_approved_project_command` | 已实现 | 通过 approvalId 执行已通过审批的项目命令，并关联写入命令审计。 |
 | `list_project_command_runs` | 已实现 | 查询最近命令运行记录。 |
 | `list_approval_requests` | 已实现 | 查询审批请求，可按状态过滤。 |
 | `approve_action` | 已实现 | 对审批请求执行通过或拒绝。 |
@@ -283,12 +285,12 @@ cp .env.example .env
 
 命令执行使用 `tokio::process::Command`，不经过 shell；工作目录必须解析在 workspace 内；包含 shell 控制字符或父目录穿越会被拒绝。执行超时为 120 秒，stdout/stderr 最多返回前 96 KB，并带截断标记。
 
-非 allowlist 命令不会直接执行；项目面板可调用 `request_project_command_approval` 创建高风险审批请求，审批 payload 会记录归一化命令、工作目录和默认 allowlist 判定。审批通过后的恢复执行仍在后续路线图中。
+非 allowlist 命令不会直接执行；项目面板可调用 `request_project_command_approval` 创建高风险审批请求，审批 payload 会记录归一化命令、工作目录和默认 allowlist 判定。审批通过后，审批面板可调用 `run_approved_project_command` 按 approvalId 执行原审批 payload 中的命令，不经过 shell，继续限制在 workspace 内，并在 `command_runs.approval_id` 中写入审计关联。
 
 ## 已知限制
 
 1. `Executor` 还没有接入真实代码修改、patch 应用或沙箱写入。
-2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批；尚未自动执行已审批命令，也未自动拦截文件写入或 patch 应用。
+2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批和已审批命令执行；尚未自动拦截文件写入或 patch 应用，也尚未把任务步骤自动挂起到审批状态。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
 4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 仍需补齐同等级别权限控制。
@@ -299,9 +301,9 @@ cp .env.example .env
 
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
-1. 增加审批通过后的动作恢复：已审批命令执行、审计关联和失败反馈。
-2. 把审批流继续接到文件写入和 patch 应用，并增加 patch/diff 产物与前端 diff 预览。
-3. 增强调度器控制面：步骤超时、单步骤跳过、审批等待与恢复。
+1. 把审批流继续接到文件写入和 patch 应用，并增加 patch/diff 产物与前端 diff 预览。
+2. 增强调度器控制面：步骤超时、单步骤跳过、审批等待与恢复。
+3. 将审批执行结果回写到任务事件和步骤状态，形成端到端的任务暂停/恢复链路。
 4. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
 5. 统一前端设置、安全存储和后端 LLMClient 配置。
 

@@ -7,7 +7,7 @@ use crate::agent::action::RiskLevel;
 use crate::agent::traits::Capability as AgentCapability;
 use crate::approval::{
     parse_approval_status, ApprovalDecisionRequest, ApprovalListResponse, ApprovalRequest,
-    CreateApprovalRequest,
+    ApprovalStatus, CreateApprovalRequest,
 };
 use crate::chat::ChatMessage as StoredChatMessage;
 use crate::error::AgentError;
@@ -62,6 +62,13 @@ pub struct CreateTaskRequest {
 pub struct SearchProjectTextRequest {
     pub query: String,
     pub max_results: Option<usize>,
+}
+
+/// 执行已审批项目命令请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunApprovedProjectCommandRequest {
+    pub approval_id: String,
 }
 
 /// 结构化 API 错误。
@@ -965,6 +972,85 @@ pub async fn request_project_command_approval(
         .map_err(|err| ApiError::approval_failed(format!("{}", err)))
 }
 
+fn project_command_request_from_approval(
+    approval: &ApprovalRequest,
+) -> Result<ProjectCommandRunRequest, ApiError> {
+    if approval.action_type != "runtime.runProjectCommand" {
+        return Err(ApiError::invalid_argument(
+            "这条审批不是项目命令执行请求，不能作为命令运行。",
+        ));
+    }
+    if approval.status != ApprovalStatus::Approved {
+        return Err(ApiError::invalid_argument(
+            "审批请求尚未通过，不能执行对应命令。",
+        ));
+    }
+
+    let command = approval
+        .action_payload
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::invalid_argument("审批 payload 缺少命令内容。"))?;
+    let working_dir = approval
+        .action_payload
+        .get("workingDir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::invalid_argument("审批 payload 缺少工作目录。"))?;
+
+    Ok(ProjectCommandRunRequest {
+        command: command.to_string(),
+        working_dir: working_dir.to_string(),
+    })
+}
+
+/// 执行已通过审批的项目命令。
+///
+/// 前端调用：`invoke('run_approved_project_command', { request: { approvalId } })`
+#[tauri::command]
+pub async fn run_approved_project_command(
+    request: RunApprovedProjectCommandRequest,
+    state: State<'_, AppState>,
+) -> Result<ProjectCommandRunResponse, ApiError> {
+    let approval_id = request.approval_id.trim();
+    if approval_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少审批请求 ID。"));
+    }
+
+    let Some(approval) = state
+        .approval_store
+        .get_request(approval_id)
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))?
+    else {
+        return Err(ApiError::invalid_argument("找不到对应的审批请求。"));
+    };
+    let command_request = project_command_request_from_approval(&approval)?;
+
+    if let Some(existing) = state
+        .command_store
+        .get_run_by_approval_id(&approval.id)
+        .map_err(|err| ApiError::command_failed(format!("{}", err)))?
+    {
+        return Ok(existing);
+    }
+
+    let result = crate::runtime::run_approved_project_command(command_request, approval.id.clone())
+        .await
+        .map_err(|err| match err {
+            AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
+            other => ApiError::command_failed(format!("{}", other)),
+        })?;
+    state
+        .command_store
+        .append_run(&result)
+        .map_err(|err| ApiError::command_failed(format!("{}", err)))?;
+
+    Ok(result)
+}
+
 /// 列出最近的受控项目命令运行记录。
 ///
 /// 前端调用：`invoke('list_project_command_runs', { limit })`
@@ -1157,5 +1243,55 @@ mod tests {
             input.action_payload["allowedByDefault"],
             serde_json::json!(false)
         );
+    }
+
+    #[test]
+    fn test_project_command_request_from_approval_requires_approved_status() {
+        let mut approval = ApprovalRequest::new(CreateApprovalRequest {
+            task_id: None,
+            step_id: None,
+            title: "运行命令".to_string(),
+            reason: "需要确认。".to_string(),
+            risk: RiskLevel::High,
+            action_type: "runtime.runProjectCommand".to_string(),
+            action_payload: serde_json::json!({
+                "command": "cargo clippy",
+                "workingDir": "src-tauri",
+            }),
+            requested_by: Some("ProjectPanel".to_string()),
+        })
+        .unwrap();
+
+        let err = project_command_request_from_approval(&approval).unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("尚未通过"));
+
+        approval.status = ApprovalStatus::Approved;
+        let request = project_command_request_from_approval(&approval).unwrap();
+        assert_eq!(request.command, "cargo clippy");
+        assert_eq!(request.working_dir, "src-tauri");
+    }
+
+    #[test]
+    fn test_project_command_request_from_approval_rejects_wrong_action_type() {
+        let mut approval = ApprovalRequest::new(CreateApprovalRequest {
+            task_id: None,
+            step_id: None,
+            title: "应用 patch".to_string(),
+            reason: "需要确认。".to_string(),
+            risk: RiskLevel::High,
+            action_type: "workspace.applyPatch".to_string(),
+            action_payload: serde_json::json!({
+                "command": "cargo clippy",
+                "workingDir": "src-tauri",
+            }),
+            requested_by: Some("ProjectPanel".to_string()),
+        })
+        .unwrap();
+        approval.status = ApprovalStatus::Approved;
+
+        let err = project_command_request_from_approval(&approval).unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("不是项目命令"));
     }
 }
