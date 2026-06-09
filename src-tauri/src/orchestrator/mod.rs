@@ -488,6 +488,33 @@ impl TaskRuntime {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("skipped");
         task.add_artifact(artifact.clone());
+        if status == "failed" && task.status != TaskStatus::Cancelled {
+            let message = patch_verification_failure_message(proposal, auto_rollback);
+            if let Some(step_id) = proposal.step_id.as_deref() {
+                if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                    if step.status != StepStatus::Failed {
+                        step.fail(message.clone());
+                        emitted.push(TaskEvent::new(
+                            task_id.to_string(),
+                            Some(step.id.clone()),
+                            TaskEventKind::StepFailed,
+                            message.clone(),
+                            patch_verification_failure_payload(proposal, status, auto_rollback),
+                        ));
+                    }
+                }
+            }
+            if task.status != TaskStatus::Failed {
+                task.fail(message.clone());
+                emitted.push(TaskEvent::new(
+                    task_id.to_string(),
+                    None,
+                    TaskEventKind::Failed,
+                    message,
+                    patch_verification_failure_payload(proposal, status, auto_rollback),
+                ));
+            }
+        }
         let updated = task.clone();
 
         emitted.push(TaskEvent::new(
@@ -1312,6 +1339,30 @@ fn patch_verification_status_label(status: &str) -> &'static str {
     }
 }
 
+fn patch_verification_failure_message(
+    proposal: &PatchProposal,
+    auto_rollback: Option<&PatchAutoRollbackResult>,
+) -> String {
+    let rollback_summary = match auto_rollback {
+        Some(result) if result.reverted => "已自动回滚补丁。",
+        Some(result) if !result.reverted => "自动回滚失败，需要人工处理。",
+        _ => "补丁仍保留在工作区，需要修复或手动回滚。",
+    };
+    format!("补丁验证失败：{}。{}", proposal.summary, rollback_summary)
+}
+
+fn patch_verification_failure_payload(
+    proposal: &PatchProposal,
+    status: &str,
+    auto_rollback: Option<&PatchAutoRollbackResult>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "patchId": &proposal.id,
+        "status": status,
+        "autoRollback": auto_rollback,
+    })
+}
+
 fn has_patch_artifact(task: &Task, patch_id: &str) -> bool {
     has_patch_kind_artifact(task, "patchApplied", patch_id)
 }
@@ -1944,6 +1995,12 @@ mod tests {
         assert_eq!(task.artifacts[0]["commandCount"], serde_json::json!(2));
         assert_eq!(task.artifacts[0]["successCount"], serde_json::json!(1));
         assert_eq!(task.artifacts[0]["failedCount"], serde_json::json!(1));
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("补丁验证失败"));
 
         let events = runtime.get_events(task_id);
         let event = events
@@ -1955,6 +2012,51 @@ mod tests {
             event.payload["kind"],
             serde_json::json!("patchVerification")
         );
+    }
+
+    #[test]
+    fn test_record_patch_verification_failure_marks_linked_step_retryable() {
+        let task_id = "task-patch-verification-retry";
+        let mut task = Task::new(task_id, "验证失败后重试");
+        let mut step = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Executor",
+            "应用补丁并验证",
+            vec![],
+        );
+        step.complete(serde_json::json!({ "summary": "patch applied" }));
+        task.steps = vec![step];
+        task.complete("之前已完成");
+
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+        let proposal = patch_proposal_for_task(task_id);
+        let runs = vec![command_run("cargo test", false)];
+
+        let task = runtime
+            .record_patch_verification(&proposal, "approval-1", &runs, &[], None)
+            .unwrap();
+
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::Failed);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::StepFailed));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::Failed));
+
+        let retry = runtime.retry_task(task_id, "修复验证失败").unwrap();
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert!(task.error.is_none());
     }
 
     #[test]

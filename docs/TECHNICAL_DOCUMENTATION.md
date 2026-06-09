@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、显式开启的验证失败自动回滚和任务 patch/verification/revert artifact 已具备；调度器审批等待/恢复、验证失败自动返工和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、显式开启的验证失败自动回滚、任务 patch/verification/revert artifact 和验证失败任务/步骤状态回写已具备；调度器审批等待/恢复、验证失败自动返工和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -327,7 +327,7 @@ Planner LLM 相关环境变量：
 | `create_patch_proposal` | `{ request: { summary, files, taskId?, stepId?, requestedBy? } }` | `{ proposal, approval }` | 已实现补丁提案持久化和 diff 审批创建 |
 | `list_patch_proposals` | `{ limit? }` | `{ proposals }` | 已实现最近补丁提案读取 |
 | `get_patch_proposal` | `{ patchId }` | `PatchProposal` 或 `null` | 已实现单个补丁提案读取 |
-| `apply_approved_patch` | `{ request: { approvalId, autoRollbackOnVerificationFailure? } }` | `PatchApplyResult` | 已实现已审批补丁应用、proposal 状态写回、推荐验证命令自动运行、可选验证失败自动回滚，以及关联任务 artifact/event 写回 |
+| `apply_approved_patch` | `{ request: { approvalId, autoRollbackOnVerificationFailure? } }` | `PatchApplyResult` | 已实现已审批补丁应用、proposal 状态写回、推荐验证命令自动运行、可选验证失败自动回滚、关联任务 artifact/event 写回，以及验证失败任务/步骤 failed 标记 |
 | `revert_applied_patch` | `{ request: { patchId } }` | `PatchRevertResult` | 已实现已应用补丁安全回滚、proposal `reverted` 状态写回，以及关联任务 `patchReverted` artifact/event 写回 |
 | `list_approval_requests` | `{ status?, limit? }` | `{ approvals }` | 已实现审批请求读取 |
 | `approve_action` | `{ request: { approvalId, approved, note?, decidedBy? } }` | `ApprovalRequest` 或 `null` | 已实现审批/拒绝决策；补丁审批会同步 proposal 状态 |
@@ -349,9 +349,9 @@ Planner LLM 相关环境变量：
 
 非 allowlist 命令不会直接执行。前端项目面板可调用 `request_project_command_approval` 创建高风险审批请求；后端会复用命令解析逻辑，仍然拒绝空命令、shell 控制字符、父目录穿越和 workspace 外目录。审批 payload 记录归一化命令、工作目录和默认 allowlist 判定。
 
-审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护、非 allowlist 命令手动审批和补丁提案审批。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令；也可调用 `apply_approved_patch` 应用原审批 payload 关联的补丁提案，并在已应用后调用 `revert_applied_patch` 回滚补丁。后端不会接受前端重新传入命令文本或补丁内容。补丁应用结果会在关联任务上生成 `patchApplied` artifact 和 `artifactCreated` 事件，首次应用成功后还会自动运行推荐验证命令，写入命令审计和 `patchVerification` artifact；调用方显式传入 `autoRollbackOnVerificationFailure` 时，验证失败会触发安全回滚，并把 `autoRollback` 写入 `patchVerification` artifact，同时生成 `patchReverted` artifact 和事件。但尚未把审批执行结果自动接入任务调度恢复。
+审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护、非 allowlist 命令手动审批和补丁提案审批。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令；也可调用 `apply_approved_patch` 应用原审批 payload 关联的补丁提案，并在已应用后调用 `revert_applied_patch` 回滚补丁。后端不会接受前端重新传入命令文本或补丁内容。补丁应用结果会在关联任务上生成 `patchApplied` artifact 和 `artifactCreated` 事件，首次应用成功后还会自动运行推荐验证命令，写入命令审计和 `patchVerification` artifact；验证失败会把关联任务/步骤标记为 `failed` 并生成失败事件，便于 `retry_task` 重新调度。调用方显式传入 `autoRollbackOnVerificationFailure` 时，验证失败会触发安全回滚，并把 `autoRollback` 写入 `patchVerification` artifact，同时生成 `patchReverted` artifact 和事件。但尚未把审批执行结果自动接入任务调度恢复。
 
-补丁提案由 `src-tauri/src/workspace/patch.rs` 提供，持久化到 `patch_proposals` 表。`create_patch_proposal` 当前支持修改 workspace 内已有文本文件：后端会拒绝父目录穿越、workspace 外路径、受保护目录、密钥文件、空变更和基线内容不一致的请求；成功后生成统一 diff，保存 proposal，并创建 `workspace.applyPatch` 审批。审批面板会展开 diff 预览；`approve_action` 对补丁审批做出通过或拒绝时，会把 proposal 状态同步为 `approved` 或 `rejected`。`apply_approved_patch` 会重新校验审批已通过、proposal 与 approval 匹配、目标文件仍等于提案基线，再把 `new_content` 写入工作区并将 proposal 更新为 `applied`；首次应用成功后会运行 `scan_project` 返回的推荐 allowlist 验证命令，把每次运行写入 `command_runs`，并在关联任务上按 patchId 幂等写入 `patchVerification` artifact。若本次请求显式开启 `autoRollbackOnVerificationFailure` 且验证失败，后端会调用同一套安全回滚逻辑恢复 `old_content`，成功后 proposal 进入 `reverted`，`PatchApplyResult.autoRollback` 返回回滚结果。重复应用已应用 proposal 会返回幂等结果，不重复执行自动验证。`revert_applied_patch` 只允许回滚 `applied` proposal；回滚前会确认当前文件内容仍等于 `new_content`，再恢复 `old_content` 并把 proposal 更新为 `reverted`。重复回滚会返回幂等结果；若文件内容已偏离补丁应用结果，会拒绝回滚以保护用户后续修改。
+补丁提案由 `src-tauri/src/workspace/patch.rs` 提供，持久化到 `patch_proposals` 表。`create_patch_proposal` 当前支持修改 workspace 内已有文本文件：后端会拒绝父目录穿越、workspace 外路径、受保护目录、密钥文件、空变更和基线内容不一致的请求；成功后生成统一 diff，保存 proposal，并创建 `workspace.applyPatch` 审批。审批面板会展开 diff 预览；`approve_action` 对补丁审批做出通过或拒绝时，会把 proposal 状态同步为 `approved` 或 `rejected`。`apply_approved_patch` 会重新校验审批已通过、proposal 与 approval 匹配、目标文件仍等于提案基线，再把 `new_content` 写入工作区并将 proposal 更新为 `applied`；首次应用成功后会运行 `scan_project` 返回的推荐 allowlist 验证命令，把每次运行写入 `command_runs`，并在关联任务上按 patchId 幂等写入 `patchVerification` artifact。验证失败会把关联任务与 proposal 绑定的步骤标记为 `failed`，已有 `retry_task` 流程可重新调度失败步骤。若本次请求显式开启 `autoRollbackOnVerificationFailure` 且验证失败，后端会调用同一套安全回滚逻辑恢复 `old_content`，成功后 proposal 进入 `reverted`，`PatchApplyResult.autoRollback` 返回回滚结果。重复应用已应用 proposal 会返回幂等结果，不重复执行自动验证。`revert_applied_patch` 只允许回滚 `applied` proposal；回滚前会确认当前文件内容仍等于 `new_content`，再恢复 `old_content` 并把 proposal 更新为 `reverted`。重复回滚会返回幂等结果；若文件内容已偏离补丁应用结果，会拒绝回滚以保护用户后续修改。
 
 ### send_message 路由规则
 
@@ -581,7 +581,7 @@ npm test
 8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 `file_read` 后续仍需要统一路径权限、沙箱和审计。
 9. 前端设置中的 API Key 和模型配置保存在 localStorage；后端请求期可使用该配置，但尚未接入系统安全凭据存储。
 10. 运行时环境变量 LLM 配置和前端请求级 LLM 配置已经并存，尚未提供统一的凭据管理界面。
-11. 补丁提案已经支持 diff 预览、审批状态同步、已审批手动应用、应用后自动验证、已应用补丁安全回滚、显式开启的验证失败自动回滚和任务 patch/verification/revert artifact 记录；还没有验证失败自动返工和默认自动回滚策略。
+11. 补丁提案已经支持 diff 预览、审批状态同步、已审批手动应用、应用后自动验证、已应用补丁安全回滚、显式开启的验证失败自动回滚、任务 patch/verification/revert artifact 记录和验证失败任务/步骤 failed 标记；还没有验证失败自动返工和默认自动回滚策略。
 
 ## 13. 建议后续路线
 
@@ -591,4 +591,4 @@ npm test
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。
 5. 强化工具权限：对 `file_read`、命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。
-7. 在已写回补丁应用、验证结果、手动回滚与显式失败回滚记录的基础上，将审批等待/恢复、验证失败返工和默认策略继续纳入任务状态机。
+7. 在已写回补丁应用、验证结果、手动回滚、显式失败回滚记录和验证失败 failed 状态的基础上，将审批等待/恢复、验证失败自动返工和默认策略继续纳入任务状态机。
