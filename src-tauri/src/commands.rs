@@ -3,15 +3,18 @@
 //! 定义所有暴露给前端（React）的 Tauri 命令，
 //! 通过 invoke 机制实现前后端双向通信。
 
+use crate::agent::action::RiskLevel;
 use crate::agent::traits::Capability as AgentCapability;
 use crate::approval::{
     parse_approval_status, ApprovalDecisionRequest, ApprovalListResponse, ApprovalRequest,
+    CreateApprovalRequest,
 };
 use crate::chat::ChatMessage as StoredChatMessage;
 use crate::error::AgentError;
 use crate::project::ProjectSnapshot;
 use crate::runtime::{
-    ProjectCommandRunListResponse, ProjectCommandRunRequest, ProjectCommandRunResponse,
+    ProjectCommandInspection, ProjectCommandRunListResponse, ProjectCommandRunRequest,
+    ProjectCommandRunResponse,
 };
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{FileReadResponse, SearchResponse, WorkspaceEntry};
@@ -914,6 +917,54 @@ pub async fn run_project_command(
     Ok(result)
 }
 
+fn build_project_command_approval_input(
+    inspection: &ProjectCommandInspection,
+) -> CreateApprovalRequest {
+    CreateApprovalRequest {
+        task_id: None,
+        step_id: None,
+        title: format!("运行项目命令：{}", inspection.command),
+        reason: format!(
+            "命令 [{}] 不在受控允许列表中，需要用户确认后再进入后续执行流程。",
+            inspection.command
+        ),
+        risk: RiskLevel::High,
+        action_type: "runtime.runProjectCommand".to_string(),
+        action_payload: serde_json::json!({
+            "command": inspection.command.clone(),
+            "workingDir": inspection.working_dir.clone(),
+            "allowedByDefault": inspection.allowed,
+        }),
+        requested_by: Some("ProjectPanel".to_string()),
+    }
+}
+
+/// 为非 allowlist 项目命令创建审批请求。
+///
+/// 前端调用：`invoke('request_project_command_approval', { request: { command, workingDir } })`
+#[tauri::command]
+pub async fn request_project_command_approval(
+    request: ProjectCommandRunRequest,
+    state: State<'_, AppState>,
+) -> Result<ApprovalRequest, ApiError> {
+    let inspection =
+        crate::runtime::inspect_project_command_request(&request).map_err(|err| match err {
+            AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
+            other => ApiError::command_failed(format!("{}", other)),
+        })?;
+
+    if inspection.allowed {
+        return Err(ApiError::invalid_argument(
+            "该命令已在受控允许列表中，可以直接运行。",
+        ));
+    }
+
+    state
+        .approval_store
+        .create_request(build_project_command_approval_input(&inspection))
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))
+}
+
 /// 列出最近的受控项目命令运行记录。
 ///
 /// 前端调用：`invoke('list_project_command_runs', { limit })`
@@ -1078,6 +1129,33 @@ mod tests {
         assert_eq!(
             clean_session_id(Some(&" session-1 ".to_string())),
             "session-1"
+        );
+    }
+
+    #[test]
+    fn test_build_project_command_approval_input_records_payload() {
+        let inspection = ProjectCommandInspection {
+            command: "cargo clippy".to_string(),
+            working_dir: "src-tauri".to_string(),
+            allowed: false,
+        };
+
+        let input = build_project_command_approval_input(&inspection);
+
+        assert_eq!(input.risk, RiskLevel::High);
+        assert_eq!(input.action_type, "runtime.runProjectCommand");
+        assert_eq!(input.requested_by.as_deref(), Some("ProjectPanel"));
+        assert_eq!(
+            input.action_payload["command"],
+            serde_json::json!("cargo clippy")
+        );
+        assert_eq!(
+            input.action_payload["workingDir"],
+            serde_json::json!("src-tauri")
+        );
+        assert_eq!(
+            input.action_payload["allowedByDefault"],
+            serde_json::json!(false)
         );
     }
 }

@@ -59,16 +59,23 @@ export default function ProjectPanel() {
   const searchLoading = useAgentStore((s) => s.searchLoading);
   const commandRunLoadingKey = useAgentStore((s) => s.commandRunLoadingKey);
   const commandRunError = useAgentStore((s) => s.commandRunError);
+  const commandApprovalLoading = useAgentStore((s) => s.commandApprovalLoading);
+  const commandApprovalError = useAgentStore((s) => s.commandApprovalError);
+  const lastCommandApproval = useAgentStore((s) => s.lastCommandApproval);
   const latestCommandRun = useAgentStore((s) => s.latestCommandRun);
   const commandRuns = useAgentStore((s) => s.commandRuns);
+  const setCurrentPage = useAgentStore((s) => s.setCurrentPage);
   const fetchProjectOverview = useAgentStore((s) => s.fetchProjectOverview);
   const readProjectFile = useAgentStore((s) => s.readProjectFile);
   const searchProjectText = useAgentStore((s) => s.searchProjectText);
   const runProjectCommand = useAgentStore((s) => s.runProjectCommand);
+  const requestProjectCommandApproval = useAgentStore((s) => s.requestProjectCommandApproval);
   const clearProjectError = useAgentStore((s) => s.clearProjectError);
 
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
+  const [customCommand, setCustomCommand] = useState("");
+  const [customWorkingDir, setCustomWorkingDir] = useState("src-tauri");
 
   useEffect(() => {
     fetchProjectOverview();
@@ -91,6 +98,13 @@ export default function ProjectPanel() {
     runProjectCommand({
       command: command.command,
       workingDir: command.workingDir,
+    });
+  };
+
+  const handleRequestCommandApproval = () => {
+    requestProjectCommandApproval({
+      command: customCommand,
+      workingDir: customWorkingDir,
     });
   };
 
@@ -191,6 +205,57 @@ export default function ProjectPanel() {
                       </div>
                     </div>
                   ))}
+                </div>
+                <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="text-xs font-medium text-zinc-300">命令审批</h4>
+                    {lastCommandApproval && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentPage("approvals")}
+                        className="btn-ghost px-2 py-1 text-[11px]"
+                        title="查看审批"
+                      >
+                        查看
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    <input
+                      value={customCommand}
+                      onChange={(event) => setCustomCommand(event.target.value)}
+                      placeholder="cargo clippy"
+                      className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-primary-500/50"
+                    />
+                    <div className="flex gap-2">
+                      <input
+                        value={customWorkingDir}
+                        onChange={(event) => setCustomWorkingDir(event.target.value)}
+                        placeholder="src-tauri"
+                        className="min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-primary-500/50"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleRequestCommandApproval}
+                        disabled={
+                          commandApprovalLoading ||
+                          !customCommand.trim() ||
+                          !customWorkingDir.trim()
+                        }
+                        className="btn-primary shrink-0 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {commandApprovalLoading ? "提交中..." : "申请审批"}
+                      </button>
+                    </div>
+                  </div>
+                  {commandApprovalError && (
+                    <div className="mt-3 text-xs text-red-300">{commandApprovalError}</div>
+                  )}
+                  {lastCommandApproval && (
+                    <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                      已创建：{lastCommandApproval.title}
+                    </div>
+                  )}
                 </div>
                 {(commandRunError || latestCommandRun) && (
                   <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">

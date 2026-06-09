@@ -3,6 +3,7 @@
 pub mod command;
 
 pub use command::{
-    run_project_command, CommandRunStore, ProjectCommandRunListResponse, ProjectCommandRunRequest,
+    inspect_project_command_request, run_project_command, CommandRunStore,
+    ProjectCommandInspection, ProjectCommandRunListResponse, ProjectCommandRunRequest,
     ProjectCommandRunResponse,
 };

@@ -209,6 +209,19 @@ export async function runProjectCommand(
 }
 
 /**
+ * 为非 allowlist 项目命令创建审批请求
+ * @param request 命令和工作目录
+ * @returns 新建的审批请求
+ */
+export async function requestProjectCommandApproval(
+  request: ProjectCommandRunRequest
+): Promise<ApprovalRequest> {
+  return invoke<ApprovalRequest>(`${CMD_PREFIX}request_project_command_approval`, {
+    request,
+  });
+}
+
+/**
  * 获取最近受控项目命令运行记录
  * @param limit 最大返回数量
  * @returns 命令运行记录列表
@@ -714,6 +727,38 @@ async function mockRunProjectCommand(
   return run;
 }
 
+async function mockRequestProjectCommandApproval(
+  request: ProjectCommandRunRequest
+): Promise<ApprovalRequest> {
+  await new Promise((r) => setTimeout(r, 180));
+  const now = new Date().toISOString();
+  const command = request.command.trim().split(/\s+/).join(" ");
+  const workingDir = request.workingDir.trim();
+  const approval: ApprovalRequest = {
+    id: generateId(),
+    taskId: null,
+    stepId: null,
+    title: `运行项目命令：${command}`,
+    reason: `命令 [${command}] 不在受控允许列表中，需要用户确认后再进入后续执行流程。`,
+    risk: "high",
+    actionType: "runtime.runProjectCommand",
+    actionPayload: {
+      command,
+      workingDir,
+      allowedByDefault: false,
+    },
+    status: "pending",
+    requestedBy: "ProjectPanel",
+    decidedBy: null,
+    decisionNote: null,
+    createdAt: now,
+    updatedAt: now,
+    decidedAt: null,
+  };
+  MOCK_APPROVALS = [approval, ...MOCK_APPROVALS].slice(0, 100);
+  return approval;
+}
+
 async function mockListProjectCommandRuns(
   limit = 20
 ): Promise<ProjectCommandRunListResponse> {
@@ -790,6 +835,9 @@ export const api = {
   readProjectFile: isTauri() ? readProjectFile : mockReadProjectFile,
   searchProjectText: isTauri() ? searchProjectText : mockSearchProjectText,
   runProjectCommand: isTauri() ? runProjectCommand : mockRunProjectCommand,
+  requestProjectCommandApproval: isTauri()
+    ? requestProjectCommandApproval
+    : mockRequestProjectCommandApproval,
   listProjectCommandRuns: isTauri() ? listProjectCommandRuns : mockListProjectCommandRuns,
   listApprovalRequests: isTauri() ? listApprovalRequests : mockListApprovalRequests,
   approveAction: isTauri() ? approveAction : mockApproveAction,

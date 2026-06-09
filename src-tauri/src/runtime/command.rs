@@ -46,6 +46,14 @@ pub struct ProjectCommandRunListResponse {
     pub runs: Vec<ProjectCommandRunResponse>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCommandInspection {
+    pub command: String,
+    pub working_dir: String,
+    pub allowed: bool,
+}
+
 /// SQLite-backed command run audit store.
 pub struct CommandRunStore {
     conn: Mutex<Connection>,
@@ -152,6 +160,12 @@ pub async fn run_project_command(
         stderr_truncated,
         created_at: chrono::Utc::now().to_rfc3339(),
     })
+}
+
+pub fn inspect_project_command_request(
+    request: &ProjectCommandRunRequest,
+) -> Result<ProjectCommandInspection, AgentError> {
+    inspect_project_command_request_with_path(request).map(|(inspection, _)| inspection)
 }
 
 impl CommandRunStore {
@@ -262,6 +276,31 @@ impl CommandRunStore {
 fn prepare_project_command(
     request: &ProjectCommandRunRequest,
 ) -> Result<PreparedCommand, AgentError> {
+    let (inspection, working_dir_path) = inspect_project_command_request_with_path(request)?;
+    let spec = ALLOWED_COMMANDS
+        .iter()
+        .copied()
+        .find(|allowed| {
+            allowed.command == inspection.command && allowed.working_dir == inspection.working_dir
+        })
+        .ok_or_else(|| {
+            AgentError::MessageFormat(format!(
+                "命令 [{}] 不在受控允许列表中，或工作目录 [{}] 不匹配",
+                inspection.command, inspection.working_dir
+            ))
+        })?;
+
+    Ok(PreparedCommand {
+        spec,
+        working_dir_path,
+        display_command: inspection.command,
+        display_working_dir: inspection.working_dir,
+    })
+}
+
+fn inspect_project_command_request_with_path(
+    request: &ProjectCommandRunRequest,
+) -> Result<(ProjectCommandInspection, PathBuf), AgentError> {
     let command = normalize_command(&request.command);
     if command.is_empty() {
         return Err(AgentError::MessageFormat("项目命令不能为空".to_string()));
@@ -273,23 +312,18 @@ fn prepare_project_command(
     }
 
     let (working_dir_path, working_dir) = resolve_working_dir(&request.working_dir)?;
-    let spec = ALLOWED_COMMANDS
+    let allowed = ALLOWED_COMMANDS
         .iter()
-        .copied()
-        .find(|allowed| allowed.command == command && allowed.working_dir == working_dir)
-        .ok_or_else(|| {
-            AgentError::MessageFormat(format!(
-                "命令 [{}] 不在受控允许列表中，或工作目录 [{}] 不匹配",
-                command, working_dir
-            ))
-        })?;
+        .any(|allowed| allowed.command == command && allowed.working_dir == working_dir);
 
-    Ok(PreparedCommand {
-        spec,
+    Ok((
+        ProjectCommandInspection {
+            command,
+            working_dir,
+            allowed,
+        },
         working_dir_path,
-        display_command: command,
-        display_working_dir: working_dir,
-    })
+    ))
 }
 
 fn resolve_working_dir(working_dir: &str) -> Result<(PathBuf, String), AgentError> {
@@ -427,6 +461,15 @@ mod tests {
     fn rejects_unlisted_commands() {
         let err = prepare_project_command(&request("cargo clippy", "src-tauri")).unwrap_err();
         assert!(err.to_string().contains("允许列表"));
+    }
+
+    #[test]
+    fn inspects_unlisted_command_without_allowing_execution() {
+        let inspection =
+            inspect_project_command_request(&request(" cargo   clippy ", "src-tauri")).unwrap();
+        assert_eq!(inspection.command, "cargo clippy");
+        assert_eq!(inspection.working_dir, "src-tauri");
+        assert!(!inspection.allowed);
     }
 
     #[test]

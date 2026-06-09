@@ -22,6 +22,7 @@ vi.mock("@/lib/tauri", () => ({
     getHistory: vi.fn(),
     clearHistory: vi.fn(),
     runProjectCommand: vi.fn(),
+    requestProjectCommandApproval: vi.fn(),
     listProjectCommandRuns: vi.fn(),
     listApprovalRequests: vi.fn(),
     approveAction: vi.fn(),
@@ -38,6 +39,7 @@ const mockApi = api as unknown as {
   getHistory: ReturnType<typeof vi.fn>;
   clearHistory: ReturnType<typeof vi.fn>;
   runProjectCommand: ReturnType<typeof vi.fn>;
+  requestProjectCommandApproval: ReturnType<typeof vi.fn>;
   listProjectCommandRuns: ReturnType<typeof vi.fn>;
   listApprovalRequests: ReturnType<typeof vi.fn>;
   approveAction: ReturnType<typeof vi.fn>;
@@ -92,6 +94,9 @@ describe("useAgentStore", () => {
       currentPage: "chat",
       commandRunLoadingKey: null,
       commandRunError: null,
+      commandApprovalLoading: false,
+      commandApprovalError: null,
+      lastCommandApproval: null,
       latestCommandRun: null,
       commandRuns: [],
       approvals: [],
@@ -589,6 +594,62 @@ describe("useAgentStore", () => {
     expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(5);
     expect(getState().commandRuns).toEqual(runs);
     expect(getState().commandRunError).toBeNull();
+  });
+
+  /// 测试 — requestProjectCommandApproval 成功时保存审批请求
+  /// 验证：非 allowlist 命令可以进入审批列表
+  it("requestProjectCommandApproval 成功时应保存审批请求", async () => {
+    const approval = {
+      id: "approval-command-1",
+      taskId: null,
+      stepId: null,
+      title: "运行项目命令：cargo clippy",
+      reason: "需要审批。",
+      risk: "high" as const,
+      actionType: "runtime.runProjectCommand",
+      actionPayload: {
+        command: "cargo clippy",
+        workingDir: "src-tauri",
+        allowedByDefault: false,
+      },
+      status: "pending" as const,
+      requestedBy: "ProjectPanel",
+      decidedBy: null,
+      decisionNote: null,
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:00:00Z",
+      decidedAt: null,
+    };
+    mockApi.requestProjectCommandApproval.mockResolvedValue(approval);
+
+    await getState().requestProjectCommandApproval({
+      command: "cargo clippy",
+      workingDir: "src-tauri",
+    });
+
+    expect(mockApi.requestProjectCommandApproval).toHaveBeenCalledWith({
+      command: "cargo clippy",
+      workingDir: "src-tauri",
+    });
+    expect(getState().commandApprovalLoading).toBe(false);
+    expect(getState().commandApprovalError).toBeNull();
+    expect(getState().lastCommandApproval).toEqual(approval);
+    expect(getState().approvals).toEqual([approval]);
+  });
+
+  /// 测试 — requestProjectCommandApproval 失败时保存错误提示
+  /// 验证：审批创建失败不会污染最近审批状态
+  it("requestProjectCommandApproval 失败时应保存错误提示", async () => {
+    mockApi.requestProjectCommandApproval.mockRejectedValue(new Error("该命令已在允许列表"));
+
+    await getState().requestProjectCommandApproval({
+      command: "cargo check",
+      workingDir: "src-tauri",
+    });
+
+    expect(getState().commandApprovalLoading).toBe(false);
+    expect(getState().lastCommandApproval).toBeNull();
+    expect(getState().commandApprovalError).toBe("该命令已在允许列表");
   });
 
   // ==========================================================

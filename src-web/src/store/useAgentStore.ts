@@ -150,6 +150,9 @@ interface AgentState {
   searchLoading: boolean;
   commandRunLoadingKey: string | null;
   commandRunError: string | null;
+  commandApprovalLoading: boolean;
+  commandApprovalError: string | null;
+  lastCommandApproval: ApprovalRequest | null;
   latestCommandRun: ProjectCommandRunResponse | null;
   commandRuns: ProjectCommandRunResponse[];
   /** 加载项目快照和文件列表 */
@@ -162,6 +165,8 @@ interface AgentState {
   searchProjectText: (query: string) => Promise<void>;
   /** 运行受控项目命令 */
   runProjectCommand: (request: ProjectCommandRunRequest) => Promise<void>;
+  /** 为非 allowlist 项目命令创建审批请求 */
+  requestProjectCommandApproval: (request: ProjectCommandRunRequest) => Promise<void>;
   /** 清除项目错误 */
   clearProjectError: () => void;
 
@@ -537,6 +542,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   searchLoading: false,
   commandRunLoadingKey: null,
   commandRunError: null,
+  commandApprovalLoading: false,
+  commandApprovalError: null,
+  lastCommandApproval: null,
   latestCommandRun: null,
   commandRuns: [],
 
@@ -628,7 +636,30 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  clearProjectError: () => set({ projectError: null, commandRunError: null }),
+  requestProjectCommandApproval: async (request) => {
+    set({
+      commandApprovalLoading: true,
+      commandApprovalError: null,
+      lastCommandApproval: null,
+    });
+    try {
+      const approval = await api.requestProjectCommandApproval(request);
+      set((s) => ({
+        approvals: [approval, ...s.approvals.filter((item) => item.id !== approval.id)],
+        lastCommandApproval: approval,
+        commandApprovalLoading: false,
+        commandApprovalError: null,
+      }));
+    } catch (err: unknown) {
+      set({
+        commandApprovalError: getErrorMessage(err, "创建命令审批失败"),
+        commandApprovalLoading: false,
+      });
+    }
+  },
+
+  clearProjectError: () =>
+    set({ projectError: null, commandRunError: null, commandApprovalError: null }),
 
   // ===== 健康检查 =====
   healthy: null,
