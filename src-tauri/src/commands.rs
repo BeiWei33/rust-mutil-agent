@@ -653,6 +653,109 @@ fn build_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value
     })
 }
 
+fn merge_context_values(base: Value, extra: Value) -> Value {
+    match (base, extra) {
+        (base, Value::Null) => base,
+        (Value::Null, extra) => extra,
+        (Value::Object(mut base), Value::Object(extra)) => {
+            for (key, value) in extra {
+                base.insert(key, value);
+            }
+            Value::Object(base)
+        }
+        (base, extra) => serde_json::json!({
+            "base": base,
+            "extra": extra,
+        }),
+    }
+}
+
+fn push_unique_query(queries: &mut Vec<String>, query: impl Into<String>) {
+    let query = query.into();
+    let query = query.trim();
+    if !query.is_empty()
+        && !queries
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(query))
+    {
+        queries.push(query.to_string());
+    }
+}
+
+fn knowledge_search_queries(goal: &str) -> Vec<String> {
+    let mut queries = Vec::new();
+    push_unique_query(&mut queries, goal);
+    push_unique_query(&mut queries, "ProjectFact");
+    push_unique_query(&mut queries, "FailureCase");
+    queries
+}
+
+fn collect_relevant_knowledge(
+    knowledge_base: &KnowledgeBase,
+    queries: &[String],
+    limit: usize,
+) -> Result<Vec<KnowledgeItem>, AgentError> {
+    let mut items: Vec<KnowledgeItem> = Vec::new();
+    for query in queries {
+        for item in knowledge_base.search_knowledge(query, limit)? {
+            if !items.iter().any(|existing| existing.id == item.id) {
+                items.push(item);
+            }
+            if items.len() >= limit {
+                return Ok(items);
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn knowledge_item_context(item: KnowledgeItem) -> Value {
+    serde_json::json!({
+        "id": item.id,
+        "title": item.title,
+        "contentPreview": preview_for_knowledge(&item.content),
+        "source": item.source,
+        "tags": item.tags,
+        "createdAt": item.created_at,
+    })
+}
+
+fn build_knowledge_context(
+    knowledge_base: &KnowledgeBase,
+    goal: &str,
+) -> Result<Value, AgentError> {
+    const KNOWLEDGE_CONTEXT_LIMIT: usize = 6;
+
+    let queries = knowledge_search_queries(goal);
+    let items = collect_relevant_knowledge(knowledge_base, &queries, KNOWLEDGE_CONTEXT_LIMIT)?;
+    if items.is_empty() {
+        return Ok(Value::Null);
+    }
+
+    Ok(serde_json::json!({
+        "knowledgeContext": {
+            "query": goal.trim(),
+            "queries": queries,
+            "items": items.into_iter().map(knowledge_item_context).collect::<Vec<_>>(),
+        }
+    }))
+}
+
+fn build_request_context_with_knowledge(
+    settings: Option<&FrontendLlmSettingsRequest>,
+    knowledge_base: &KnowledgeBase,
+    goal: &str,
+) -> Value {
+    let context = build_request_context(settings);
+    match build_knowledge_context(knowledge_base, goal) {
+        Ok(knowledge_context) => merge_context_values(context, knowledge_context),
+        Err(err) => {
+            tracing::warn!("检索规划长期经验失败: {}", err);
+            context
+        }
+    }
+}
+
 fn build_transient_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value {
     let Some(settings) = settings else {
         return Value::Null;
@@ -727,9 +830,17 @@ pub async fn send_message(
         "direct_message"
     };
 
-    let mut orch = state.orchestrator.lock().await;
-    let request_context = build_request_context(request.llm_settings.as_ref());
+    let request_context = if target_meta.runtime_name == "Planner" {
+        build_request_context_with_knowledge(
+            request.llm_settings.as_ref(),
+            state.knowledge_base.as_ref(),
+            content,
+        )
+    } else {
+        build_request_context(request.llm_settings.as_ref())
+    };
     let transient_context = build_transient_request_context(request.llm_settings.as_ref());
+    let mut orch = state.orchestrator.lock().await;
     let task_id = orch
         .submit_task_to_agent_with_context_and_transient(
             target_meta.runtime_name,
@@ -834,9 +945,17 @@ pub async fn create_task(
         "direct_message"
     };
 
-    let mut orch = state.orchestrator.lock().await;
-    let request_context = build_request_context(request.llm_settings.as_ref());
+    let request_context = if target_meta.runtime_name == "Planner" {
+        build_request_context_with_knowledge(
+            request.llm_settings.as_ref(),
+            state.knowledge_base.as_ref(),
+            content,
+        )
+    } else {
+        build_request_context(request.llm_settings.as_ref())
+    };
     let transient_context = build_transient_request_context(request.llm_settings.as_ref());
+    let mut orch = state.orchestrator.lock().await;
     let task_id = orch
         .submit_task_to_agent_with_context_and_transient(
             target_meta.runtime_name,
@@ -2077,6 +2196,82 @@ mod tests {
         let context = build_request_context(Some(&settings));
         assert!(context["frontendLlmSettings"]["model"].is_null());
         assert_eq!(context["frontendLlmSettings"]["hasApiKey"], false);
+    }
+
+    #[test]
+    fn test_build_knowledge_context_collects_project_fact_and_failure_case() {
+        let kb = KnowledgeBase::new(":memory:");
+        kb.initialize().unwrap();
+        kb.store_knowledge(
+            "ProjectFact: 前端任务面板",
+            "TaskBoard 负责展示任务、事件和补丁验证状态。",
+            Some("manual"),
+            Some(&["ProjectFact".to_string(), "frontend".to_string()]),
+        )
+        .unwrap();
+        kb.store_knowledge(
+            "FailureCase: 补丁验证失败",
+            &format!(
+                "{}\n{}",
+                "cargo test 失败时先查看 stderr。",
+                "x".repeat(1_000)
+            ),
+            Some("patch:1"),
+            Some(&["FailureCase".to_string(), "patchVerification".to_string()]),
+        )
+        .unwrap();
+
+        let context = build_knowledge_context(&kb, "优化任务面板").unwrap();
+        let items = context["knowledgeContext"]["items"].as_array().unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(context["knowledgeContext"]["queries"][1], "ProjectFact");
+        assert!(items
+            .iter()
+            .any(|item| item["title"].as_str().unwrap().contains("ProjectFact")));
+        let failure = items
+            .iter()
+            .find(|item| item["title"].as_str().unwrap().contains("FailureCase"))
+            .unwrap();
+        assert!(failure["contentPreview"]
+            .as_str()
+            .unwrap()
+            .contains("[preview truncated]"));
+    }
+
+    #[test]
+    fn test_build_request_context_with_knowledge_merges_settings() {
+        let kb = KnowledgeBase::new(":memory:");
+        kb.initialize().unwrap();
+        kb.store_knowledge(
+            "FailureCase: Rust 测试失败",
+            "cargo test 失败后先看失败用例。",
+            None,
+            Some(&["FailureCase".to_string()]),
+        )
+        .unwrap();
+        let settings = FrontendLlmSettingsRequest {
+            model: Some("deepseek-chat".to_string()),
+            api_key: None,
+            api_base_url: None,
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let context =
+            build_request_context_with_knowledge(Some(&settings), &kb, "修复 Rust 测试失败");
+
+        assert_eq!(
+            context["frontendLlmSettings"]["model"],
+            serde_json::json!("deepseek-chat")
+        );
+        assert_eq!(
+            context["knowledgeContext"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

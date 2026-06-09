@@ -268,7 +268,12 @@ impl TaskPlan {
         let task_id = task_id.into();
         if is_software_goal(goal) {
             if let Some(project_context) = context.get("projectPlanningContext") {
-                return Self::from_software_goal(goal, task_id, project_context);
+                return Self::from_software_goal(
+                    goal,
+                    task_id,
+                    project_context,
+                    context.get("knowledgeContext"),
+                );
             }
         }
 
@@ -279,6 +284,7 @@ impl TaskPlan {
         goal: &str,
         task_id: String,
         project_context: &serde_json::Value,
+        knowledge_context: Option<&serde_json::Value>,
     ) -> Self {
         let tech_stack = project_context
             .pointer("/snapshot/techStack")
@@ -333,13 +339,16 @@ impl TaskPlan {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "cargo check, cargo test".to_string());
 
+        let knowledge_summary = knowledge_context_summary(knowledge_context)
+            .unwrap_or_else(|| "暂无匹配长期经验".to_string());
+
         let steps = vec![
             PlanStep {
                 step_id: format!("{task_id}-1"),
                 order: 1,
                 agent: "Planner".to_string(),
                 instruction: format!(
-                    "基于项目快照理解软件任务: {goal}。当前技术栈: {tech_stack}。"
+                    "基于项目快照理解软件任务: {goal}。当前技术栈: {tech_stack}。相关经验: {knowledge_summary}。"
                 ),
                 depends_on: vec![],
                 status: StepStatus::Pending,
@@ -359,7 +368,7 @@ impl TaskPlan {
                 order: 3,
                 agent: "Executor".to_string(),
                 instruction: format!(
-                    "结合项目结构形成实现方案和模拟执行结果，不直接修改文件: {goal}。建议验证命令: {recommended_commands}。"
+                    "结合项目结构和相关经验形成实现方案和模拟执行结果，不直接修改文件: {goal}。相关经验: {knowledge_summary}。建议验证命令: {recommended_commands}。"
                 ),
                 depends_on: vec![format!("{task_id}-2")],
                 status: StepStatus::Pending,
@@ -369,7 +378,7 @@ impl TaskPlan {
                 order: 4,
                 agent: "Memory".to_string(),
                 instruction: format!(
-                    "记录本轮项目事实、相关文件和后续实现建议: {goal}。"
+                    "记录本轮项目事实、相关文件、后续实现建议和可复用经验: {goal}。"
                 ),
                 depends_on: vec![format!("{task_id}-3")],
                 status: StepStatus::Pending,
@@ -383,6 +392,52 @@ impl TaskPlan {
             created_at: chrono::Utc::now(),
         }
     }
+}
+
+fn knowledge_context_summary(knowledge_context: Option<&serde_json::Value>) -> Option<String> {
+    let items = knowledge_context?
+        .get("items")
+        .and_then(|value| value.as_array())?;
+    let summaries = items
+        .iter()
+        .filter_map(knowledge_item_summary)
+        .take(4)
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        None
+    } else {
+        Some(summaries.join("；"))
+    }
+}
+
+fn knowledge_item_summary(item: &serde_json::Value) -> Option<String> {
+    let title = item
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let tags = item
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|value| value.as_str())
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "untagged".to_string());
+    let preview = item
+        .get("contentPreview")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.lines().next())
+        .unwrap_or("无摘要");
+
+    Some(format!("{title} [{tags}] {preview}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1040,6 +1095,20 @@ mod tests {
                     { "path": "src-web/src/components/TaskBoard.tsx" },
                     { "path": "src-tauri/src/orchestrator/mod.rs" }
                 ]
+            },
+            "knowledgeContext": {
+                "items": [
+                    {
+                        "title": "FailureCase: 任务面板验证失败",
+                        "contentPreview": "npm test 失败时先检查 TaskBoard 事件渲染。",
+                        "tags": ["FailureCase", "frontend"]
+                    },
+                    {
+                        "title": "ProjectFact: 任务状态",
+                        "contentPreview": "TaskBoard 展示 Task 和 TaskEvent。",
+                        "tags": ["ProjectFact"]
+                    }
+                ]
             }
         });
 
@@ -1052,8 +1121,10 @@ mod tests {
         let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
         assert_eq!(plan.steps.len(), 4);
         assert!(plan.steps[0].instruction.contains("Rust"));
+        assert!(plan.steps[0].instruction.contains("FailureCase"));
         assert!(plan.steps[1].instruction.contains("TaskBoard.tsx"));
         assert!(plan.steps[2].instruction.contains("cargo test"));
+        assert!(plan.steps[2].instruction.contains("npm test 失败"));
     }
 
     /// 测试 — 普通搜索任务不会因项目上下文被误判为软件任务
