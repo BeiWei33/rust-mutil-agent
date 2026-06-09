@@ -35,6 +35,7 @@ import type {
   ApprovalRequest,
   ApprovalStatus,
   RunApprovedProjectCommandRequest,
+  ToolActionApprovalRequest,
   CreatePatchProposalRequest,
   CreatePatchProposalResponse,
   ApplyApprovedPatchRequest,
@@ -241,6 +242,19 @@ export async function requestProjectCommandApproval(
   request: ProjectCommandRunRequest
 ): Promise<ApprovalRequest> {
   return invoke<ApprovalRequest>(`${CMD_PREFIX}request_project_command_approval`, {
+    request,
+  });
+}
+
+/**
+ * 创建通用工具动作审批请求
+ * @param request 工具动作、风险和可选任务/步骤关联
+ * @returns 新建的审批请求
+ */
+export async function requestToolActionApproval(
+  request: ToolActionApprovalRequest
+): Promise<ApprovalRequest> {
+  return invoke<ApprovalRequest>(`${CMD_PREFIX}request_tool_action_approval`, {
     request,
   });
 }
@@ -953,6 +967,33 @@ async function mockRequestProjectCommandApproval(
   return approval;
 }
 
+async function mockRequestToolActionApproval(
+  request: ToolActionApprovalRequest
+): Promise<ApprovalRequest> {
+  await new Promise((r) => setTimeout(r, 160));
+  const now = new Date().toISOString();
+  const approval: ApprovalRequest = {
+    id: generateId(),
+    taskId: request.taskId ?? null,
+    stepId: request.stepId ?? null,
+    title: request.title.trim(),
+    reason: request.reason.trim(),
+    risk: request.risk ?? "medium",
+    actionType: request.actionType.trim(),
+    actionPayload: request.actionPayload ?? {},
+    status: "pending",
+    requestedBy: request.requestedBy ?? "ToolAgent",
+    decidedBy: null,
+    decisionNote: null,
+    createdAt: now,
+    updatedAt: now,
+    decidedAt: null,
+  };
+  MOCK_APPROVALS = [approval, ...MOCK_APPROVALS].slice(0, 100);
+  updateMockToolApprovalRequested(approval);
+  return approval;
+}
+
 function commandPayload(value: unknown): ProjectCommandRunRequest | null {
   if (!value || typeof value !== "object") return null;
   const payload = value as {
@@ -987,6 +1028,126 @@ function hasApprovalArtifact(task: Task, kind: string, approvalId: string): bool
   return task.artifacts.some((artifact) => {
     const value = artifact as { kind?: unknown; approvalId?: unknown };
     return value.kind === kind && value.approvalId === approvalId;
+  });
+}
+
+function toolActionLabel(approval: ApprovalRequest): string {
+  const payload =
+    approval.actionPayload && typeof approval.actionPayload === "object"
+      ? (approval.actionPayload as { tool?: unknown; name?: unknown })
+      : null;
+  const label = typeof payload?.tool === "string" ? payload.tool : payload?.name;
+  return typeof label === "string" && label.trim() ? label.trim() : approval.title;
+}
+
+function updateMockToolApprovalRequested(approval: ApprovalRequest) {
+  if (!approval.taskId || !approval.actionType.startsWith("tool.")) return;
+  const now = approval.createdAt;
+  const artifact = {
+    kind: "toolApproval",
+    approvalId: approval.id,
+    actionType: approval.actionType,
+    title: approval.title,
+    tool: toolActionLabel(approval),
+    risk: approval.risk,
+    status: approval.status,
+    requestedBy: approval.requestedBy,
+    createdAt: now,
+    payload: approval.actionPayload,
+  };
+  const target = MOCK_TASKS.find((task) => task.id === approval.taskId);
+  if (!target || hasApprovalArtifact(target, "toolApproval", approval.id)) return;
+
+  MOCK_TASKS = MOCK_TASKS.map((task) =>
+    task.id === approval.taskId
+      ? {
+          ...task,
+          status: ["completed", "failed", "cancelled"].includes(task.status)
+            ? task.status
+            : "waitingApproval",
+          updatedAt: now,
+          artifacts: [...task.artifacts, artifact],
+          steps: task.steps.map((step) =>
+            step.id === approval.stepId &&
+            ["pending", "running", "waitingApproval"].includes(step.status)
+              ? { ...step, status: "waitingApproval" as const, error: null }
+              : step
+          ),
+        }
+      : task
+  );
+  appendMockTaskEvent(approval.taskId, {
+    stepId: approval.stepId ?? null,
+    kind: "approvalRequested",
+    message: `工具动作等待审批：${toolActionLabel(approval)}`,
+    payload: artifact,
+    createdAt: now,
+  });
+}
+
+function updateMockToolApprovalResolved(approval: ApprovalRequest) {
+  if (!approval.taskId || !approval.actionType.startsWith("tool.")) return;
+  const now = approval.decidedAt ?? approval.updatedAt;
+  const artifact = {
+    kind: "toolApprovalResolved",
+    approvalId: approval.id,
+    actionType: approval.actionType,
+    title: approval.title,
+    tool: toolActionLabel(approval),
+    risk: approval.risk,
+    status: approval.status,
+    decidedBy: approval.decidedBy,
+    decisionNote: approval.decisionNote,
+    decidedAt: approval.decidedAt,
+    payload: approval.actionPayload,
+  };
+  const target = MOCK_TASKS.find((task) => task.id === approval.taskId);
+  if (!target || hasApprovalArtifact(target, "toolApprovalResolved", approval.id)) return;
+
+  const rejected = approval.status === "rejected";
+  const failedMessage = `工具动作审批已拒绝：${toolActionLabel(approval)}`;
+  MOCK_TASKS = MOCK_TASKS.map((task) => {
+    if (task.id !== approval.taskId) return task;
+    const terminal = ["completed", "failed", "cancelled"].includes(task.status);
+    return {
+      ...task,
+      status:
+        approval.status === "approved" && task.status === "waitingApproval"
+          ? "running"
+          : rejected && !terminal
+            ? "failed"
+            : task.status,
+      error: rejected && !terminal ? failedMessage : task.error,
+      updatedAt: now,
+      artifacts: [...task.artifacts, artifact],
+      steps: task.steps.map((step) =>
+        step.id === approval.stepId
+          ? approval.status === "approved" && step.status === "waitingApproval"
+            ? { ...step, status: "running" as const, error: null }
+            : rejected && ["pending", "running", "waitingApproval"].includes(step.status)
+              ? { ...step, status: "failed" as const, error: failedMessage, completedAt: now }
+              : step
+          : step
+      ),
+    };
+  });
+  if (rejected) {
+    appendMockTaskEvent(approval.taskId, {
+      stepId: approval.stepId ?? null,
+      kind: "stepFailed",
+      message: failedMessage,
+      payload: artifact,
+      createdAt: now,
+    });
+  }
+  appendMockTaskEvent(approval.taskId, {
+    stepId: approval.stepId ?? null,
+    kind: "approvalResolved",
+    message: `工具动作审批${approval.status === "approved" ? "已通过" : "已拒绝"}：${toolActionLabel(
+      approval
+    )}`,
+    payload: artifact,
+    createdAt: now,
   });
 }
 
@@ -1693,6 +1854,8 @@ async function mockApproveAction(
     }
   } else if (updated.actionType === "runtime.runProjectCommand") {
     updateMockCommandApprovalResolved(updated);
+  } else if (updated.actionType.startsWith("tool.")) {
+    updateMockToolApprovalResolved(updated);
   }
   return updated;
 }
@@ -1738,6 +1901,9 @@ export const api = {
   requestProjectCommandApproval: isTauri()
     ? requestProjectCommandApproval
     : mockRequestProjectCommandApproval,
+  requestToolActionApproval: isTauri()
+    ? requestToolActionApproval
+    : mockRequestToolActionApproval,
   runApprovedProjectCommand: isTauri()
     ? runApprovedProjectCommand
     : mockRunApprovedProjectCommand,

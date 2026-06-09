@@ -254,7 +254,7 @@ src-tauri/src/workspace/diff.rs
 | `workspace.get_diff` | 获取当前 diff |
 | `workspace.revert_patch` | 回滚指定 patch |
 
-当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、关联任务/步骤等待审批、补丁审批通过恢复或拒绝失败、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与事件写回；命令审批也已支持关联任务/步骤等待审批、审批决策恢复或失败，以及已审批命令运行后的 `commandRun` artifact 与事件写回。调度器已支持单步骤跳过和步骤超时，跳过的依赖可继续解锁后续步骤，运行超时的步骤会进入 `timedOut` 并生成事件。验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`，可通过 `retry_task` 重新调度。前端项目页、审批页和任务看板已能展示对应状态。验证失败自动返工、更细粒度的回滚策略和通用工具审批等待/恢复仍未实现。
+当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、关联任务/步骤等待审批、补丁审批通过恢复或拒绝失败、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与事件写回；命令审批也已支持关联任务/步骤等待审批、审批决策恢复或失败，以及已审批命令运行后的 `commandRun` artifact 与事件写回。调度器已支持单步骤跳过和步骤超时，跳过的依赖可继续解锁后续步骤，运行超时的步骤会进入 `timedOut` 并生成事件。通用 `tool.*` 工具审批已支持创建请求、关联任务/步骤等待审批、审批通过恢复和拒绝失败，并写入 `toolApproval` / `toolApprovalResolved` artifact。验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`，可通过 `retry_task` 重新调度。前端项目页、审批页和任务看板已能展示对应状态。ToolAgent 自动拦截、验证失败自动返工、更细粒度的回滚策略仍未实现。
 
 安全要求：
 
@@ -506,6 +506,7 @@ src-web/src/types/index.ts
 | `cancel_task` | 取消任务 |
 | `retry_step` | 重试指定步骤 |
 | `approve_action` | 审批高风险 action |
+| `request_tool_action_approval` | 为通用 `tool.*` 工具动作创建审批并挂起关联任务/步骤 |
 | `reject_action` | 拒绝高风险 action |
 | `list_project_files` | 获取项目文件树 |
 | `read_project_file` | 读取项目文件 |

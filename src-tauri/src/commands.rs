@@ -75,6 +75,21 @@ pub struct RunApprovedProjectCommandRequest {
     pub approval_id: String,
 }
 
+/// 创建通用工具动作审批请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolActionApprovalRequest {
+    pub task_id: Option<String>,
+    pub step_id: Option<String>,
+    pub title: String,
+    pub reason: String,
+    pub action_type: String,
+    #[serde(default)]
+    pub action_payload: Value,
+    pub risk: Option<RiskLevel>,
+    pub requested_by: Option<String>,
+}
+
 /// 应用已审批补丁请求。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1131,6 +1146,43 @@ fn build_project_command_approval_input(
     }
 }
 
+fn build_tool_action_approval_input(
+    request: ToolActionApprovalRequest,
+) -> Result<CreateApprovalRequest, ApiError> {
+    let action_type = request.action_type.trim();
+    if !action_type.starts_with("tool.") {
+        return Err(ApiError::invalid_argument(
+            "通用工具审批动作类型必须以 tool. 开头。",
+        ));
+    }
+    if request.title.trim().is_empty() {
+        return Err(ApiError::invalid_argument("缺少审批标题。"));
+    }
+    if request.reason.trim().is_empty() {
+        return Err(ApiError::invalid_argument("缺少审批原因。"));
+    }
+
+    Ok(CreateApprovalRequest {
+        task_id: clean_optional_text(request.task_id),
+        step_id: clean_optional_text(request.step_id),
+        title: request.title.trim().to_string(),
+        reason: request.reason.trim().to_string(),
+        risk: request.risk.unwrap_or(RiskLevel::Medium),
+        action_type: action_type.to_string(),
+        action_payload: request.action_payload,
+        requested_by: clean_optional_text(request.requested_by)
+            .or_else(|| Some("ToolAgent".to_string())),
+    })
+}
+
+fn clean_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 /// 为非 allowlist 项目命令创建审批请求。
 ///
 /// 前端调用：`invoke('request_project_command_approval', { request: { command, workingDir } })`
@@ -1159,6 +1211,28 @@ pub async fn request_project_command_approval(
     {
         let orch = state.orchestrator.lock().await;
         orch.record_command_approval_requested(&approval).await;
+    }
+
+    Ok(approval)
+}
+
+/// 创建通用工具动作审批请求，并让关联任务/步骤进入等待审批。
+///
+/// 前端调用：`invoke('request_tool_action_approval', { request })`
+#[tauri::command]
+pub async fn request_tool_action_approval(
+    request: ToolActionApprovalRequest,
+    state: State<'_, AppState>,
+) -> Result<ApprovalRequest, ApiError> {
+    let approval_input = build_tool_action_approval_input(request)?;
+    let approval = state
+        .approval_store
+        .create_request(approval_input)
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))?;
+
+    {
+        let orch = state.orchestrator.lock().await;
+        orch.record_tool_approval_requested(&approval).await;
     }
 
     Ok(approval)
@@ -1590,6 +1664,11 @@ pub async fn approve_action(
             orch.record_command_approval_resolved(approval).await;
         }
 
+        if approval.action_type.starts_with("tool.") {
+            let orch = state.orchestrator.lock().await;
+            orch.record_tool_approval_resolved(approval).await;
+        }
+
         if let (Some(patch_id), Some(status)) = (
             patch_id_from_approval(approval),
             patch_status_from_approval(&approval.status),
@@ -1806,6 +1885,44 @@ mod tests {
         let err = project_command_request_from_approval(&approval).unwrap_err();
         assert_eq!(err.code, "INVALID_ARGUMENT");
         assert!(err.message.contains("不是项目命令"));
+    }
+
+    #[test]
+    fn test_build_tool_action_approval_input_defaults_and_validates_prefix() {
+        let input = build_tool_action_approval_input(ToolActionApprovalRequest {
+            task_id: Some(" task-1 ".to_string()),
+            step_id: Some(" step-1 ".to_string()),
+            title: " 读取受限文件 ".to_string(),
+            reason: " 需要确认工具动作。 ".to_string(),
+            action_type: " tool.fileRead ".to_string(),
+            action_payload: serde_json::json!({ "tool": "file_read", "path": ".env" }),
+            risk: None,
+            requested_by: None,
+        })
+        .unwrap();
+
+        assert_eq!(input.task_id.as_deref(), Some("task-1"));
+        assert_eq!(input.step_id.as_deref(), Some("step-1"));
+        assert_eq!(input.title, "读取受限文件");
+        assert_eq!(input.reason, "需要确认工具动作。");
+        assert_eq!(input.action_type, "tool.fileRead");
+        assert_eq!(input.risk, RiskLevel::Medium);
+        assert_eq!(input.requested_by.as_deref(), Some("ToolAgent"));
+        assert_eq!(input.action_payload["tool"], serde_json::json!("file_read"));
+
+        let err = build_tool_action_approval_input(ToolActionApprovalRequest {
+            task_id: None,
+            step_id: None,
+            title: "运行命令".to_string(),
+            reason: "需要确认。".to_string(),
+            action_type: "runtime.runProjectCommand".to_string(),
+            action_payload: serde_json::json!({}),
+            risk: Some(RiskLevel::High),
+            requested_by: Some("test".to_string()),
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("tool."));
     }
 
     #[test]

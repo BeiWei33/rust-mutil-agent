@@ -352,6 +352,18 @@ export interface RunApprovedProjectCommandRequest {
   approvalId: string;
 }
 
+/** 创建通用工具动作审批请求 */
+export interface ToolActionApprovalRequest {
+  taskId?: string | null;
+  stepId?: string | null;
+  title: string;
+  reason: string;
+  actionType: string;
+  actionPayload?: unknown;
+  risk?: ApprovalRisk;
+  requestedBy?: string | null;
+}
+
 /** 补丁提案状态 */
 export type PatchProposalStatus =
   | "draft"

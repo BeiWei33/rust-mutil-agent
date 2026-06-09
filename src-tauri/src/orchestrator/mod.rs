@@ -810,6 +810,141 @@ impl TaskRuntime {
         Some(updated)
     }
 
+    fn record_tool_approval_requested(&mut self, approval: &ApprovalRequest) -> Option<Task> {
+        if !is_tool_action_approval(approval) {
+            return None;
+        }
+        let task_id = approval_task_id(approval)?;
+        let step_id = approval_step_id(approval);
+        let artifact = tool_approval_artifact(approval);
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_approval_kind_artifact(task, "toolApproval", &approval.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        if !matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            task.status = TaskStatus::WaitingApproval;
+            task.touch();
+        }
+        if let Some(step_id) = step_id {
+            if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                if matches!(
+                    step.status,
+                    StepStatus::Pending | StepStatus::Running | StepStatus::WaitingApproval
+                ) {
+                    step.status = StepStatus::WaitingApproval;
+                    step.error = None;
+                }
+            }
+        }
+        let updated = task.clone();
+
+        self.push_event(TaskEvent::new(
+            task_id.to_string(),
+            step_id.map(ToString::to_string),
+            TaskEventKind::ApprovalRequested,
+            format!(
+                "工具动作等待审批：{}",
+                tool_action_label_from_approval(approval)
+            ),
+            artifact,
+        ));
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
+    fn record_tool_approval_resolved(&mut self, approval: &ApprovalRequest) -> Option<Task> {
+        if !is_tool_action_approval(approval) {
+            return None;
+        }
+        let task_id = approval_task_id(approval)?;
+        let step_id = approval_step_id(approval);
+        let artifact = tool_approval_resolved_artifact(approval);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_approval_kind_artifact(task, "toolApprovalResolved", &approval.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        match approval.status {
+            ApprovalStatus::Approved => {
+                if task.status == TaskStatus::WaitingApproval {
+                    task.status = TaskStatus::Running;
+                    task.error = None;
+                    task.touch();
+                }
+                if let Some(step_id) = step_id {
+                    if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                        if step.status == StepStatus::WaitingApproval {
+                            step.status = StepStatus::Running;
+                            step.error = None;
+                        }
+                    }
+                }
+            }
+            ApprovalStatus::Rejected => {
+                let message = format!(
+                    "工具动作审批已拒绝：{}",
+                    tool_action_label_from_approval(approval)
+                );
+                if let Some(step_id) = step_id {
+                    if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
+                        if matches!(
+                            step.status,
+                            StepStatus::Pending | StepStatus::WaitingApproval | StepStatus::Running
+                        ) {
+                            step.fail(message.clone());
+                            emitted.push(TaskEvent::new(
+                                task_id.to_string(),
+                                Some(step.id.clone()),
+                                TaskEventKind::StepFailed,
+                                message.clone(),
+                                artifact.clone(),
+                            ));
+                        }
+                    }
+                }
+                if !matches!(
+                    task.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    task.fail(message.clone());
+                    emitted.push(TaskEvent::new(
+                        task_id.to_string(),
+                        None,
+                        TaskEventKind::Failed,
+                        message,
+                        artifact.clone(),
+                    ));
+                }
+            }
+            ApprovalStatus::Pending | ApprovalStatus::Cancelled => {}
+        }
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            step_id.map(ToString::to_string),
+            TaskEventKind::ApprovalResolved,
+            format!(
+                "工具动作审批{}：{}",
+                approval_status_label(&approval.status),
+                tool_action_label_from_approval(approval)
+            ),
+            artifact,
+        ));
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
     fn record_command_run(
         &mut self,
         approval: &ApprovalRequest,
@@ -1644,6 +1779,18 @@ impl Orchestrator {
         runtime.record_command_approval_resolved(approval)
     }
 
+    /// 记录通用工具审批请求，并让关联任务/步骤进入等待审批。
+    pub async fn record_tool_approval_requested(&self, approval: &ApprovalRequest) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_tool_approval_requested(approval)
+    }
+
+    /// 记录通用工具审批决策，并恢复或失败关联任务/步骤。
+    pub async fn record_tool_approval_resolved(&self, approval: &ApprovalRequest) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_tool_approval_resolved(approval)
+    }
+
     /// 记录已审批项目命令运行结果为任务 artifact 和事件。
     pub async fn record_command_run(
         &self,
@@ -2040,6 +2187,58 @@ fn command_working_dir_from_approval(approval: &ApprovalRequest) -> Option<Strin
         .map(ToString::to_string)
 }
 
+fn is_tool_action_approval(approval: &ApprovalRequest) -> bool {
+    approval.action_type.starts_with("tool.")
+}
+
+fn tool_action_label_from_approval(approval: &ApprovalRequest) -> String {
+    approval
+        .action_payload
+        .get("tool")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            approval
+                .action_payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&approval.title)
+        .to_string()
+}
+
+fn tool_approval_artifact(approval: &ApprovalRequest) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "toolApproval",
+        "approvalId": &approval.id,
+        "actionType": &approval.action_type,
+        "title": &approval.title,
+        "tool": tool_action_label_from_approval(approval),
+        "risk": &approval.risk,
+        "status": &approval.status,
+        "requestedBy": &approval.requested_by,
+        "createdAt": approval.created_at,
+        "payload": &approval.action_payload,
+    })
+}
+
+fn tool_approval_resolved_artifact(approval: &ApprovalRequest) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "toolApprovalResolved",
+        "approvalId": &approval.id,
+        "actionType": &approval.action_type,
+        "title": &approval.title,
+        "tool": tool_action_label_from_approval(approval),
+        "risk": &approval.risk,
+        "status": &approval.status,
+        "decidedBy": &approval.decided_by,
+        "decisionNote": &approval.decision_note,
+        "decidedAt": approval.decided_at,
+        "payload": &approval.action_payload,
+    })
+}
+
 fn command_approval_artifact(approval: &ApprovalRequest) -> serde_json::Value {
     serde_json::json!({
         "kind": "commandApproval",
@@ -2249,6 +2448,10 @@ fn has_patch_kind_artifact(task: &Task, kind: &str, patch_id: &str) -> bool {
 }
 
 fn has_command_kind_artifact(task: &Task, kind: &str, approval_id: &str) -> bool {
+    has_approval_kind_artifact(task, kind, approval_id)
+}
+
+fn has_approval_kind_artifact(task: &Task, kind: &str, approval_id: &str) -> bool {
     task.artifacts.iter().any(|artifact| {
         artifact.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
             && artifact
@@ -3049,6 +3252,31 @@ mod tests {
         approval
     }
 
+    fn approval_for_tool(task_id: &str, status: ApprovalStatus) -> ApprovalRequest {
+        let mut approval = ApprovalRequest::new(crate::approval::CreateApprovalRequest {
+            task_id: Some(task_id.to_string()),
+            step_id: Some(format!("{task_id}-1")),
+            title: "读取受限文件".to_string(),
+            reason: "需要确认工具动作。".to_string(),
+            risk: crate::agent::action::RiskLevel::Medium,
+            action_type: "tool.fileRead".to_string(),
+            action_payload: serde_json::json!({
+                "tool": "file_read",
+                "path": ".env",
+            }),
+            requested_by: Some("ToolAgent".to_string()),
+        })
+        .unwrap();
+        approval.id = "tool-approval-1".to_string();
+        if status != ApprovalStatus::Pending {
+            approval.status = status;
+            approval.decided_by = Some("tester".to_string());
+            approval.decided_at = Some(chrono::Utc::now());
+            approval.updated_at = approval.decided_at.unwrap();
+        }
+        approval
+    }
+
     fn command_run_for_approval(
         approval: &ApprovalRequest,
         success: bool,
@@ -3147,6 +3375,77 @@ mod tests {
             .any(|event| event.kind == TaskEventKind::Failed));
 
         let retry = runtime.retry_task(task_id, "重新提交命令审批").unwrap();
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+    }
+
+    #[test]
+    fn test_record_tool_approval_requested_marks_linked_step_waiting() {
+        let task_id = "task-tool-approval-requested";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let approval = approval_for_tool(task_id, ApprovalStatus::Pending);
+
+        let task = runtime.record_tool_approval_requested(&approval).unwrap();
+
+        assert_eq!(task.status, TaskStatus::WaitingApproval);
+        assert_eq!(task.steps[0].status, StepStatus::WaitingApproval);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("toolApproval")
+                && artifact["approvalId"] == serde_json::json!(approval.id)
+                && artifact["tool"] == serde_json::json!("file_read")
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::ApprovalRequested));
+    }
+
+    #[test]
+    fn test_record_tool_approval_approved_restores_running_step() {
+        let task_id = "task-tool-approval-approved";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let pending = approval_for_tool(task_id, ApprovalStatus::Pending);
+        runtime.record_tool_approval_requested(&pending);
+        let approved = approval_for_tool(task_id, ApprovalStatus::Approved);
+
+        let task = runtime.record_tool_approval_resolved(&approved).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert!(task.artifacts.iter().any(|artifact| {
+            artifact["kind"] == serde_json::json!("toolApprovalResolved")
+                && artifact["status"] == serde_json::json!("approved")
+        }));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::ApprovalResolved));
+    }
+
+    #[test]
+    fn test_record_tool_approval_rejected_marks_task_retryable() {
+        let task_id = "task-tool-approval-rejected";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task_with_running_executor_step(task_id));
+        let pending = approval_for_tool(task_id, ApprovalStatus::Pending);
+        runtime.record_tool_approval_requested(&pending);
+        let rejected = approval_for_tool(task_id, ApprovalStatus::Rejected);
+
+        let task = runtime.record_tool_approval_resolved(&rejected).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::Failed);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::Failed));
+
+        let retry = runtime.retry_task(task_id, "重新提交工具审批").unwrap();
         let task = runtime.get_task(task_id).unwrap();
 
         assert_eq!(retry.dispatches.len(), 1);
