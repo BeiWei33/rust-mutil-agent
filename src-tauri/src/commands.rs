@@ -18,8 +18,8 @@ use crate::runtime::{
 };
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{
-    CreatePatchProposalRequest, FileReadResponse, PatchProposal, PatchProposalListResponse,
-    PatchProposalStatus, SearchResponse, WorkspaceEntry,
+    CreatePatchProposalRequest, FileReadResponse, PatchApplyResult, PatchProposal,
+    PatchProposalListResponse, PatchProposalStatus, SearchResponse, WorkspaceEntry,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,13 @@ pub struct SearchProjectTextRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunApprovedProjectCommandRequest {
+    pub approval_id: String,
+}
+
+/// 应用已审批补丁请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyApprovedPatchRequest {
     pub approval_id: String,
 }
 
@@ -1140,6 +1147,22 @@ fn patch_id_from_approval(approval: &ApprovalRequest) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn approved_patch_id_from_approval(approval: &ApprovalRequest) -> Result<String, ApiError> {
+    if approval.action_type != "workspace.applyPatch" {
+        return Err(ApiError::invalid_argument(
+            "这条审批不是补丁应用请求，不能作为补丁应用。",
+        ));
+    }
+    if approval.status != ApprovalStatus::Approved {
+        return Err(ApiError::invalid_argument(
+            "审批请求尚未通过，不能应用对应补丁。",
+        ));
+    }
+
+    patch_id_from_approval(approval)
+        .ok_or_else(|| ApiError::invalid_argument("审批 payload 缺少补丁提案 ID。"))
+}
+
 fn patch_status_from_approval(status: &ApprovalStatus) -> Option<PatchProposalStatus> {
     match status {
         ApprovalStatus::Pending => Some(PatchProposalStatus::PendingApproval),
@@ -1208,6 +1231,52 @@ pub async fn get_patch_proposal(
         .patch_store
         .get_proposal(patch_id)
         .map_err(|err| ApiError::patch_failed(format!("{}", err)))
+}
+
+/// 应用已通过审批的补丁提案。
+///
+/// 前端调用：`invoke('apply_approved_patch', { request: { approvalId } })`
+#[tauri::command]
+pub async fn apply_approved_patch(
+    request: ApplyApprovedPatchRequest,
+    state: State<'_, AppState>,
+) -> Result<PatchApplyResult, ApiError> {
+    let approval_id = request.approval_id.trim();
+    if approval_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少审批请求 ID。"));
+    }
+
+    let Some(approval) = state
+        .approval_store
+        .get_request(approval_id)
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))?
+    else {
+        return Err(ApiError::invalid_argument("找不到对应的审批请求。"));
+    };
+    let patch_id = approved_patch_id_from_approval(&approval)?;
+
+    let Some(mut proposal) = state
+        .patch_store
+        .get_proposal(&patch_id)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?
+    else {
+        return Err(ApiError::invalid_argument("找不到对应的补丁提案。"));
+    };
+
+    if proposal.approval_id.as_deref() != Some(approval.id.as_str()) {
+        return Err(ApiError::invalid_argument(
+            "补丁提案与审批请求不匹配，已拒绝应用。",
+        ));
+    }
+
+    let result = crate::workspace::apply_patch_proposal(&mut proposal, Some("user"))
+        .map_err(map_patch_error)?;
+    state
+        .patch_store
+        .save_proposal(&proposal)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+
+    Ok(result)
 }
 
 /// 列出审批请求。
@@ -1477,6 +1546,8 @@ mod tests {
             requested_by: "ProjectPanel".to_string(),
             created_at: now,
             updated_at: now,
+            applied_at: None,
+            applied_by: None,
         };
 
         let input = build_patch_approval_input(&proposal);
@@ -1499,5 +1570,38 @@ mod tests {
             input.action_payload["files"][0]["path"],
             serde_json::json!("README.md")
         );
+    }
+
+    #[test]
+    fn test_approved_patch_id_from_approval_requires_patch_action_and_approved_status() {
+        let mut approval = ApprovalRequest::new(CreateApprovalRequest {
+            task_id: None,
+            step_id: None,
+            title: "应用补丁".to_string(),
+            reason: "需要确认。".to_string(),
+            risk: RiskLevel::High,
+            action_type: "workspace.applyPatch".to_string(),
+            action_payload: serde_json::json!({
+                "patchId": "patch-1",
+                "unifiedDiff": "diff --git a/README.md b/README.md",
+            }),
+            requested_by: Some("ProjectPanel".to_string()),
+        })
+        .unwrap();
+
+        let err = approved_patch_id_from_approval(&approval).unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("尚未通过"));
+
+        approval.status = ApprovalStatus::Approved;
+        assert_eq!(
+            approved_patch_id_from_approval(&approval).unwrap(),
+            "patch-1"
+        );
+
+        approval.action_type = "runtime.runProjectCommand".to_string();
+        let err = approved_patch_id_from_approval(&approval).unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("不是补丁应用请求"));
     }
 }

@@ -115,7 +115,7 @@ Rust Commands
   ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
   ├─ run_project_command / request_project_command_approval / run_approved_project_command
   ├─ list_project_command_runs
-  ├─ create_patch_proposal / list_patch_proposals / get_patch_proposal
+  ├─ create_patch_proposal / list_patch_proposals / get_patch_proposal / apply_approved_patch
   ├─ list_approval_requests / approve_action
   ├─ get_history / clear_history
   └─ list_agents / health_check
@@ -271,6 +271,7 @@ cp .env.example .env
 | `list_project_command_runs` | 已实现 | 查询最近命令运行记录。 |
 | `create_patch_proposal` | 已实现 | 为现有文本文件生成补丁提案、持久化 diff，并创建 `workspace.applyPatch` 审批请求。 |
 | `list_patch_proposals` / `get_patch_proposal` | 已实现 | 查询最近补丁提案或指定补丁提案。 |
+| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，并把提案状态更新为 `applied`。 |
 | `list_approval_requests` | 已实现 | 查询审批请求，可按状态过滤。 |
 | `approve_action` | 已实现 | 对审批请求执行通过或拒绝；`workspace.applyPatch` 审批会同步补丁提案状态。 |
 | `get_history` / `clear_history` | 已实现 | 读取或清理指定会话聊天历史。 |
@@ -296,12 +297,12 @@ cp .env.example .env
 
 项目面板在读取文本文件后可编辑草稿并调用 `create_patch_proposal`。后端会校验路径仍在 workspace 内、目标是普通文本文件、基线内容与当前文件一致，并拒绝 `.git`、密钥文件和构建产物目录。创建成功后会写入 `patch_proposals` SQLite 表，并同步生成 `workspace.applyPatch` 审批请求；审批 payload 包含 `patchId`、文件列表和统一 diff。
 
-审批面板会对 `workspace.applyPatch` 展开文件列表和 diff。用户通过或拒绝审批时，后端会把对应补丁提案状态更新为 `approved` 或 `rejected`。当前版本只做提案、预览和审批记录，不会把 patch 写入工作区。
+审批面板会对 `workspace.applyPatch` 展开文件列表和 diff。用户通过或拒绝审批时，后端会把对应补丁提案状态更新为 `approved` 或 `rejected`；通过后可继续调用 `apply_approved_patch` 手动写入工作区。应用时后端会重新校验目标文件仍与提案基线一致，拒绝过期补丁，并把提案状态更新为 `applied`。当前版本尚未提供自动回滚、artifact 记录或应用后自动测试。
 
 ## 已知限制
 
-1. `Executor` 还没有接入真实代码修改、patch 应用或沙箱写入。
-2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、已审批命令执行和补丁提案 diff 审批；尚未自动拦截文件写入或应用 patch，也尚未把任务步骤自动挂起到审批状态。
+1. `Executor` 还没有接入真实代码修改或沙箱写入，补丁应用仍需要用户在审批面板手动触发。
+2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、已审批命令执行和补丁提案 diff 审批/应用；尚未自动拦截文件写入，也尚未把任务步骤自动挂起到审批状态。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
 4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 仍需补齐同等级别权限控制。

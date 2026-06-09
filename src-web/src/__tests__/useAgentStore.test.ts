@@ -28,6 +28,7 @@ vi.mock("@/lib/tauri", () => ({
     createPatchProposal: vi.fn(),
     listPatchProposals: vi.fn(),
     getPatchProposal: vi.fn(),
+    applyApprovedPatch: vi.fn(),
     listApprovalRequests: vi.fn(),
     approveAction: vi.fn(),
   },
@@ -49,6 +50,7 @@ const mockApi = api as unknown as {
   createPatchProposal: ReturnType<typeof vi.fn>;
   listPatchProposals: ReturnType<typeof vi.fn>;
   getPatchProposal: ReturnType<typeof vi.fn>;
+  applyApprovedPatch: ReturnType<typeof vi.fn>;
   listApprovalRequests: ReturnType<typeof vi.fn>;
   approveAction: ReturnType<typeof vi.fn>;
 };
@@ -116,6 +118,8 @@ describe("useAgentStore", () => {
       approvalsError: null,
       approvalDecisionLoadingId: null,
       approvalExecutionLoadingId: null,
+      patchApplyLoadingId: null,
+      lastPatchApplyResult: null,
       settings: {
         model: "deepseek-v4-pro",
         apiKey: "",
@@ -836,5 +840,70 @@ describe("useAgentStore", () => {
     expect(getState().approvalsError).toBeNull();
     expect(getState().latestCommandRun).toEqual(run);
     expect(getState().commandRuns).toEqual([run]);
+  });
+
+  /// 测试 — applyApprovedPatch 成功时更新补丁提案状态
+  /// 验证：已审批补丁应用后 store 中对应 proposal 进入 applied
+  it("applyApprovedPatch 成功时应更新补丁提案状态", async () => {
+    const proposal = {
+      id: "patch-apply-1",
+      taskId: null,
+      stepId: null,
+      approvalId: "approval-patch-apply-1",
+      summary: "更新 README",
+      status: "approved" as const,
+      files: [
+        {
+          path: "README.md",
+          changeType: "modify" as const,
+          oldContent: "old",
+          newContent: "new",
+          diff: "diff --git a/README.md b/README.md\n-old\n+new",
+        },
+      ],
+      unifiedDiff: "diff --git a/README.md b/README.md\n-old\n+new",
+      requestedBy: "ProjectPanel",
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:01:00Z",
+      appliedAt: null,
+      appliedBy: null,
+    };
+    const result = {
+      patchId: "patch-apply-1",
+      status: "applied" as const,
+      files: ["README.md"],
+      appliedAt: "2026-06-09T12:02:00Z",
+      alreadyApplied: false,
+    };
+    useAgentStore.setState({ patchProposals: [proposal], lastPatchProposal: proposal });
+    mockApi.applyApprovedPatch.mockResolvedValue(result);
+    mockApi.listPatchProposals.mockResolvedValue({
+      proposals: [
+        {
+          ...proposal,
+          status: "applied" as const,
+          appliedAt: result.appliedAt,
+          updatedAt: result.appliedAt,
+        },
+      ],
+    });
+
+    await getState().applyApprovedPatch("approval-patch-apply-1");
+
+    expect(mockApi.applyApprovedPatch).toHaveBeenCalledWith({
+      approvalId: "approval-patch-apply-1",
+    });
+    expect(getState().patchApplyLoadingId).toBeNull();
+    expect(getState().approvalsError).toBeNull();
+    expect(getState().lastPatchApplyResult).toEqual(result);
+    expect(getState().patchProposals[0]).toMatchObject({
+      id: "patch-apply-1",
+      status: "applied",
+      appliedAt: result.appliedAt,
+    });
+    expect(getState().lastPatchProposal).toMatchObject({
+      id: "patch-apply-1",
+      status: "applied",
+    });
   });
 });

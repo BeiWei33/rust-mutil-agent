@@ -35,6 +35,8 @@ import type {
   RunApprovedProjectCommandRequest,
   CreatePatchProposalRequest,
   CreatePatchProposalResponse,
+  ApplyApprovedPatchRequest,
+  PatchApplyResult,
   PatchProposal,
   PatchProposalListResponse,
 } from "@/types";
@@ -286,6 +288,19 @@ export async function listPatchProposals(
 export async function getPatchProposal(patchId: string): Promise<PatchProposal | null> {
   return invoke<PatchProposal | null>(`${CMD_PREFIX}get_patch_proposal`, {
     patchId,
+  });
+}
+
+/**
+ * 应用已通过审批的补丁提案
+ * @param request 审批 ID
+ * @returns 补丁应用结果
+ */
+export async function applyApprovedPatch(
+  request: ApplyApprovedPatchRequest
+): Promise<PatchApplyResult> {
+  return invoke<PatchApplyResult>(`${CMD_PREFIX}apply_approved_patch`, {
+    request,
   });
 }
 
@@ -828,6 +843,15 @@ function commandPayload(value: unknown): ProjectCommandRunRequest | null {
   };
 }
 
+function patchPayload(value: unknown): { patchId: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as { patchId?: unknown };
+  if (typeof payload.patchId !== "string" || payload.patchId.trim().length === 0) {
+    return null;
+  }
+  return { patchId: payload.patchId.trim() };
+}
+
 async function mockRunApprovedProjectCommand(
   request: RunApprovedProjectCommandRequest
 ): Promise<ProjectCommandRunResponse> {
@@ -959,6 +983,54 @@ async function mockGetPatchProposal(patchId: string): Promise<PatchProposal | nu
   return MOCK_PATCH_PROPOSALS.find((proposal) => proposal.id === patchId) ?? null;
 }
 
+async function mockApplyApprovedPatch(
+  request: ApplyApprovedPatchRequest
+): Promise<PatchApplyResult> {
+  await new Promise((r) => setTimeout(r, 220));
+
+  const approval = MOCK_APPROVALS.find((item) => item.id === request.approvalId);
+  if (!approval) throw new Error("找不到对应的审批请求。");
+  if (approval.status !== "approved") throw new Error("审批请求尚未通过，不能应用对应补丁。");
+  if (approval.actionType !== "workspace.applyPatch") {
+    throw new Error("这条审批不是补丁应用请求，不能作为补丁应用。");
+  }
+
+  const payload = patchPayload(approval.actionPayload);
+  if (!payload) throw new Error("审批 payload 缺少补丁提案 ID。");
+
+  const proposal = MOCK_PATCH_PROPOSALS.find((item) => item.id === payload.patchId);
+  if (!proposal) throw new Error("找不到对应的补丁提案。");
+  if (proposal.approvalId !== approval.id) {
+    throw new Error("补丁提案与审批请求不匹配，已拒绝应用。");
+  }
+  if (proposal.status !== "approved" && proposal.status !== "applied") {
+    throw new Error("补丁提案尚未通过审批，不能应用。");
+  }
+
+  const alreadyApplied = proposal.status === "applied";
+  const appliedAt = alreadyApplied && proposal.appliedAt
+    ? proposal.appliedAt
+    : new Date().toISOString();
+  const updated: PatchProposal = {
+    ...proposal,
+    status: "applied",
+    appliedAt,
+    appliedBy: proposal.appliedBy || "user",
+    updatedAt: appliedAt,
+  };
+  MOCK_PATCH_PROPOSALS = MOCK_PATCH_PROPOSALS.map((item) =>
+    item.id === updated.id ? updated : item
+  );
+
+  return {
+    patchId: updated.id,
+    status: updated.status,
+    files: updated.files.map((file) => file.path),
+    appliedAt,
+    alreadyApplied,
+  };
+}
+
 async function mockListApprovalRequests(
   status?: ApprovalStatus,
   limit = 50
@@ -1053,6 +1125,7 @@ export const api = {
   createPatchProposal: isTauri() ? createPatchProposal : mockCreatePatchProposal,
   listPatchProposals: isTauri() ? listPatchProposals : mockListPatchProposals,
   getPatchProposal: isTauri() ? getPatchProposal : mockGetPatchProposal,
+  applyApprovedPatch: isTauri() ? applyApprovedPatch : mockApplyApprovedPatch,
   listApprovalRequests: isTauri() ? listApprovalRequests : mockListApprovalRequests,
   approveAction: isTauri() ? approveAction : mockApproveAction,
   healthCheck: isTauri() ? healthCheck : mockHealthCheck,

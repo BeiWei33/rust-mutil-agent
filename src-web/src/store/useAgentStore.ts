@@ -22,6 +22,7 @@ import type {
   ApprovalRequest,
   ApprovalStatus,
   CreatePatchProposalRequest,
+  PatchApplyResult,
   PatchProposal,
 } from "@/types";
 import { api } from "@/lib/tauri";
@@ -135,12 +136,16 @@ interface AgentState {
   approvalsError: string | null;
   approvalDecisionLoadingId: string | null;
   approvalExecutionLoadingId: string | null;
+  patchApplyLoadingId: string | null;
+  lastPatchApplyResult: PatchApplyResult | null;
   /** 获取审批请求列表 */
   fetchApprovals: (status?: ApprovalStatus) => Promise<void>;
   /** 审批或拒绝动作 */
   decideApproval: (approvalId: string, approved: boolean, note?: string) => Promise<void>;
   /** 执行已通过审批的项目命令 */
   runApprovedCommand: (approvalId: string) => Promise<void>;
+  /** 应用已通过审批的补丁 */
+  applyApprovedPatch: (approvalId: string) => Promise<void>;
 
   // ===== 项目理解 =====
   projectSnapshot: ProjectSnapshot | null;
@@ -500,6 +505,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   approvalsError: null,
   approvalDecisionLoadingId: null,
   approvalExecutionLoadingId: null,
+  patchApplyLoadingId: null,
+  lastPatchApplyResult: null,
 
   fetchApprovals: async (status) => {
     set({ approvalsLoading: true, approvalsError: null });
@@ -562,6 +569,45 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set({
         approvalsError: getErrorMessage(err, "执行已审批命令失败"),
         approvalExecutionLoadingId: null,
+      });
+    }
+  },
+
+  applyApprovedPatch: async (approvalId) => {
+    set({ patchApplyLoadingId: approvalId, approvalsError: null });
+    try {
+      const result = await api.applyApprovedPatch({ approvalId });
+      set((s) => ({
+        lastPatchApplyResult: result,
+        patchApplyLoadingId: null,
+        approvalsError: null,
+        patchProposals: s.patchProposals.map((proposal) =>
+          proposal.id === result.patchId
+            ? {
+                ...proposal,
+                status: result.status,
+                appliedAt: result.appliedAt,
+                updatedAt: result.appliedAt,
+              }
+            : proposal
+        ),
+        lastPatchProposal:
+          s.lastPatchProposal?.id === result.patchId
+            ? {
+                ...s.lastPatchProposal,
+                status: result.status,
+                appliedAt: result.appliedAt,
+                updatedAt: result.appliedAt,
+              }
+            : s.lastPatchProposal,
+      }));
+      get().fetchPatchProposals(10).catch(() => {
+        // 应用结果已返回，列表刷新失败不影响审批面板状态。
+      });
+    } catch (err: unknown) {
+      set({
+        approvalsError: getErrorMessage(err, "应用已审批补丁失败"),
+        patchApplyLoadingId: null,
       });
     }
   },

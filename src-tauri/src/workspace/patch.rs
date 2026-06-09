@@ -21,6 +21,7 @@ pub enum PatchProposalStatus {
     PendingApproval,
     Approved,
     Rejected,
+    Applied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,12 +72,26 @@ pub struct PatchProposal {
     pub requested_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub applied_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub applied_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchProposalListResponse {
     pub proposals: Vec<PatchProposal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchApplyResult {
+    pub patch_id: String,
+    pub status: PatchProposalStatus,
+    pub files: Vec<String>,
+    pub applied_at: DateTime<Utc>,
+    pub already_applied: bool,
 }
 
 /// SQLite-backed patch proposal store.
@@ -94,6 +109,13 @@ impl PatchProposal {
     pub fn set_status(&mut self, status: PatchProposalStatus) {
         self.status = status;
         self.updated_at = Utc::now();
+    }
+
+    fn mark_applied(&mut self, applied_at: DateTime<Utc>, applied_by: Option<String>) {
+        self.status = PatchProposalStatus::Applied;
+        self.applied_at = Some(applied_at);
+        self.applied_by = applied_by;
+        self.updated_at = applied_at;
     }
 }
 
@@ -256,6 +278,76 @@ pub fn build_patch_proposal(
             .to_string(),
         created_at: now,
         updated_at: now,
+        applied_at: None,
+        applied_by: None,
+    })
+}
+
+pub fn apply_patch_proposal(
+    proposal: &mut PatchProposal,
+    applied_by: Option<&str>,
+) -> Result<PatchApplyResult, AgentError> {
+    if proposal.status == PatchProposalStatus::Applied {
+        let applied_at = proposal.applied_at.unwrap_or_else(|| {
+            let now = Utc::now();
+            proposal.applied_at = Some(now);
+            now
+        });
+        return Ok(PatchApplyResult {
+            patch_id: proposal.id.clone(),
+            status: proposal.status.clone(),
+            files: proposal
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect(),
+            applied_at,
+            already_applied: true,
+        });
+    }
+
+    if proposal.status != PatchProposalStatus::Approved {
+        return Err(AgentError::MessageFormat(format!(
+            "补丁提案 [{}] 当前状态为 {:?}，不能应用",
+            proposal.id, proposal.status
+        )));
+    }
+
+    let mut resolved_files = Vec::with_capacity(proposal.files.len());
+    for file in &proposal.files {
+        match file.change_type {
+            PatchChangeType::Modify => {
+                let (path, file_path) = resolve_existing_text_file(&file.path)?;
+                let current_content = fs::read_to_string(&file_path).map_err(|err| {
+                    AgentError::Internal(format!("读取当前文件失败 [{}]: {err}", path))
+                })?;
+                if current_content != file.old_content {
+                    return Err(AgentError::MessageFormat(format!(
+                        "文件 [{}] 当前内容与补丁基线不一致，已拒绝应用",
+                        path
+                    )));
+                }
+                resolved_files.push((path, file_path, file.new_content.clone()));
+            }
+        }
+    }
+
+    for (path, file_path, new_content) in &resolved_files {
+        fs::write(file_path, new_content)
+            .map_err(|err| AgentError::Internal(format!("写入补丁文件失败 [{}]: {err}", path)))?;
+    }
+
+    let applied_at = Utc::now();
+    proposal.mark_applied(applied_at, clean_applied_by(applied_by));
+    Ok(PatchApplyResult {
+        patch_id: proposal.id.clone(),
+        status: proposal.status.clone(),
+        files: resolved_files
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect(),
+        applied_at,
+        already_applied: false,
     })
 }
 
@@ -494,12 +586,20 @@ fn clean_optional(value: Option<&String>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn clean_applied_by(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+}
+
 fn status_value(status: &PatchProposalStatus) -> &'static str {
     match status {
         PatchProposalStatus::Draft => "draft",
         PatchProposalStatus::PendingApproval => "pendingApproval",
         PatchProposalStatus::Approved => "approved",
         PatchProposalStatus::Rejected => "rejected",
+        PatchProposalStatus::Applied => "applied",
     }
 }
 
@@ -544,6 +644,8 @@ mod tests {
             requested_by: "test".to_string(),
             created_at: now,
             updated_at: now,
+            applied_at: None,
+            applied_by: None,
         };
 
         store.save_proposal(&proposal).unwrap();
@@ -578,5 +680,79 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("workspace 外部"));
+    }
+
+    struct TestFile {
+        path: PathBuf,
+    }
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn workspace_test_file(content: &str) -> (String, TestFile) {
+        let name = format!("patch-apply-test-{}.txt", uuid::Uuid::new_v4());
+        let path = workspace_root().join(&name);
+        fs::write(&path, content).unwrap();
+        (name, TestFile { path })
+    }
+
+    fn approved_test_proposal(path: String, old_content: &str, new_content: &str) -> PatchProposal {
+        let now = Utc::now();
+        PatchProposal {
+            id: "patch-apply-1".to_string(),
+            task_id: None,
+            step_id: None,
+            approval_id: Some("approval-1".to_string()),
+            summary: "应用测试补丁".to_string(),
+            status: PatchProposalStatus::Approved,
+            files: vec![PatchFileChange {
+                path: path.clone(),
+                change_type: PatchChangeType::Modify,
+                old_content: old_content.to_string(),
+                new_content: new_content.to_string(),
+                diff: build_unified_diff(&path, old_content, new_content),
+            }],
+            unified_diff: build_unified_diff(&path, old_content, new_content),
+            requested_by: "test".to_string(),
+            created_at: now,
+            updated_at: now,
+            applied_at: None,
+            applied_by: None,
+        }
+    }
+
+    #[test]
+    fn apply_patch_proposal_writes_files_and_is_idempotent_after_apply() {
+        let (path, test_file) = workspace_test_file("old\n");
+        let mut proposal = approved_test_proposal(path.clone(), "old\n", "new\n");
+
+        let result = apply_patch_proposal(&mut proposal, Some("tester")).unwrap();
+
+        assert_eq!(result.patch_id, proposal.id);
+        assert_eq!(result.status, PatchProposalStatus::Applied);
+        assert_eq!(result.files, vec![path.clone()]);
+        assert!(!result.already_applied);
+        assert_eq!(proposal.status, PatchProposalStatus::Applied);
+        assert_eq!(proposal.applied_by.as_deref(), Some("tester"));
+        assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "new\n");
+
+        let second = apply_patch_proposal(&mut proposal, Some("tester")).unwrap();
+        assert!(second.already_applied);
+        assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn apply_patch_proposal_rejects_baseline_mismatch() {
+        let (path, test_file) = workspace_test_file("changed\n");
+        let mut proposal = approved_test_proposal(path, "old\n", "new\n");
+
+        let err = apply_patch_proposal(&mut proposal, Some("tester")).unwrap_err();
+
+        assert!(err.to_string().contains("基线不一致"));
+        assert_eq!(proposal.status, PatchProposalStatus::Approved);
+        assert_eq!(fs::read_to_string(&test_file.path).unwrap(), "changed\n");
     }
 }

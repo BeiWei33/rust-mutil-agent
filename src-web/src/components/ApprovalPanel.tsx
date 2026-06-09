@@ -9,6 +9,8 @@ import type {
   ApprovalRequest,
   ApprovalRisk,
   ApprovalStatus,
+  PatchApplyResult,
+  PatchProposal,
   ProjectCommandRunResponse,
 } from "@/types";
 
@@ -110,18 +112,26 @@ function ApprovalItem({
   approval,
   loading,
   executionLoading,
+  patchApplyLoading,
   executedRun,
+  patchProposal,
+  patchApplyResult,
   onApprove,
   onReject,
   onExecute,
+  onApplyPatch,
 }: {
   approval: ApprovalRequest;
   loading: boolean;
   executionLoading: boolean;
+  patchApplyLoading: boolean;
   executedRun?: ProjectCommandRunResponse;
+  patchProposal?: PatchProposal;
+  patchApplyResult?: PatchApplyResult | null;
   onApprove: () => void;
   onReject: () => void;
   onExecute: () => void;
+  onApplyPatch: () => void;
 }) {
   const pending = approval.status === "pending";
   const canExecuteCommand =
@@ -130,6 +140,10 @@ function ApprovalItem({
     approval.actionType === "workspace.applyPatch"
       ? patchApprovalPayload(approval.actionPayload)
       : null;
+  const patchApplied =
+    patchProposal?.status === "applied" ||
+    (patchApplyResult?.patchId === patchPayload?.patchId && patchApplyResult.status === "applied");
+  const canApplyPatch = approval.status === "approved" && !!patchPayload && !patchApplied;
 
   return (
     <article className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
@@ -142,7 +156,7 @@ function ApprovalItem({
           </div>
           <p className="mt-2 text-sm leading-relaxed text-zinc-400">{approval.reason}</p>
         </div>
-        {(pending || canExecuteCommand || executedRun) && (
+        {(pending || canExecuteCommand || executedRun || canApplyPatch || patchApplied) && (
           <div className="flex shrink-0 gap-2">
             {pending && (
               <>
@@ -174,6 +188,16 @@ function ApprovalItem({
                 {executionLoading ? "执行中..." : "执行"}
               </button>
             )}
+            {canApplyPatch && (
+              <button
+                type="button"
+                onClick={onApplyPatch}
+                disabled={patchApplyLoading}
+                className="rounded-md border border-primary-500/20 bg-primary-500/10 px-3 py-1.5 text-xs text-primary-200 transition-colors hover:border-primary-400/40 hover:bg-primary-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {patchApplyLoading ? "应用中..." : "应用补丁"}
+              </button>
+            )}
             {executedRun && (
               <span
                 className={`rounded-md border px-3 py-1.5 text-xs ${
@@ -183,6 +207,11 @@ function ApprovalItem({
                 }`}
               >
                 {runStatusLabel(executedRun)}
+              </span>
+            )}
+            {patchApplied && (
+              <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200">
+                已应用
               </span>
             )}
           </div>
@@ -242,6 +271,15 @@ function ApprovalItem({
             ` · exit ${executedRun.exitCode}`}
         </div>
       )}
+
+      {patchApplied && (
+        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300">
+          补丁应用：
+          {patchApplyResult?.files.length ?? patchProposal?.files.length ?? patchPayload?.files.length ?? 0}
+          {" 文件 · "}
+          {formatTime(patchApplyResult?.appliedAt ?? patchProposal?.appliedAt ?? approval.updatedAt)}
+        </div>
+      )}
     </article>
   );
 }
@@ -252,15 +290,21 @@ export default function ApprovalPanel() {
   const approvalsError = useAgentStore((s) => s.approvalsError);
   const approvalDecisionLoadingId = useAgentStore((s) => s.approvalDecisionLoadingId);
   const approvalExecutionLoadingId = useAgentStore((s) => s.approvalExecutionLoadingId);
+  const patchApplyLoadingId = useAgentStore((s) => s.patchApplyLoadingId);
+  const lastPatchApplyResult = useAgentStore((s) => s.lastPatchApplyResult);
   const commandRuns = useAgentStore((s) => s.commandRuns);
+  const patchProposals = useAgentStore((s) => s.patchProposals);
   const fetchApprovals = useAgentStore((s) => s.fetchApprovals);
+  const fetchPatchProposals = useAgentStore((s) => s.fetchPatchProposals);
   const decideApproval = useAgentStore((s) => s.decideApproval);
   const runApprovedCommand = useAgentStore((s) => s.runApprovedCommand);
+  const applyApprovedPatch = useAgentStore((s) => s.applyApprovedPatch);
   const [filter, setFilter] = useState<ApprovalStatus | undefined>("pending");
 
   useEffect(() => {
     fetchApprovals(filter);
-  }, [fetchApprovals, filter]);
+    fetchPatchProposals(20);
+  }, [fetchApprovals, fetchPatchProposals, filter]);
 
   const pendingCount = useMemo(
     () => approvals.filter((approval) => approval.status === "pending").length,
@@ -319,18 +363,36 @@ export default function ApprovalPanel() {
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
         {approvals.length > 0 ? (
           <div className="space-y-3">
-            {approvals.map((approval) => (
-              <ApprovalItem
-                key={approval.id}
-                approval={approval}
-                loading={approvalDecisionLoadingId === approval.id}
-                executionLoading={approvalExecutionLoadingId === approval.id}
-                executedRun={commandRuns.find((run) => run.approvalId === approval.id)}
-                onApprove={() => decideApproval(approval.id, true)}
-                onReject={() => decideApproval(approval.id, false)}
-                onExecute={() => runApprovedCommand(approval.id)}
-              />
-            ))}
+            {approvals.map((approval) => {
+              const patchPayload =
+                approval.actionType === "workspace.applyPatch"
+                  ? patchApprovalPayload(approval.actionPayload)
+                  : null;
+              const patchProposal = patchPayload
+                ? patchProposals.find((proposal) => proposal.id === patchPayload.patchId)
+                : undefined;
+              const patchApplyResult =
+                lastPatchApplyResult?.patchId === patchPayload?.patchId
+                  ? lastPatchApplyResult
+                  : null;
+
+              return (
+                <ApprovalItem
+                  key={approval.id}
+                  approval={approval}
+                  loading={approvalDecisionLoadingId === approval.id}
+                  executionLoading={approvalExecutionLoadingId === approval.id}
+                  patchApplyLoading={patchApplyLoadingId === approval.id}
+                  executedRun={commandRuns.find((run) => run.approvalId === approval.id)}
+                  patchProposal={patchProposal}
+                  patchApplyResult={patchApplyResult}
+                  onApprove={() => decideApproval(approval.id, true)}
+                  onReject={() => decideApproval(approval.id, false)}
+                  onExecute={() => runApprovedCommand(approval.id)}
+                  onApplyPatch={() => applyApprovedPatch(approval.id)}
+                />
+              );
+            })}
           </div>
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-zinc-500">
