@@ -7,6 +7,7 @@ import type {
   AgentStatus,
   Message,
   ChatMessage,
+  ChatSession,
   AppSettings,
   LlmRequestSettings,
   PageRoute,
@@ -45,6 +46,140 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const DEFAULT_SESSION_ID = "default";
+const CHAT_SESSIONS_STORAGE_KEY = "chat-sessions";
+const CURRENT_SESSION_STORAGE_KEY = "chat-current-session";
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function defaultChatSession(): ChatSession {
+  const now = nowIso();
+  return {
+    id: DEFAULT_SESSION_ID,
+    title: "默认会话",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function isChatSession(value: unknown): value is ChatSession {
+  if (!value || typeof value !== "object") return false;
+  const session = value as Partial<ChatSession>;
+  return (
+    typeof session.id === "string" &&
+    session.id.trim().length > 0 &&
+    typeof session.title === "string" &&
+    session.title.trim().length > 0 &&
+    typeof session.createdAt === "string" &&
+    typeof session.updatedAt === "string"
+  );
+}
+
+function normalizeSessions(sessions: ChatSession[]): ChatSession[] {
+  const byId = new Map<string, ChatSession>();
+  for (const session of sessions) {
+    byId.set(session.id, {
+      ...session,
+      title: session.title.trim() || "未命名会话",
+    });
+  }
+  if (!byId.has(DEFAULT_SESSION_ID)) {
+    const fallback = defaultChatSession();
+    if (sessions.length > 0) {
+      fallback.createdAt = "1970-01-01T00:00:00.000Z";
+      fallback.updatedAt = "1970-01-01T00:00:00.000Z";
+    }
+    byId.set(DEFAULT_SESSION_ID, fallback);
+  }
+  return [...byId.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function loadChatSessions(): ChatSession[] {
+  try {
+    const raw = localStorage.getItem(CHAT_SESSIONS_STORAGE_KEY);
+    if (!raw) return normalizeSessions([defaultChatSession()]);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return normalizeSessions([defaultChatSession()]);
+    const sessions = parsed.filter(isChatSession);
+    return normalizeSessions(sessions);
+  } catch {
+    return normalizeSessions([defaultChatSession()]);
+  }
+}
+
+function persistChatSessions(sessions: ChatSession[]) {
+  try {
+    localStorage.setItem(CHAT_SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
+  } catch {
+    // localStorage 不可用时仅保留内存状态。
+  }
+}
+
+function loadCurrentSessionId(sessions: ChatSession[]): string {
+  try {
+    const stored = localStorage.getItem(CURRENT_SESSION_STORAGE_KEY);
+    if (stored && sessions.some((session) => session.id === stored)) {
+      return stored;
+    }
+  } catch {
+    // 使用默认会话。
+  }
+  return sessions[0]?.id ?? DEFAULT_SESSION_ID;
+}
+
+function persistCurrentSessionId(sessionId: string) {
+  try {
+    localStorage.setItem(CURRENT_SESSION_STORAGE_KEY, sessionId);
+  } catch {
+    // localStorage 不可用时仅保留内存状态。
+  }
+}
+
+function summarizeSessionTitle(content: string): string {
+  const normalized = content.split(/\s+/).filter(Boolean).join(" ");
+  if (!normalized) return "新会话";
+  const chars = [...normalized];
+  return chars.length > 18 ? `${chars.slice(0, 18).join("")}...` : normalized;
+}
+
+function createSession(title = "新会话"): ChatSession {
+  const now = nowIso();
+  return {
+    id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function touchChatSession(
+  sessions: ChatSession[],
+  sessionId: string,
+  titleSeed?: string
+): ChatSession[] {
+  const now = nowIso();
+  let found = false;
+  const updated = sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+    found = true;
+    const shouldRename = session.title === "新会话" && titleSeed;
+    return {
+      ...session,
+      title: shouldRename ? summarizeSessionTitle(titleSeed) : session.title,
+      updatedAt: now,
+    };
+  });
+  if (!found) {
+    updated.push({
+      id: sessionId,
+      title: titleSeed ? summarizeSessionTitle(titleSeed) : "新会话",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  return normalizeSessions(updated);
+}
 
 /** 从 localStorage 加载设置 */
 function loadSettings(): AppSettings {
@@ -72,6 +207,9 @@ function buildLlmRequestSettings(settings: AppSettings): LlmRequestSettings {
   };
 }
 
+const initialChatSessions = loadChatSessions();
+const initialCurrentSessionId = loadCurrentSessionId(initialChatSessions);
+
 interface AgentState {
   // ===== 页面路由 =====
   currentPage: PageRoute;
@@ -88,6 +226,8 @@ interface AgentState {
 
   // ===== 聊天消息 =====
   messages: ChatMessage[];
+  chatSessions: ChatSession[];
+  currentSessionId: string;
   sending: boolean;
   sendError: string | null;
   /** 当前选择的 Agent ID，空字符串表示自动分配 */
@@ -106,6 +246,10 @@ interface AgentState {
   clearMessages: () => void;
   /** 加载历史消息 */
   loadHistory: (sessionId: string) => Promise<void>;
+  /** 切换聊天会话 */
+  setCurrentSession: (sessionId: string) => Promise<void>;
+  /** 创建并切换到新会话 */
+  createChatSession: (title?: string) => Promise<void>;
 
   // ===== 任务管理 =====
   tasks: Task[];
@@ -270,6 +414,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       senderName: "系统",
     },
   ],
+  chatSessions: initialChatSessions,
+  currentSessionId: initialCurrentSessionId,
   sending: false,
   sendError: null,
   selectedAgentId: "",
@@ -277,6 +423,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   lastFailedSend: null,
 
   sendMessage: async (content, agentId) => {
+    const sessionId = get().currentSessionId || DEFAULT_SESSION_ID;
     const userMsg: ChatMessage = {
       id: uid(),
       role: "user",
@@ -286,16 +433,20 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
     set((s) => ({
       messages: [...s.messages, userMsg],
+      chatSessions: touchChatSession(s.chatSessions, sessionId, content),
+      currentSessionId: sessionId,
       sending: true,
       sendError: null,
     }));
+    persistCurrentSessionId(sessionId);
+    persistChatSessions(get().chatSessions);
 
     try {
       const request: SendMessageRequest = {
         content,
         agentId,
         routeMode: agentId ? "direct" : "auto",
-        sessionId: DEFAULT_SESSION_ID,
+        sessionId,
         llmSettings: buildLlmRequestSettings(get().settings),
       };
       const res = await api.sendMessage(request);
@@ -340,7 +491,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   clearSendError: () => set({ sendError: null, lastFailedSend: null }),
 
   clearMessages: () => {
-    api.clearHistory(DEFAULT_SESSION_ID).catch(() => {
+    const sessionId = get().currentSessionId || DEFAULT_SESSION_ID;
+    api.clearHistory(sessionId).catch(() => {
       // 清空本地消息不依赖后端历史清理成功。
     });
     set({
@@ -353,12 +505,59 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadHistory: async (sessionId) => {
     try {
       const history = await api.getHistory(sessionId);
-      if (history.length > 0) {
-        set({ messages: history });
+      if (history.length > 0 || sessionId !== DEFAULT_SESSION_ID) {
+        set((s) => {
+          const chatSessions = touchChatSession(s.chatSessions, sessionId);
+          persistChatSessions(chatSessions);
+          persistCurrentSessionId(sessionId);
+          return {
+            messages: history,
+            chatSessions,
+            currentSessionId: sessionId,
+          };
+        });
       }
     } catch {
       // 静默失败，保留当前消息
     }
+  },
+
+  setCurrentSession: async (sessionId) => {
+    const target = sessionId.trim() || DEFAULT_SESSION_ID;
+    set((s) => {
+      const chatSessions = touchChatSession(s.chatSessions, target);
+      persistChatSessions(chatSessions);
+      persistCurrentSessionId(target);
+      return {
+        chatSessions,
+        currentSessionId: target,
+        messages: [],
+        sendError: null,
+        lastFailedSend: null,
+      };
+    });
+    try {
+      const history = await api.getHistory(target);
+      set({ messages: history });
+    } catch {
+      // 切换会话失败时保留空会话视图，避免显示上一会话内容。
+    }
+  },
+
+  createChatSession: async (title) => {
+    const session = createSession(title);
+    set((s) => {
+      const chatSessions = normalizeSessions([session, ...s.chatSessions]);
+      persistChatSessions(chatSessions);
+      persistCurrentSessionId(session.id);
+      return {
+        chatSessions,
+        currentSessionId: session.id,
+        messages: [],
+        sendError: null,
+        lastFailedSend: null,
+      };
+    });
   },
 
   // ===== 任务管理 =====

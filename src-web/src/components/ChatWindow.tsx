@@ -125,6 +125,14 @@ export default function ChatWindow() {
   const sendMessage = useAgentStore((s) => s.sendMessage);
   const clearMessages = useAgentStore((s) => s.clearMessages);
   const loadHistory = useAgentStore((s) => s.loadHistory ?? (() => Promise.resolve()));
+  const chatSessions = useAgentStore((s) => s.chatSessions ?? []);
+  const currentSessionId = useAgentStore((s) => s.currentSessionId ?? "default");
+  const setCurrentSession = useAgentStore(
+    (s) => s.setCurrentSession ?? (() => Promise.resolve())
+  );
+  const createChatSession = useAgentStore(
+    (s) => s.createChatSession ?? (() => Promise.resolve())
+  );
   const agents = useAgentStore((s) => s.agents ?? []);
   const fetchAgents = useAgentStore((s) => s.fetchAgents ?? (() => Promise.resolve()));
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId ?? "");
@@ -141,8 +149,8 @@ export default function ChatWindow() {
   const selectedAgent = selectedAgentId ? findAgentById(agents, selectedAgentId) : undefined;
 
   useEffect(() => {
-    loadHistory("default");
-  }, [loadHistory]);
+    loadHistory(currentSessionId);
+  }, [currentSessionId, loadHistory]);
 
   // 首次进入聊天页时获取团队成员，保证选择器有数据。
   useEffect(() => {
@@ -194,19 +202,57 @@ export default function ChatWindow() {
   const sendingLabel = selectedAgent
     ? `${formatAgentName(selectedAgent)} 正在处理你的任务...`
     : "协调员/总控正在分析需求，并选择合适成员...";
+  const visibleSessions =
+    chatSessions.length > 0
+      ? chatSessions
+      : [
+          {
+            id: "default",
+            title: "默认会话",
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(0).toISOString(),
+          },
+        ];
 
   return (
     <div className="flex flex-col h-full">
       {/* 顶部工具栏 */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800/50">
         <h2 className="text-lg font-semibold text-zinc-200">💬 工作台</h2>
-        <button
-          onClick={clearMessages}
-          className="btn-ghost text-xs px-3 py-1.5"
-          title="清空对话"
-        >
-          🗑️ 清空
-        </button>
+        <div className="flex min-w-0 items-center gap-2">
+          <select
+            aria-label="选择会话"
+            value={currentSessionId}
+            onChange={(event) => {
+              void setCurrentSession(event.target.value);
+            }}
+            className="max-w-48 truncate rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-primary-500/60"
+          >
+            {visibleSessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {session.title}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => {
+              void createChatSession();
+            }}
+            className="btn-ghost h-8 w-8 px-0 text-sm"
+            title="新建会话"
+            type="button"
+          >
+            +
+          </button>
+          <button
+            onClick={clearMessages}
+            className="btn-ghost text-xs px-3 py-1.5"
+            title="清空对话"
+            type="button"
+          >
+            清空
+          </button>
+        </div>
       </div>
 
       {/* 消息列表 */}

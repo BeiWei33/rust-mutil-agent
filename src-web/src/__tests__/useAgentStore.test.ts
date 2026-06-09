@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { useAgentStore } from "@/store/useAgentStore";
-import type { AppSettings, ChatMessage } from "@/types";
+import type { AppSettings, ChatMessage, ChatSession } from "@/types";
 
 // 模拟 tauri API 模块，避免依赖真实的 Tauri 环境
 vi.mock("@/lib/tauri", () => ({
@@ -110,6 +110,15 @@ describe("useAgentStore", () => {
       healthy: null,
       healthVersion: "",
       currentPage: "chat",
+      chatSessions: [
+        {
+          id: "default",
+          title: "默认会话",
+          createdAt: "2026-06-09T00:00:00Z",
+          updatedAt: "2026-06-09T00:00:00Z",
+        },
+      ],
+      currentSessionId: "default",
       commandRunLoadingKey: null,
       commandRunError: null,
       commandApprovalLoading: false,
@@ -227,6 +236,38 @@ describe("useAgentStore", () => {
     );
   });
 
+  /// 测试 — sendMessage 使用当前会话
+  /// 验证：切换到新会话后发送消息会携带当前 sessionId，并用首条消息更新会话标题
+  it("sendMessage 应使用当前会话并更新新会话标题", async () => {
+    const session: ChatSession = {
+      id: "session-2",
+      title: "新会话",
+      createdAt: "2026-06-09T10:00:00Z",
+      updatedAt: "2026-06-09T10:00:00Z",
+    };
+    useAgentStore.setState({
+      chatSessions: [session],
+      currentSessionId: "session-2",
+    });
+    mockApi.sendMessage.mockResolvedValue({
+      message: makeMsg({ id: "resp-session-2", content: "收到" }),
+      handledBy: "agent-1",
+    });
+
+    await getState().sendMessage("实现多会话管理");
+
+    expect(mockApi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "实现多会话管理",
+        sessionId: "session-2",
+      })
+    );
+    expect(getState().chatSessions[0]).toMatchObject({
+      id: "session-2",
+      title: "实现多会话管理",
+    });
+  });
+
   /// 测试 — sendMessage 失败时添加错误消息
   /// 验证：API 调用失败时在消息列表中插入系统错误消息
   it("sendMessage 失败时应添加系统错误消息", async () => {
@@ -279,6 +320,23 @@ describe("useAgentStore", () => {
     expect(state.messages).toEqual([]);
     expect(state.sendError).toBeNull();
     expect(mockApi.clearHistory).toHaveBeenCalledWith("default");
+  });
+
+  /// 测试 — clearMessages 使用当前会话
+  /// 验证：清空操作只清理当前 sessionId 的后端历史
+  it("clearMessages 应清理当前会话历史", () => {
+    mockApi.clearHistory.mockResolvedValue(undefined);
+    useAgentStore.setState({
+      currentSessionId: "session-2",
+      messages: [makeMsg()],
+      sendError: "之前的错误",
+    });
+
+    getState().clearMessages();
+
+    expect(getState().messages).toEqual([]);
+    expect(getState().sendError).toBeNull();
+    expect(mockApi.clearHistory).toHaveBeenCalledWith("session-2");
   });
 
   // ==========================================================
@@ -523,10 +581,39 @@ describe("useAgentStore", () => {
     useAgentStore.setState({ messages: currentMsgs });
 
     const { loadHistory } = getState();
-    await loadHistory("empty-session");
+    await loadHistory("default");
 
     // 消息不应改变
     expect(getState().messages).toEqual(currentMsgs);
+  });
+
+  /// 测试 — 非默认空会话加载为空列表
+  /// 验证：切到非 default 会话时，空历史不会继续展示上一会话消息
+  it("loadHistory 对非默认空会话应清空当前消息", async () => {
+    mockApi.getHistory.mockResolvedValue([]);
+    useAgentStore.setState({
+      messages: [makeMsg({ id: "previous", content: "上一会话" })],
+      chatSessions: [
+        {
+          id: "default",
+          title: "默认会话",
+          createdAt: "2026-06-09T00:00:00Z",
+          updatedAt: "2026-06-09T00:00:00Z",
+        },
+        {
+          id: "session-empty",
+          title: "空会话",
+          createdAt: "2026-06-09T01:00:00Z",
+          updatedAt: "2026-06-09T01:00:00Z",
+        },
+      ],
+      currentSessionId: "session-empty",
+    });
+
+    await getState().loadHistory("session-empty");
+
+    expect(getState().messages).toEqual([]);
+    expect(getState().currentSessionId).toBe("session-empty");
   });
 
   /// 测试 — loadHistory 失败时静默处理
@@ -542,6 +629,64 @@ describe("useAgentStore", () => {
 
     // 消息不应改变
     expect(getState().messages).toEqual(currentMsgs);
+  });
+
+  /// 测试 — setCurrentSession 切换并加载历史
+  /// 验证：切换会话后当前消息被目标会话历史替换
+  it("setCurrentSession 应切换当前会话并加载历史", async () => {
+    const historyMessages: ChatMessage[] = [
+      makeMsg({ id: "session-2-message", content: "第二会话历史" }),
+    ];
+    mockApi.getHistory.mockResolvedValue(historyMessages);
+    useAgentStore.setState({
+      messages: [makeMsg({ id: "default-message", content: "默认会话消息" })],
+      chatSessions: [
+        {
+          id: "default",
+          title: "默认会话",
+          createdAt: "2026-06-09T00:00:00Z",
+          updatedAt: "2026-06-09T00:00:00Z",
+        },
+        {
+          id: "session-2",
+          title: "第二会话",
+          createdAt: "2026-06-09T01:00:00Z",
+          updatedAt: "2026-06-09T01:00:00Z",
+        },
+      ],
+      currentSessionId: "default",
+    });
+
+    await getState().setCurrentSession("session-2");
+
+    expect(mockApi.getHistory).toHaveBeenCalledWith("session-2");
+    expect(getState().currentSessionId).toBe("session-2");
+    expect(getState().messages).toEqual(historyMessages);
+  });
+
+  /// 测试 — createChatSession 新建空会话
+  /// 验证：新建后切换到新 sessionId，并清空当前消息
+  it("createChatSession 应创建并切换到新会话", async () => {
+    useAgentStore.setState({
+      messages: [makeMsg({ id: "before-create", content: "旧消息" })],
+      chatSessions: [
+        {
+          id: "default",
+          title: "默认会话",
+          createdAt: "2026-06-09T00:00:00Z",
+          updatedAt: "2026-06-09T00:00:00Z",
+        },
+      ],
+      currentSessionId: "default",
+      sendError: "旧错误",
+    });
+
+    await getState().createChatSession();
+
+    expect(getState().currentSessionId).toMatch(/^session-/);
+    expect(getState().messages).toEqual([]);
+    expect(getState().sendError).toBeNull();
+    expect(getState().chatSessions.some((session) => session.title === "新会话")).toBe(true);
   });
 
   // ==========================================================

@@ -66,6 +66,18 @@ export interface Message {
 /** 聊天消息（Zustand store 内部使用） */
 export type ChatMessage = Message;
 
+/** 前端聊天会话元数据 */
+export interface ChatSession {
+  /** 会话 ID，用于后端历史记录分区 */
+  id: string;
+  /** 会话显示名 */
+  title: string;
+  /** 创建时间戳 */
+  createdAt: string;
+  /** 最近更新时间戳 */
+  updatedAt: string;
+}
+
 /** 请求级 LLM 设置 */
 export interface LlmRequestSettings {
   /** 当前模型名称 */

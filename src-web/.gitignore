@@ -35,3 +35,4 @@ src-tauri/target/
 # 临时文件
 *.tmp
 .cache/
+.vite-cache/

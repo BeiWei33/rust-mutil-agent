@@ -21,6 +21,8 @@ const mockUseAgentStore = useAgentStore as unknown as ReturnType<typeof vi.fn>;
 let storeState: Record<string, any>;
 let mockSendMessage: ReturnType<typeof vi.fn>;
 let mockClearMessages: ReturnType<typeof vi.fn>;
+let mockSetCurrentSession: ReturnType<typeof vi.fn>;
+let mockCreateChatSession: ReturnType<typeof vi.fn>;
 
 /**
  * 设置模拟的 store 状态
@@ -28,9 +30,28 @@ let mockClearMessages: ReturnType<typeof vi.fn>;
 function setupMockStore(overrides: Record<string, any> = {}) {
   mockSendMessage = vi.fn().mockResolvedValue(undefined);
   mockClearMessages = vi.fn();
+  mockSetCurrentSession = vi.fn().mockResolvedValue(undefined);
+  mockCreateChatSession = vi.fn().mockResolvedValue(undefined);
 
   storeState = {
     messages: [],
+    chatSessions: [
+      {
+        id: "default",
+        title: "默认会话",
+        createdAt: "2026-06-09T00:00:00Z",
+        updatedAt: "2026-06-09T00:00:00Z",
+      },
+      {
+        id: "session-2",
+        title: "第二会话",
+        createdAt: "2026-06-09T01:00:00Z",
+        updatedAt: "2026-06-09T01:00:00Z",
+      },
+    ],
+    currentSessionId: "default",
+    setCurrentSession: mockSetCurrentSession,
+    createChatSession: mockCreateChatSession,
     sending: false,
     sendMessage: mockSendMessage,
     clearMessages: mockClearMessages,
@@ -65,6 +86,7 @@ describe("ChatWindow", () => {
     expect(screen.getByText("告诉我你想完成什么")).toBeDefined();
     // 清空按钮
     expect(screen.getByTitle("清空对话")).toBeDefined();
+    expect(screen.getByLabelText("选择会话")).toBeDefined();
   });
 
   /// 测试 — 渲染输入框和发送按钮
@@ -258,6 +280,30 @@ describe("ChatWindow", () => {
     await user.click(clearButton);
 
     expect(mockClearMessages).toHaveBeenCalled();
+  });
+
+  /// 测试 — 切换会话
+  /// 验证：会话选择器变更时调用 store 的 setCurrentSession
+  it("切换会话时应调用 setCurrentSession", async () => {
+    const user = userEvent.setup();
+    setupMockStore();
+    render(<ChatWindow />);
+
+    await user.selectOptions(screen.getByLabelText("选择会话"), "session-2");
+
+    expect(mockSetCurrentSession).toHaveBeenCalledWith("session-2");
+  });
+
+  /// 测试 — 新建会话
+  /// 验证：点击新建会话按钮调用 createChatSession
+  it("点击新建会话按钮应调用 createChatSession", async () => {
+    const user = userEvent.setup();
+    setupMockStore();
+    render(<ChatWindow />);
+
+    await user.click(screen.getByTitle("新建会话"));
+
+    expect(mockCreateChatSession).toHaveBeenCalled();
   });
 
   // ============================================================

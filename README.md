@@ -12,7 +12,7 @@
 | React/Vite 前端 | 已实现 | 包含对话、任务看板、项目面板、记忆面板、审批面板、Agent 面板和设置页。 |
 | Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
 | 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
-| 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
+| 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端支持本地会话列表、会话切换和新建会话。 |
 | 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已提供结构化知识存储/搜索 IPC；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会写入 `ProjectFact`；Planner 请求前会检索相关 ProjectFact / FailureCase 并注入上下文；初始化失败时回退到短期记忆或内存知识库。 |
 | 项目理解 | 已实现 | 扫描 Rust/Tauri/React/Vite 项目，生成技术栈、Manifest、关键文件和推荐命令。 |
 | Workspace 只读能力 | 已实现 | 支持项目内文件列表、文本读取和源码搜索，并限制路径逃逸和敏感文件读取。 |
@@ -26,7 +26,7 @@
 
 - 多 Agent 协作：Planner 负责任务拆解，Executor 负责执行确认，Tool 负责工具调用，Memory 负责记忆，Echo 用于链路调试。
 - 可追踪任务：每次消息或任务创建都会生成任务 ID，可查看步骤状态、事件时间线、输出、步骤超时、取消和重试。
-- 持久化：任务、任务事件、聊天历史、MemoryAgent 长期记忆、结构化知识条目、命令运行记录、ToolAgent 调用审计、审批请求和补丁提案都使用 SQLite 本地保存。
+- 持久化：任务、任务事件、聊天历史、MemoryAgent 长期记忆、结构化知识条目、命令运行记录、ToolAgent 调用审计、审批请求和补丁提案都使用 SQLite 本地保存；聊天页会在前端保存会话列表，后端按 `sessionId` 读取和清理历史。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令、最近运行记录和补丁提案草稿。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
 - 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，通用工具可创建 `tool.*` 审批请求；命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，写入 `FailureCase` 长期知识，并可通过重试入口重新调度。
@@ -322,7 +322,6 @@ cp .env.example .env
 4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；补丁验证失败会自动沉淀 `FailureCase`，验证通过或跳过会自动沉淀补丁级 `ProjectFact`，Planner 请求前会注入相关长期经验；后续还需要补齐完整任务级 ProjectFact 生成和更精细的经验排序/引用策略。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截和工具调用审计。
 6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
-7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
 
 ## 路线图
 

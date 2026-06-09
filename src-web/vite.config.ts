@@ -6,6 +6,9 @@ import path from "path";
 export default defineConfig({
   plugins: [react()],
 
+  // 避免受限环境下写入 node_modules/.vite 失败
+  cacheDir: ".vite-cache",
+
   // Vite 环境变量前缀（Tauri 建议使用 TAURI_ 以外的前缀）
   envPrefix: ["VITE_", "TAURI_ENV_"],
 

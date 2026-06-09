@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、MemoryAgent SQLite 长期记忆、结构化 KnowledgeBase 存储/检索、Planner 长期经验注入、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact、验证失败任务/步骤状态回写、补丁验证失败 `FailureCase` 和验证通过/跳过补丁 `ProjectFact` 经验沉淀已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、聊天多会话界面、工具注册表、短期记忆、MemoryAgent SQLite 长期记忆、结构化 KnowledgeBase 存储/检索、Planner 长期经验注入、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact、验证失败任务/步骤状态回写、补丁验证失败 `FailureCase` 和验证通过/跳过补丁 `ProjectFact` 经验沉淀已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -598,7 +598,7 @@ npm test
 2. Planner 已有 JSON plan schema、解析校验和失败降级策略；前端模型/API 配置可作为请求级临时 LLMClient 使用，API Key 不写入普通上下文或持久化数据。
 3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、单步骤跳过、步骤超时、失败/取消后的任务重试、任务/事件持久化，以及命令、补丁和通用 `tool.*` 审批对任务步骤的等待、恢复和失败回写；legacy `file_read` 和 `web_search` 已能自动进入审批，其他高风险工具仍待接入。
 4. Planner 分析步骤仍由运行时内部模拟完成，避免把计划内 Planner 子步骤再次送入 Planner 触发嵌套规划。
-5. 聊天历史已按 `sessionId` 持久化；当前前端默认使用 `default` 单会话，尚未实现多会话管理界面。
+5. 聊天历史已按 `sessionId` 持久化；当前前端提供本地会话列表、会话切换和新建会话，发送、读取与清理都会使用当前会话 ID。
 6. MemoryAgent 已接入启动流程并默认使用 SQLite 长期记忆，KnowledgeBase 已提供结构化知识条目写入/检索 IPC；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会自动写入补丁级 `ProjectFact`，Planner 请求前会检索并注入相关长期经验；后续仍需统一完整任务级 ProjectFact 生成和更精细的经验排序/引用策略。
 7. `web_search` 是模拟结果。
 8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截，ToolAgent 调用审计已接入项目面板。
