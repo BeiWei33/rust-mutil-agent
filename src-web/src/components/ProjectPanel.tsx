@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAgentStore } from "@/store/useAgentStore";
-import type { ProjectCommandRunResponse, WorkspaceEntry } from "@/types";
+import type { PatchProposal, ProjectCommandRunResponse, WorkspaceEntry } from "@/types";
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -47,6 +47,13 @@ function formatRunTime(value: string): string {
   return date.toLocaleString();
 }
 
+function patchStatusLabel(proposal: PatchProposal): string {
+  if (proposal.status === "approved") return "已通过";
+  if (proposal.status === "rejected") return "已拒绝";
+  if (proposal.status === "pendingApproval") return "待审批";
+  return "草稿";
+}
+
 export default function ProjectPanel() {
   const snapshot = useAgentStore((s) => s.projectSnapshot);
   const files = useAgentStore((s) => s.projectFiles);
@@ -64,22 +71,35 @@ export default function ProjectPanel() {
   const lastCommandApproval = useAgentStore((s) => s.lastCommandApproval);
   const latestCommandRun = useAgentStore((s) => s.latestCommandRun);
   const commandRuns = useAgentStore((s) => s.commandRuns);
+  const patchProposals = useAgentStore((s) => s.patchProposals);
+  const patchProposalLoading = useAgentStore((s) => s.patchProposalLoading);
+  const patchProposalError = useAgentStore((s) => s.patchProposalError);
+  const lastPatchProposal = useAgentStore((s) => s.lastPatchProposal);
   const setCurrentPage = useAgentStore((s) => s.setCurrentPage);
   const fetchProjectOverview = useAgentStore((s) => s.fetchProjectOverview);
   const readProjectFile = useAgentStore((s) => s.readProjectFile);
   const searchProjectText = useAgentStore((s) => s.searchProjectText);
   const runProjectCommand = useAgentStore((s) => s.runProjectCommand);
   const requestProjectCommandApproval = useAgentStore((s) => s.requestProjectCommandApproval);
+  const createPatchProposal = useAgentStore((s) => s.createPatchProposal);
   const clearProjectError = useAgentStore((s) => s.clearProjectError);
 
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
   const [customCommand, setCustomCommand] = useState("");
   const [customWorkingDir, setCustomWorkingDir] = useState("src-tauri");
+  const [patchSummary, setPatchSummary] = useState("");
+  const [patchDraft, setPatchDraft] = useState("");
 
   useEffect(() => {
     fetchProjectOverview();
   }, [fetchProjectOverview]);
+
+  useEffect(() => {
+    if (!selectedFile) return;
+    setPatchSummary(`修改 ${selectedFile.path}`);
+    setPatchDraft(selectedFile.content);
+  }, [selectedFile?.path]);
 
   const visibleFiles = useMemo(() => {
     const text = filter.trim().toLowerCase();
@@ -105,6 +125,20 @@ export default function ProjectPanel() {
     requestProjectCommandApproval({
       command: customCommand,
       workingDir: customWorkingDir,
+    });
+  };
+
+  const handleCreatePatchProposal = () => {
+    if (!selectedFile) return;
+    createPatchProposal({
+      summary: patchSummary.trim() || `修改 ${selectedFile.path}`,
+      files: [
+        {
+          path: selectedFile.path,
+          oldContent: selectedFile.content,
+          newContent: patchDraft,
+        },
+      ],
     });
   };
 
@@ -339,6 +373,41 @@ export default function ProjectPanel() {
                     </div>
                   </div>
                 )}
+                {patchProposals.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h4 className="text-xs font-medium text-zinc-300">最近补丁</h4>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentPage("approvals")}
+                        className="btn-ghost px-2 py-1 text-[11px]"
+                        title="查看审批"
+                      >
+                        审批
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {patchProposals.slice(0, 4).map((proposal) => (
+                        <div
+                          key={proposal.id}
+                          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate text-[11px] text-zinc-200">
+                              {proposal.summary}
+                            </span>
+                            <span className="shrink-0 text-[11px] text-amber-300">
+                              {patchStatusLabel(proposal)}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[11px] text-zinc-500">
+                            {proposal.files.length} 文件 · {formatRunTime(proposal.updatedAt)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </section>
 
               <section>
@@ -467,13 +536,56 @@ export default function ProjectPanel() {
                 {fileLoading ? (
                   <div className="py-16 text-center text-sm text-zinc-500">读取中...</div>
                 ) : selectedFile ? (
-                  <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
-                    <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
-                      {selectedFile.path}
+                  <div className="space-y-4">
+                    <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
+                      <div className="border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                        {selectedFile.path}
+                      </div>
+                      <pre className="max-h-[42vh] overflow-auto p-4 text-xs leading-relaxed text-zinc-300">
+                        <code>{selectedFile.content}</code>
+                      </pre>
                     </div>
-                    <pre className="max-h-[70vh] overflow-auto p-4 text-xs leading-relaxed text-zinc-300">
-                      <code>{selectedFile.content}</code>
-                    </pre>
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="text-sm font-medium text-zinc-300">补丁提案</h4>
+                        <button
+                          type="button"
+                          onClick={handleCreatePatchProposal}
+                          disabled={
+                            patchProposalLoading ||
+                            !patchSummary.trim() ||
+                            patchDraft === selectedFile.content
+                          }
+                          className="btn-primary px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {patchProposalLoading ? "提交中..." : "提交审批"}
+                        </button>
+                      </div>
+                      <input
+                        value={patchSummary}
+                        onChange={(event) => setPatchSummary(event.target.value)}
+                        className="mt-3 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-primary-500/50"
+                      />
+                      <textarea
+                        value={patchDraft}
+                        onChange={(event) => setPatchDraft(event.target.value)}
+                        spellCheck={false}
+                        className="mt-3 h-64 w-full resize-y rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-300 outline-none focus:border-primary-500/50"
+                      />
+                      {patchProposalError && (
+                        <div className="mt-3 text-xs text-red-300">{patchProposalError}</div>
+                      )}
+                      {lastPatchProposal && (
+                        <div className="mt-3 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+                          已创建：{lastPatchProposal.summary}
+                        </div>
+                      )}
+                      {lastPatchProposal?.unifiedDiff && (
+                        <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-300">
+                          {lastPatchProposal.unifiedDiff}
+                        </pre>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div className="py-16 text-center text-sm text-zinc-500">

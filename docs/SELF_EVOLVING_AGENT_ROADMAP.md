@@ -253,6 +253,8 @@ src-tauri/src/workspace/diff.rs
 | `workspace.get_diff` | 获取当前 diff |
 | `workspace.revert_patch` | 回滚指定 patch |
 
+当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化和 `workspace.applyPatch` 审批请求创建；前端项目页和审批页已能创建提案、展示 diff 并同步审批状态。真正 `apply_patch`、回滚和 artifact 记录仍未实现。
+
 安全要求：
 
 - 所有路径必须限制在 workspace root 内。
@@ -509,6 +511,8 @@ src-web/src/types/index.ts
 | `get_task_events` | 获取任务事件流 |
 | `get_execution_log` | 获取执行日志 |
 | `get_diff` | 获取 diff |
+| `create_patch_proposal` | 创建补丁提案并生成审批 |
+| `list_patch_proposals` | 列出补丁提案 |
 | `apply_task_patch` | 应用任务 patch |
 | `get_memory_items` | 查询记忆 |
 | `accept_evolution_note` | 接受自进化建议 |
@@ -588,11 +592,13 @@ task://completed
 
 目标：CoderAgent 能提出代码修改，但先不自动应用高风险改动。
 
+当前状态：补丁提案存储、单文件 diff 预览和审批请求链路已完成第一版；尚未由 CoderAgent 自动生成 proposal，也尚未应用 patch。
+
 任务：
 
-1. 新增 patch/diff 模块。
+1. 新增 patch/diff 模块。（已部分完成：proposal、diff 预览、审批创建）
 2. CoderAgent 输出 PatchProposal。
-3. 前端新增 DiffViewer。
+3. 前端新增 DiffViewer。（已部分完成：项目页/审批页内置 diff 预览）
 4. 用户可审批应用 patch。
 5. patch 应用后生成 artifact。
 
@@ -764,4 +770,3 @@ src-web/src/App.tsx
 8. 能根据失败反馈返工。
 9. 能保存任务全过程。
 10. 能总结经验并在后续任务中复用。
-

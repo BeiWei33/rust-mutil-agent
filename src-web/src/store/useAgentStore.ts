@@ -21,6 +21,8 @@ import type {
   ProjectCommandRunResponse,
   ApprovalRequest,
   ApprovalStatus,
+  CreatePatchProposalRequest,
+  PatchProposal,
 } from "@/types";
 import { api } from "@/lib/tauri";
 import { getErrorDetail, getErrorMessage } from "@/lib/errors";
@@ -158,10 +160,16 @@ interface AgentState {
   lastCommandApproval: ApprovalRequest | null;
   latestCommandRun: ProjectCommandRunResponse | null;
   commandRuns: ProjectCommandRunResponse[];
+  patchProposals: PatchProposal[];
+  patchProposalLoading: boolean;
+  patchProposalError: string | null;
+  lastPatchProposal: PatchProposal | null;
   /** 加载项目快照和文件列表 */
   fetchProjectOverview: () => Promise<void>;
   /** 加载最近命令运行记录 */
   fetchCommandRuns: (limit?: number) => Promise<void>;
+  /** 加载最近补丁提案 */
+  fetchPatchProposals: (limit?: number) => Promise<void>;
   /** 读取项目文件 */
   readProjectFile: (path: string) => Promise<void>;
   /** 搜索项目文本 */
@@ -170,6 +178,8 @@ interface AgentState {
   runProjectCommand: (request: ProjectCommandRunRequest) => Promise<void>;
   /** 为非 allowlist 项目命令创建审批请求 */
   requestProjectCommandApproval: (request: ProjectCommandRunRequest) => Promise<void>;
+  /** 创建补丁提案并生成审批请求 */
+  createPatchProposal: (request: CreatePatchProposalRequest) => Promise<void>;
   /** 清除项目错误 */
   clearProjectError: () => void;
 
@@ -525,6 +535,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           approvalsError: null,
         };
       });
+      if (updated?.actionType === "workspace.applyPatch") {
+        get().fetchPatchProposals(10).catch(() => {
+          // 审批状态已更新，补丁列表刷新失败不阻断主流程。
+        });
+      }
     } catch (err: unknown) {
       set({
         approvalsError: getErrorMessage(err, "处理审批请求失败"),
@@ -569,6 +584,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   lastCommandApproval: null,
   latestCommandRun: null,
   commandRuns: [],
+  patchProposals: [],
+  patchProposalLoading: false,
+  patchProposalError: null,
+  lastPatchProposal: null,
 
   fetchProjectOverview: async () => {
     set({ projectLoading: true, projectError: null });
@@ -585,6 +604,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       get().fetchCommandRuns(10).catch(() => {
         // 命令审计记录加载失败不影响项目概览。
       });
+      get().fetchPatchProposals(10).catch(() => {
+        // 补丁提案加载失败不影响项目概览。
+      });
     } catch (err: unknown) {
       set({
         projectError: getErrorMessage(err, "获取项目概览失败"),
@@ -599,6 +621,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set({ commandRuns: result.runs, commandRunError: null });
     } catch (err: unknown) {
       set({ commandRunError: getErrorMessage(err, "获取命令运行记录失败") });
+    }
+  },
+
+  fetchPatchProposals: async (limit = 10) => {
+    try {
+      const result = await api.listPatchProposals(limit);
+      set({ patchProposals: result.proposals, patchProposalError: null });
+    } catch (err: unknown) {
+      set({ patchProposalError: getErrorMessage(err, "获取补丁提案失败") });
     }
   },
 
@@ -680,8 +711,45 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
+  createPatchProposal: async (request) => {
+    set({
+      patchProposalLoading: true,
+      patchProposalError: null,
+      lastPatchProposal: null,
+    });
+    try {
+      const result = await api.createPatchProposal({
+        ...request,
+        requestedBy: request.requestedBy || "ProjectPanel",
+      });
+      set((s) => ({
+        patchProposals: [
+          result.proposal,
+          ...s.patchProposals.filter((proposal) => proposal.id !== result.proposal.id),
+        ].slice(0, 10),
+        approvals: [
+          result.approval,
+          ...s.approvals.filter((approval) => approval.id !== result.approval.id),
+        ],
+        lastPatchProposal: result.proposal,
+        patchProposalLoading: false,
+        patchProposalError: null,
+      }));
+    } catch (err: unknown) {
+      set({
+        patchProposalError: getErrorMessage(err, "创建补丁提案失败"),
+        patchProposalLoading: false,
+      });
+    }
+  },
+
   clearProjectError: () =>
-    set({ projectError: null, commandRunError: null, commandApprovalError: null }),
+    set({
+      projectError: null,
+      commandRunError: null,
+      commandApprovalError: null,
+      patchProposalError: null,
+    }),
 
   // ===== 健康检查 =====
   healthy: null,

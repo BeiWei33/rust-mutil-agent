@@ -1,6 +1,12 @@
 //! Workspace-safe file listing, reading, and text search.
 
+pub mod patch;
+
 use crate::error::AgentError;
+pub use patch::{
+    build_patch_proposal, CreatePatchProposalRequest, PatchProposal, PatchProposalListResponse,
+    PatchProposalStatus, PatchProposalStore,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};

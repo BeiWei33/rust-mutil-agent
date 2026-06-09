@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计、审批请求基础、非 allowlist 命令审批入口和已审批命令执行已具备；补丁写入、调度器审批等待/恢复和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、补丁提案持久化和 diff 审批预览已具备；补丁应用写入、调度器审批等待/恢复和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -51,7 +51,8 @@ rust-mutil-agent/
 │       ├── memory/
 │       ├── orchestrator/
 │       ├── runtime/
-│       └── tool/
+│       ├── tool/
+│       └── workspace/
 └── src-web/
     ├── package.json
     ├── vite.config.ts
@@ -86,6 +87,7 @@ Rust Tauri Commands
   ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
   ├─ run_project_command / request_project_command_approval / run_approved_project_command
   ├─ list_project_command_runs
+  ├─ create_patch_proposal / list_patch_proposals / get_patch_proposal
   ├─ list_approval_requests / approve_action
   ├─ health_check
   ├─ get_history
@@ -119,7 +121,7 @@ MessageBus
 2. 通过 `dotenvy::dotenv()` 尝试加载 `.env`。
 3. 创建全局 `MessageBus`。
 4. 创建 `Orchestrator`，并调用 `register_builtin_agents()` 注册内置 Agent。
-5. 将 `AppState { bus, orchestrator, chat_store }` 注入 Tauri 状态。
+5. 初始化任务、聊天历史、命令审计、审批请求和补丁提案 SQLite store，并将 `AppState` 注入 Tauri 状态。
 6. 注册 Tauri IPC 命令。
 7. 注册 Tauri 插件：shell、fs、notification、dialog、clipboard-manager、process。
 8. 启动 Tauri 应用。
@@ -298,6 +300,7 @@ Planner LLM 相关环境变量：
 | `CHAT_DB_PATH` | 聊天历史 SQLite 数据库路径，默认 `rust-mutil-agent-chat.sqlite3` |
 | `COMMAND_DB_PATH` | 命令运行审计 SQLite 数据库路径，默认 `rust-mutil-agent-commands.sqlite3` |
 | `APPROVAL_DB_PATH` | 审批请求 SQLite 数据库路径，默认 `rust-mutil-agent-approvals.sqlite3` |
+| `PATCH_DB_PATH` | 补丁提案 SQLite 数据库路径，默认 `rust-mutil-agent-patches.sqlite3` |
 
 ## 7. Tauri IPC 命令契约
 
@@ -320,8 +323,11 @@ Planner LLM 相关环境变量：
 | `request_project_command_approval` | `{ request: { command, workingDir } }` | `ApprovalRequest` | 已实现非 allowlist 命令审批创建 |
 | `run_approved_project_command` | `{ request: { approvalId } }` | `ProjectCommandRunResponse` | 已实现已审批命令执行和审计关联 |
 | `list_project_command_runs` | `{ limit? }` | `{ runs }` | 已实现最近命令审计读取 |
+| `create_patch_proposal` | `{ request: { summary, files, taskId?, stepId?, requestedBy? } }` | `{ proposal, approval }` | 已实现补丁提案持久化和 diff 审批创建 |
+| `list_patch_proposals` | `{ limit? }` | `{ proposals }` | 已实现最近补丁提案读取 |
+| `get_patch_proposal` | `{ patchId }` | `PatchProposal` 或 `null` | 已实现单个补丁提案读取 |
 | `list_approval_requests` | `{ status?, limit? }` | `{ approvals }` | 已实现审批请求读取 |
-| `approve_action` | `{ request: { approvalId, approved, note?, decidedBy? } }` | `ApprovalRequest` 或 `null` | 已实现审批/拒绝决策 |
+| `approve_action` | `{ request: { approvalId, approved, note?, decidedBy? } }` | `ApprovalRequest` 或 `null` | 已实现审批/拒绝决策；补丁审批会同步 proposal 状态 |
 | `get_agent_status` | `{ agentId }` | `AgentStatusResponse` | 已实现 |
 | `list_agents` | 无 | `{ agents }` | 已实现 |
 | `get_task_result` | `{ taskId }` | 兼容旧接口的任务结果或 `null` | 已聚合当前任务步骤和输出 |
@@ -340,7 +346,9 @@ Planner LLM 相关环境变量：
 
 非 allowlist 命令不会直接执行。前端项目面板可调用 `request_project_command_approval` 创建高风险审批请求；后端会复用命令解析逻辑，仍然拒绝空命令、shell 控制字符、父目录穿越和 workspace 外目录。审批 payload 记录归一化命令、工作目录和默认 allowlist 判定。
 
-审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护和非 allowlist 命令手动审批。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令；后端不会接受前端重新传入命令文本，并会把执行结果以 `approval_id` 关联写入命令审计。尚未把补丁应用或审批执行结果自动接入任务调度恢复。
+审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护、非 allowlist 命令手动审批和补丁提案审批。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令；后端不会接受前端重新传入命令文本，并会把执行结果以 `approval_id` 关联写入命令审计。尚未把补丁应用或审批执行结果自动接入任务调度恢复。
+
+补丁提案由 `src-tauri/src/workspace/patch.rs` 提供，持久化到 `patch_proposals` 表。`create_patch_proposal` 当前支持修改 workspace 内已有文本文件：后端会拒绝父目录穿越、workspace 外路径、受保护目录、密钥文件、空变更和基线内容不一致的请求；成功后生成统一 diff，保存 proposal，并创建 `workspace.applyPatch` 审批。审批面板会展开 diff 预览；`approve_action` 对补丁审批做出通过或拒绝时，会把 proposal 状态同步为 `approved` 或 `rejected`。当前版本不会应用 patch 到工作区。
 
 ### send_message 路由规则
 
@@ -368,6 +376,7 @@ Planner LLM 相关环境变量：
 - `ROUTE_FAILED`
 - `COMMAND_ERROR`
 - `APPROVAL_ERROR`
+- `PATCH_ERROR`
 
 ## 8. 前端架构
 
@@ -381,8 +390,8 @@ Planner LLM 相关环境变量：
 | 页面 | 组件 | 说明 |
 | --- | --- | --- |
 | 对话 | `ChatWindow` | 消息展示、Markdown 渲染、Agent 选择、发送/重试 |
-| 项目 | `ProjectPanel` | 项目快照、文件检索、只读预览、推荐验证命令运行和非 allowlist 命令审批 |
-| 审批 | `ApprovalPanel` | 高风险动作审批请求列表、通过/拒绝、执行已审批命令 |
+| 项目 | `ProjectPanel` | 项目快照、文件检索、只读预览、推荐验证命令运行、非 allowlist 命令审批和补丁提案创建 |
+| 审批 | `ApprovalPanel` | 高风险动作审批请求列表、通过/拒绝、执行已审批命令、补丁 diff 预览 |
 | Agent | `AgentPanel` | Agent 状态列表、能力展示、5 秒轮询 |
 | 设置 | `SettingsPanel` | 模型、API Key、Base URL、max tokens、temperature |
 
@@ -399,6 +408,7 @@ Planner LLM 相关环境变量：
 - `healthy` / `healthVersion`
 - `settings`
 - `projectSnapshot` / `projectFiles` / `latestCommandRun` / `lastCommandApproval`
+- `patchProposals` / `lastPatchProposal` / `patchProposalLoading` / `patchProposalError`
 - `approvals` / `approvalsLoading` / `approvalDecisionLoadingId` / `approvalExecutionLoadingId`
 
 设置项保存在浏览器 `localStorage` 的 `app-settings` 键中。
@@ -568,14 +578,14 @@ npm test
 8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 `file_read` 后续仍需要统一路径权限、沙箱和审计。
 9. 前端设置中的 API Key 和模型配置保存在 localStorage；后端请求期可使用该配置，但尚未接入系统安全凭据存储。
 10. 运行时环境变量 LLM 配置和前端请求级 LLM 配置已经并存，尚未提供统一的凭据管理界面。
-11. README 中部分描述仍偏旧，例如前端并非 Next.js 预留，而是 Vite + React 已实现。
+11. 补丁提案已经支持 diff 预览和审批状态同步，但还没有安全应用、回滚、测试验证和 artifact 记录。
 
 ## 13. 建议后续路线
 
 1. 增强调度器控制面：实现步骤超时、单步骤跳过和人工审批状态流转。
 2. 扩展请求级真实 LLM：在 Planner 临时 LLMClient 基础上，继续让 Executor/Tool 使用受控工具调用，并接入安全存储。
-3. 扩展工具执行层：在受控验证命令运行、审计和审批请求基础上，引入补丁生成、差异审查和高风险动作自动暂停。
+3. 扩展工具执行层：在受控验证命令运行、审计、审批请求和补丁提案基础上，引入安全应用 patch、差异审查和高风险动作自动暂停。
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。
 5. 强化工具权限：对 `file_read`、命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。
-7. 更新 README：修正前端技术栈、运行方式和当前实现状态。
+7. 将补丁提案、审批决策和未来应用结果写回任务事件与 artifact。

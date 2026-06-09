@@ -17,7 +17,10 @@ use crate::runtime::{
     ProjectCommandRunResponse,
 };
 use crate::task::{Task, TaskEvent};
-use crate::workspace::{FileReadResponse, SearchResponse, WorkspaceEntry};
+use crate::workspace::{
+    CreatePatchProposalRequest, FileReadResponse, PatchProposal, PatchProposalListResponse,
+    PatchProposalStatus, SearchResponse, WorkspaceEntry,
+};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,6 +72,14 @@ pub struct SearchProjectTextRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RunApprovedProjectCommandRequest {
     pub approval_id: String,
+}
+
+/// 创建补丁提案响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePatchProposalResponse {
+    pub proposal: PatchProposal,
+    pub approval: ApprovalRequest,
 }
 
 /// 结构化 API 错误。
@@ -158,6 +169,15 @@ impl ApiError {
         Self::new(
             "APPROVAL_ERROR",
             "处理审批请求时失败。请刷新审批列表后重试。",
+            Some(detail),
+            true,
+        )
+    }
+
+    fn patch_failed(detail: String) -> Self {
+        Self::new(
+            "PATCH_ERROR",
+            "处理补丁提案时失败。请刷新项目状态后重试。",
             Some(detail),
             true,
         )
@@ -1066,6 +1086,130 @@ pub async fn list_project_command_runs(
         .map_err(|err| ApiError::command_failed(format!("{}", err)))
 }
 
+fn map_patch_error(err: AgentError) -> ApiError {
+    match err {
+        AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
+        other => ApiError::patch_failed(format!("{}", other)),
+    }
+}
+
+fn build_patch_approval_input(proposal: &PatchProposal) -> CreateApprovalRequest {
+    let files = proposal
+        .files
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "path": &file.path,
+                "changeType": &file.change_type,
+                "diff": &file.diff,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    CreateApprovalRequest {
+        task_id: proposal.task_id.clone(),
+        step_id: proposal.step_id.clone(),
+        title: format!("应用补丁：{}", proposal.summary),
+        reason: format!(
+            "补丁提案 [{}] 将修改 {} 个文件，需要用户确认 diff 后再进入应用流程。",
+            proposal.summary,
+            proposal.files.len()
+        ),
+        risk: RiskLevel::High,
+        action_type: "workspace.applyPatch".to_string(),
+        action_payload: serde_json::json!({
+            "patchId": &proposal.id,
+            "summary": &proposal.summary,
+            "files": files,
+            "unifiedDiff": &proposal.unified_diff,
+        }),
+        requested_by: Some(proposal.requested_by.clone()),
+    }
+}
+
+fn patch_id_from_approval(approval: &ApprovalRequest) -> Option<String> {
+    if approval.action_type != "workspace.applyPatch" {
+        return None;
+    }
+    approval
+        .action_payload
+        .get("patchId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn patch_status_from_approval(status: &ApprovalStatus) -> Option<PatchProposalStatus> {
+    match status {
+        ApprovalStatus::Pending => Some(PatchProposalStatus::PendingApproval),
+        ApprovalStatus::Approved => Some(PatchProposalStatus::Approved),
+        ApprovalStatus::Rejected => Some(PatchProposalStatus::Rejected),
+        ApprovalStatus::Cancelled => None,
+    }
+}
+
+/// 创建补丁提案，并为 `workspace.applyPatch` 动作生成审批请求。
+///
+/// 前端调用：`invoke('create_patch_proposal', { request: { summary, files } })`
+#[tauri::command]
+pub async fn create_patch_proposal(
+    request: CreatePatchProposalRequest,
+    state: State<'_, AppState>,
+) -> Result<CreatePatchProposalResponse, ApiError> {
+    let mut proposal = crate::workspace::build_patch_proposal(request).map_err(map_patch_error)?;
+    state
+        .patch_store
+        .save_proposal(&proposal)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+
+    let approval = state
+        .approval_store
+        .create_request(build_patch_approval_input(&proposal))
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))?;
+
+    proposal.attach_approval(approval.id.clone());
+    state
+        .patch_store
+        .save_proposal(&proposal)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+
+    Ok(CreatePatchProposalResponse { proposal, approval })
+}
+
+/// 列出最近的补丁提案。
+///
+/// 前端调用：`invoke('list_patch_proposals', { limit })`
+#[tauri::command]
+pub async fn list_patch_proposals(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<PatchProposalListResponse, ApiError> {
+    state
+        .patch_store
+        .list_proposals(limit)
+        .map(|proposals| PatchProposalListResponse { proposals })
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))
+}
+
+/// 获取单个补丁提案。
+///
+/// 前端调用：`invoke('get_patch_proposal', { patchId })`
+#[tauri::command]
+pub async fn get_patch_proposal(
+    patch_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PatchProposal>, ApiError> {
+    let patch_id = patch_id.trim();
+    if patch_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少补丁提案 ID。"));
+    }
+    state
+        .patch_store
+        .get_proposal(patch_id)
+        .map_err(|err| ApiError::patch_failed(format!("{}", err)))
+}
+
 /// 列出审批请求。
 ///
 /// 前端调用：`invoke('list_approval_requests', { status, limit })`
@@ -1097,13 +1241,27 @@ pub async fn approve_action(
     if request.approval_id.trim().is_empty() {
         return Err(ApiError::invalid_argument("缺少审批请求 ID。"));
     }
-    state
+    let updated = state
         .approval_store
         .decide(request)
         .map_err(|err| match err {
             AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
             other => ApiError::approval_failed(format!("{}", other)),
-        })
+        })?;
+
+    if let Some(approval) = &updated {
+        if let (Some(patch_id), Some(status)) = (
+            patch_id_from_approval(approval),
+            patch_status_from_approval(&approval.status),
+        ) {
+            state
+                .patch_store
+                .update_status(&patch_id, status)
+                .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+        }
+    }
+
+    Ok(updated)
 }
 
 /// 获取系统健康状态。
@@ -1293,5 +1451,53 @@ mod tests {
         let err = project_command_request_from_approval(&approval).unwrap_err();
         assert_eq!(err.code, "INVALID_ARGUMENT");
         assert!(err.message.contains("不是项目命令"));
+    }
+
+    #[test]
+    fn test_build_patch_approval_input_records_diff_payload() {
+        use crate::workspace::patch::{PatchChangeType, PatchFileChange};
+
+        let now = chrono::Utc::now();
+        let diff = crate::workspace::patch::build_unified_diff("README.md", "old line", "new line");
+        let proposal = PatchProposal {
+            id: "patch-1".to_string(),
+            task_id: Some("task-1".to_string()),
+            step_id: Some("step-1".to_string()),
+            approval_id: None,
+            summary: "更新 README".to_string(),
+            status: PatchProposalStatus::Draft,
+            files: vec![PatchFileChange {
+                path: "README.md".to_string(),
+                change_type: PatchChangeType::Modify,
+                old_content: "old line".to_string(),
+                new_content: "new line".to_string(),
+                diff: diff.clone(),
+            }],
+            unified_diff: diff.clone(),
+            requested_by: "ProjectPanel".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let input = build_patch_approval_input(&proposal);
+
+        assert_eq!(input.risk, RiskLevel::High);
+        assert_eq!(input.action_type, "workspace.applyPatch");
+        assert_eq!(input.task_id.as_deref(), Some("task-1"));
+        assert_eq!(input.step_id.as_deref(), Some("step-1"));
+        assert_eq!(input.requested_by.as_deref(), Some("ProjectPanel"));
+        assert_eq!(
+            input.action_payload["patchId"],
+            serde_json::json!("patch-1")
+        );
+        assert_eq!(
+            input.action_payload["summary"],
+            serde_json::json!("更新 README")
+        );
+        assert_eq!(input.action_payload["unifiedDiff"], serde_json::json!(diff));
+        assert_eq!(
+            input.action_payload["files"][0]["path"],
+            serde_json::json!("README.md")
+        );
     }
 }

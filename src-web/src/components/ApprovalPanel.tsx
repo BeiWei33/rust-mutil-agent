@@ -62,6 +62,45 @@ function isProjectCommandApproval(approval: ApprovalRequest): boolean {
   return approval.actionType === "runtime.runProjectCommand";
 }
 
+interface PatchApprovalPayload {
+  patchId: string;
+  summary?: string;
+  files: { path: string; diff?: string }[];
+  unifiedDiff: string;
+}
+
+function patchApprovalPayload(value: unknown): PatchApprovalPayload | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as {
+    patchId?: unknown;
+    summary?: unknown;
+    files?: unknown;
+    unifiedDiff?: unknown;
+  };
+  if (typeof payload.patchId !== "string" || typeof payload.unifiedDiff !== "string") {
+    return null;
+  }
+  const files = Array.isArray(payload.files)
+    ? payload.files
+        .map((file) => {
+          if (!file || typeof file !== "object") return null;
+          const item = file as { path?: unknown; diff?: unknown };
+          if (typeof item.path !== "string") return null;
+          return {
+            path: item.path,
+            diff: typeof item.diff === "string" ? item.diff : undefined,
+          };
+        })
+        .filter((file): file is { path: string; diff?: string } => file !== null)
+    : [];
+  return {
+    patchId: payload.patchId,
+    summary: typeof payload.summary === "string" ? payload.summary : undefined,
+    files,
+    unifiedDiff: payload.unifiedDiff,
+  };
+}
+
 function runStatusLabel(run: ProjectCommandRunResponse): string {
   if (run.timedOut) return "超时";
   return run.success ? "执行通过" : "执行失败";
@@ -87,6 +126,10 @@ function ApprovalItem({
   const pending = approval.status === "pending";
   const canExecuteCommand =
     approval.status === "approved" && isProjectCommandApproval(approval) && !executedRun;
+  const patchPayload =
+    approval.actionType === "workspace.applyPatch"
+      ? patchApprovalPayload(approval.actionPayload)
+      : null;
 
   return (
     <article className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
@@ -158,6 +201,32 @@ function ApprovalItem({
       <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-300">
         {compactJson(approval.actionPayload)}
       </pre>
+
+      {patchPayload && (
+        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+            <span>{patchPayload.summary || patchPayload.patchId}</span>
+            <span>{patchPayload.files.length} 文件</span>
+          </div>
+          {patchPayload.files.length > 0 && (
+            <div className="border-b border-zinc-800 px-3 py-2">
+              <div className="flex flex-wrap gap-2">
+                {patchPayload.files.map((file) => (
+                  <span
+                    key={file.path}
+                    className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300"
+                  >
+                    {file.path}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <pre className="max-h-96 overflow-auto whitespace-pre-wrap p-3 text-[11px] leading-relaxed text-zinc-300">
+            {patchPayload.unifiedDiff}
+          </pre>
+        </div>
+      )}
 
       {approval.decisionNote && (
         <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300">

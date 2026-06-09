@@ -330,6 +330,63 @@ export interface RunApprovedProjectCommandRequest {
   approvalId: string;
 }
 
+/** 补丁提案状态 */
+export type PatchProposalStatus = "draft" | "pendingApproval" | "approved" | "rejected";
+
+/** 补丁文件变更类型 */
+export type PatchChangeType = "modify";
+
+/** 创建补丁文件输入 */
+export interface PatchFileInput {
+  path: string;
+  oldContent: string;
+  newContent: string;
+}
+
+/** 创建补丁提案请求 */
+export interface CreatePatchProposalRequest {
+  summary: string;
+  files: PatchFileInput[];
+  taskId?: string | null;
+  stepId?: string | null;
+  requestedBy?: string | null;
+}
+
+/** 补丁文件变更 */
+export interface PatchFileChange {
+  path: string;
+  changeType: PatchChangeType;
+  oldContent: string;
+  newContent: string;
+  diff: string;
+}
+
+/** 补丁提案 */
+export interface PatchProposal {
+  id: string;
+  taskId?: string | null;
+  stepId?: string | null;
+  approvalId?: string | null;
+  summary: string;
+  status: PatchProposalStatus;
+  files: PatchFileChange[];
+  unifiedDiff: string;
+  requestedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 创建补丁提案响应 */
+export interface CreatePatchProposalResponse {
+  proposal: PatchProposal;
+  approval: ApprovalRequest;
+}
+
+/** 补丁提案列表响应 */
+export interface PatchProposalListResponse {
+  proposals: PatchProposal[];
+}
+
 /** 项目快照 */
 export interface ProjectSnapshot {
   root: string;

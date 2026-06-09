@@ -25,6 +25,9 @@ vi.mock("@/lib/tauri", () => ({
     requestProjectCommandApproval: vi.fn(),
     runApprovedProjectCommand: vi.fn(),
     listProjectCommandRuns: vi.fn(),
+    createPatchProposal: vi.fn(),
+    listPatchProposals: vi.fn(),
+    getPatchProposal: vi.fn(),
     listApprovalRequests: vi.fn(),
     approveAction: vi.fn(),
   },
@@ -43,6 +46,9 @@ const mockApi = api as unknown as {
   requestProjectCommandApproval: ReturnType<typeof vi.fn>;
   runApprovedProjectCommand: ReturnType<typeof vi.fn>;
   listProjectCommandRuns: ReturnType<typeof vi.fn>;
+  createPatchProposal: ReturnType<typeof vi.fn>;
+  listPatchProposals: ReturnType<typeof vi.fn>;
+  getPatchProposal: ReturnType<typeof vi.fn>;
   listApprovalRequests: ReturnType<typeof vi.fn>;
   approveAction: ReturnType<typeof vi.fn>;
 };
@@ -101,6 +107,10 @@ describe("useAgentStore", () => {
       lastCommandApproval: null,
       latestCommandRun: null,
       commandRuns: [],
+      patchProposals: [],
+      patchProposalLoading: false,
+      patchProposalError: null,
+      lastPatchProposal: null,
       approvals: [],
       approvalsLoading: false,
       approvalsError: null,
@@ -653,6 +663,69 @@ describe("useAgentStore", () => {
     expect(getState().commandApprovalLoading).toBe(false);
     expect(getState().lastCommandApproval).toBeNull();
     expect(getState().commandApprovalError).toBe("该命令已在允许列表");
+  });
+
+  /// 测试 — createPatchProposal 成功时保存补丁提案和审批请求
+  /// 验证：项目面板生成 diff 后可进入审批队列
+  it("createPatchProposal 成功时应保存补丁提案和审批请求", async () => {
+    const proposal = {
+      id: "patch-1",
+      taskId: null,
+      stepId: null,
+      approvalId: "approval-patch-1",
+      summary: "更新 README",
+      status: "pendingApproval" as const,
+      files: [
+        {
+          path: "README.md",
+          changeType: "modify" as const,
+          oldContent: "old",
+          newContent: "new",
+          diff: "diff --git a/README.md b/README.md\n-old\n+new",
+        },
+      ],
+      unifiedDiff: "diff --git a/README.md b/README.md\n-old\n+new",
+      requestedBy: "ProjectPanel",
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:00:00Z",
+    };
+    const approval = {
+      id: "approval-patch-1",
+      taskId: null,
+      stepId: null,
+      title: "应用补丁：更新 README",
+      reason: "需要审批。",
+      risk: "high" as const,
+      actionType: "workspace.applyPatch",
+      actionPayload: {
+        patchId: "patch-1",
+        unifiedDiff: proposal.unifiedDiff,
+      },
+      status: "pending" as const,
+      requestedBy: "ProjectPanel",
+      decidedBy: null,
+      decisionNote: null,
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:00:00Z",
+      decidedAt: null,
+    };
+    mockApi.createPatchProposal.mockResolvedValue({ proposal, approval });
+
+    await getState().createPatchProposal({
+      summary: "更新 README",
+      files: [{ path: "README.md", oldContent: "old", newContent: "new" }],
+    });
+
+    expect(mockApi.createPatchProposal).toHaveBeenCalledWith({
+      summary: "更新 README",
+      files: [{ path: "README.md", oldContent: "old", newContent: "new" }],
+      requestedBy: "ProjectPanel",
+    });
+    expect(getState().patchProposalLoading).toBe(false);
+    expect(getState().patchProposalError).toBeNull();
+    expect(getState().lastPatchProposal).toEqual(proposal);
+    expect(getState().patchProposals).toEqual([proposal]);
+    expect(getState().approvals).toEqual([approval]);
   });
 
   // ==========================================================

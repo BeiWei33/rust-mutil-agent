@@ -33,6 +33,10 @@ import type {
   ApprovalRequest,
   ApprovalStatus,
   RunApprovedProjectCommandRequest,
+  CreatePatchProposalRequest,
+  CreatePatchProposalResponse,
+  PatchProposal,
+  PatchProposalListResponse,
 } from "@/types";
 
 /**
@@ -249,6 +253,43 @@ export async function listProjectCommandRuns(
 }
 
 /**
+ * 创建补丁提案并生成审批请求
+ * @param request 补丁摘要和文件变更
+ * @returns 补丁提案和对应审批
+ */
+export async function createPatchProposal(
+  request: CreatePatchProposalRequest
+): Promise<CreatePatchProposalResponse> {
+  return invoke<CreatePatchProposalResponse>(`${CMD_PREFIX}create_patch_proposal`, {
+    request,
+  });
+}
+
+/**
+ * 获取最近补丁提案
+ * @param limit 最大返回数量
+ * @returns 补丁提案列表
+ */
+export async function listPatchProposals(
+  limit = 20
+): Promise<PatchProposalListResponse> {
+  return invoke<PatchProposalListResponse>(`${CMD_PREFIX}list_patch_proposals`, {
+    limit,
+  });
+}
+
+/**
+ * 获取单个补丁提案
+ * @param patchId 补丁提案 ID
+ * @returns 补丁提案
+ */
+export async function getPatchProposal(patchId: string): Promise<PatchProposal | null> {
+  return invoke<PatchProposal | null>(`${CMD_PREFIX}get_patch_proposal`, {
+    patchId,
+  });
+}
+
+/**
  * 获取审批请求列表
  * @param status 可选状态过滤
  * @param limit 最大返回数量
@@ -386,6 +427,7 @@ let MOCK_TASKS: Task[] = [];
 let MOCK_EVENTS: Record<string, TaskEvent[]> = {};
 let MOCK_COMMAND_RUNS: ProjectCommandRunResponse[] = [];
 let MOCK_APPROVALS: ApprovalRequest[] = [];
+let MOCK_PATCH_PROPOSALS: PatchProposal[] = [];
 
 const MOCK_PROJECT_FILES = [
   "README.md",
@@ -828,6 +870,95 @@ async function mockListProjectCommandRuns(
   return { runs: MOCK_COMMAND_RUNS.slice(0, limit) };
 }
 
+function buildMockPatchDiff(path: string, oldContent: string, newContent: string): string {
+  const oldLines = oldContent.split("\n").filter((_, index, lines) =>
+    index < lines.length - 1 || lines[index] !== ""
+  );
+  const newLines = newContent.split("\n").filter((_, index, lines) =>
+    index < lines.length - 1 || lines[index] !== ""
+  );
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+async function mockCreatePatchProposal(
+  request: CreatePatchProposalRequest
+): Promise<CreatePatchProposalResponse> {
+  await new Promise((r) => setTimeout(r, 180));
+  const now = new Date().toISOString();
+  const files = request.files.map((file) => {
+    const diff = buildMockPatchDiff(file.path, file.oldContent, file.newContent);
+    return {
+      path: file.path,
+      changeType: "modify" as const,
+      oldContent: file.oldContent,
+      newContent: file.newContent,
+      diff,
+    };
+  });
+  const proposal: PatchProposal = {
+    id: generateId(),
+    taskId: request.taskId ?? null,
+    stepId: request.stepId ?? null,
+    approvalId: null,
+    summary: request.summary.trim(),
+    status: "pendingApproval",
+    files,
+    unifiedDiff: files.map((file) => file.diff).join("\n"),
+    requestedBy: request.requestedBy || "ProjectPanel",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const approval: ApprovalRequest = {
+    id: generateId(),
+    taskId: proposal.taskId ?? null,
+    stepId: proposal.stepId ?? null,
+    title: `应用补丁：${proposal.summary}`,
+    reason: `补丁提案 [${proposal.summary}] 将修改 ${proposal.files.length} 个文件，需要用户确认 diff 后再进入应用流程。`,
+    risk: "high",
+    actionType: "workspace.applyPatch",
+    actionPayload: {
+      patchId: proposal.id,
+      summary: proposal.summary,
+      files: proposal.files.map((file) => ({
+        path: file.path,
+        changeType: file.changeType,
+        diff: file.diff,
+      })),
+      unifiedDiff: proposal.unifiedDiff,
+    },
+    status: "pending",
+    requestedBy: proposal.requestedBy,
+    decidedBy: null,
+    decisionNote: null,
+    createdAt: now,
+    updatedAt: now,
+    decidedAt: null,
+  };
+  const linkedProposal = { ...proposal, approvalId: approval.id };
+  MOCK_PATCH_PROPOSALS = [linkedProposal, ...MOCK_PATCH_PROPOSALS].slice(0, 50);
+  MOCK_APPROVALS = [approval, ...MOCK_APPROVALS].slice(0, 100);
+  return { proposal: linkedProposal, approval };
+}
+
+async function mockListPatchProposals(
+  limit = 20
+): Promise<PatchProposalListResponse> {
+  await new Promise((r) => setTimeout(r, 80));
+  return { proposals: MOCK_PATCH_PROPOSALS.slice(0, limit) };
+}
+
+async function mockGetPatchProposal(patchId: string): Promise<PatchProposal | null> {
+  await new Promise((r) => setTimeout(r, 80));
+  return MOCK_PATCH_PROPOSALS.find((proposal) => proposal.id === patchId) ?? null;
+}
+
 async function mockListApprovalRequests(
   status?: ApprovalStatus,
   limit = 50
@@ -857,6 +988,21 @@ async function mockApproveAction(
   MOCK_APPROVALS = MOCK_APPROVALS.map((item) =>
     item.id === request.approvalId ? updated : item
   );
+  if (updated.actionType === "workspace.applyPatch") {
+    const payload = updated.actionPayload as { patchId?: unknown };
+    const patchId = typeof payload.patchId === "string" ? payload.patchId : null;
+    if (patchId) {
+      MOCK_PATCH_PROPOSALS = MOCK_PATCH_PROPOSALS.map((proposal) =>
+        proposal.id === patchId
+          ? {
+              ...proposal,
+              status: request.approved ? "approved" : "rejected",
+              updatedAt: updated.updatedAt,
+            }
+          : proposal
+      );
+    }
+  }
   return updated;
 }
 
@@ -904,6 +1050,9 @@ export const api = {
     ? runApprovedProjectCommand
     : mockRunApprovedProjectCommand,
   listProjectCommandRuns: isTauri() ? listProjectCommandRuns : mockListProjectCommandRuns,
+  createPatchProposal: isTauri() ? createPatchProposal : mockCreatePatchProposal,
+  listPatchProposals: isTauri() ? listPatchProposals : mockListPatchProposals,
+  getPatchProposal: isTauri() ? getPatchProposal : mockGetPatchProposal,
   listApprovalRequests: isTauri() ? listApprovalRequests : mockListApprovalRequests,
   approveAction: isTauri() ? approveAction : mockApproveAction,
   healthCheck: isTauri() ? healthCheck : mockHealthCheck,

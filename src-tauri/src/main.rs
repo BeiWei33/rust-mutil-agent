@@ -26,11 +26,13 @@ use crate::bus::MessageBus;
 use crate::chat::ChatStore;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::CommandRunStore;
+use crate::workspace::PatchProposalStore;
 
 const DEFAULT_TASK_DB_PATH: &str = "rust-mutil-agent-tasks.sqlite3";
 const DEFAULT_CHAT_DB_PATH: &str = "rust-mutil-agent-chat.sqlite3";
 const DEFAULT_COMMAND_DB_PATH: &str = "rust-mutil-agent-commands.sqlite3";
 const DEFAULT_APPROVAL_DB_PATH: &str = "rust-mutil-agent-approvals.sqlite3";
+const DEFAULT_PATCH_DB_PATH: &str = "rust-mutil-agent-patches.sqlite3";
 
 /// 全局应用状态
 pub struct AppState {
@@ -39,6 +41,7 @@ pub struct AppState {
     pub chat_store: Arc<ChatStore>,
     pub command_store: Arc<CommandRunStore>,
     pub approval_store: Arc<ApprovalStore>,
+    pub patch_store: Arc<PatchProposalStore>,
 }
 
 /// Tauri 应用主入口
@@ -106,6 +109,18 @@ async fn main() {
             Arc::new(ApprovalStore::open(":memory:").expect("内存审批记录初始化失败"))
         }
     };
+    let patch_db_path =
+        std::env::var("PATCH_DB_PATH").unwrap_or_else(|_| DEFAULT_PATCH_DB_PATH.to_string());
+    let patch_store = match PatchProposalStore::open(&patch_db_path) {
+        Ok(store) => {
+            tracing::info!("补丁提案数据库已启用: {}", patch_db_path);
+            Arc::new(store)
+        }
+        Err(err) => {
+            tracing::warn!("补丁提案数据库初始化失败，将使用内存补丁记录: {}", err);
+            Arc::new(PatchProposalStore::open(":memory:").expect("内存补丁记录初始化失败"))
+        }
+    };
 
     {
         let mut orch = orchestrator.lock().await;
@@ -120,6 +135,7 @@ async fn main() {
             chat_store,
             command_store,
             approval_store,
+            patch_store,
         })
         .invoke_handler(tauri::generate_handler![
             commands::send_message,
@@ -140,6 +156,9 @@ async fn main() {
             commands::request_project_command_approval,
             commands::run_approved_project_command,
             commands::list_project_command_runs,
+            commands::create_patch_proposal,
+            commands::list_patch_proposals,
+            commands::get_patch_proposal,
             commands::list_approval_requests,
             commands::approve_action,
             commands::health_check,
