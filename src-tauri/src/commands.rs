@@ -1275,6 +1275,11 @@ pub async fn apply_approved_patch(
         .patch_store
         .save_proposal(&proposal)
         .map_err(|err| ApiError::patch_failed(format!("{}", err)))?;
+    {
+        let orch = state.orchestrator.lock().await;
+        orch.record_patch_applied(&proposal, &result, &approval.id)
+            .await;
+    }
 
     Ok(result)
 }

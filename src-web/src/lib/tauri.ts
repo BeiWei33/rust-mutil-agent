@@ -1022,13 +1022,60 @@ async function mockApplyApprovedPatch(
     item.id === updated.id ? updated : item
   );
 
-  return {
+  const result: PatchApplyResult = {
     patchId: updated.id,
     status: updated.status,
     files: updated.files.map((file) => file.path),
     appliedAt,
     alreadyApplied,
   };
+
+  if (updated.taskId) {
+    const artifact = {
+      kind: "patchApplied",
+      patchId: updated.id,
+      approvalId: approval.id,
+      summary: updated.summary,
+      status: result.status,
+      files: result.files,
+      appliedAt: result.appliedAt,
+      appliedBy: updated.appliedBy,
+      alreadyApplied: result.alreadyApplied,
+      unifiedDiff: updated.unifiedDiff,
+    };
+    const targetTask = MOCK_TASKS.find((task) => task.id === updated.taskId);
+    const hasArtifact = (task: Task) =>
+      task.artifacts.some((item) => {
+        const value = item as { kind?: unknown; patchId?: unknown };
+        return value.kind === "patchApplied" && value.patchId === updated.id;
+      });
+    const shouldAppendArtifact = !!targetTask && !hasArtifact(targetTask);
+    MOCK_TASKS = MOCK_TASKS.map((task) =>
+      task.id === updated.taskId && shouldAppendArtifact
+        ? {
+            ...task,
+            artifacts: [...task.artifacts, artifact],
+            updatedAt: appliedAt,
+          }
+        : task
+    );
+    if (shouldAppendArtifact) {
+      MOCK_EVENTS[updated.taskId] = [
+        ...(MOCK_EVENTS[updated.taskId] ?? []),
+        {
+          id: generateId(),
+          taskId: updated.taskId,
+          stepId: updated.stepId ?? null,
+          kind: "artifactCreated",
+          message: `补丁已应用：${updated.summary}`,
+          payload: artifact,
+          createdAt: appliedAt,
+        },
+      ];
+    }
+  }
+
+  return result;
 }
 
 async function mockListApprovalRequests(

@@ -15,7 +15,7 @@ use crate::agent::traits::{Agent, AgentMessage};
 use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
 use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep, TaskStore};
-use crate::workspace;
+use crate::workspace::{self, PatchApplyResult, PatchProposal};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
@@ -423,6 +423,41 @@ impl TaskRuntime {
         })
     }
 
+    fn record_patch_applied(
+        &mut self,
+        proposal: &PatchProposal,
+        result: &PatchApplyResult,
+        approval_id: &str,
+    ) -> Option<Task> {
+        let task_id = proposal.task_id.as_deref()?.trim();
+        if task_id.is_empty() {
+            return None;
+        }
+
+        let artifact = patch_apply_artifact(proposal, result, approval_id);
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if has_patch_artifact(task, &proposal.id) {
+            return Some(task.clone());
+        }
+
+        task.add_artifact(artifact.clone());
+        let updated = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            proposal.step_id.clone(),
+            TaskEventKind::ArtifactCreated,
+            format!("补丁已应用：{}", proposal.summary),
+            artifact,
+        ));
+
+        self.extend_events(emitted);
+        self.persist_task(&updated);
+        Some(updated)
+    }
+
     fn fail_running_step(
         &mut self,
         task_id: &str,
@@ -800,6 +835,17 @@ impl Orchestrator {
         runtime.get_events(task_id)
     }
 
+    /// 记录已应用补丁为任务 artifact 和事件。
+    pub async fn record_patch_applied(
+        &self,
+        proposal: &PatchProposal,
+        result: &PatchApplyResult,
+        approval_id: &str,
+    ) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.record_patch_applied(proposal, result, approval_id)
+    }
+
     /// 取消任务。
     pub async fn cancel_task(&self, task_id: &str, reason: &str) -> Option<Task> {
         let mut runtime = self.runtime.lock().await;
@@ -1040,6 +1086,32 @@ fn build_step_dispatch_context(task: &Task, step_index: usize) -> serde_json::Va
         "stepAttempt": step.attempts,
         "dependsOn": step.depends_on,
         "dependencyResults": dependency_results,
+    })
+}
+
+fn patch_apply_artifact(
+    proposal: &PatchProposal,
+    result: &PatchApplyResult,
+    approval_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "patchApplied",
+        "patchId": &proposal.id,
+        "approvalId": approval_id,
+        "summary": &proposal.summary,
+        "status": &result.status,
+        "files": &result.files,
+        "appliedAt": result.applied_at,
+        "appliedBy": &proposal.applied_by,
+        "alreadyApplied": result.already_applied,
+        "unifiedDiff": &proposal.unified_diff,
+    })
+}
+
+fn has_patch_artifact(task: &Task, patch_id: &str) -> bool {
+    task.artifacts.iter().any(|artifact| {
+        artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patchApplied")
+            && artifact.get("patchId").and_then(serde_json::Value::as_str) == Some(patch_id)
     })
 }
 
@@ -1515,6 +1587,107 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(path);
+    }
+
+    fn patch_proposal_for_task(task_id: &str) -> PatchProposal {
+        let now = chrono::Utc::now();
+        let diff = crate::workspace::patch::build_unified_diff("README.md", "old", "new");
+        PatchProposal {
+            id: "patch-task-1".to_string(),
+            task_id: Some(task_id.to_string()),
+            step_id: Some(format!("{task_id}-1")),
+            approval_id: Some("approval-1".to_string()),
+            summary: "更新 README".to_string(),
+            status: crate::workspace::PatchProposalStatus::Applied,
+            files: vec![crate::workspace::patch::PatchFileChange {
+                path: "README.md".to_string(),
+                change_type: crate::workspace::patch::PatchChangeType::Modify,
+                old_content: "old".to_string(),
+                new_content: "new".to_string(),
+                diff: diff.clone(),
+            }],
+            unified_diff: diff,
+            requested_by: "test".to_string(),
+            created_at: now,
+            updated_at: now,
+            applied_at: Some(now),
+            applied_by: Some("tester".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_record_patch_applied_adds_task_artifact_and_event() {
+        let task_id = "task-patch-artifact";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "应用补丁到任务"));
+        let proposal = patch_proposal_for_task(task_id);
+        let result = PatchApplyResult {
+            patch_id: proposal.id.clone(),
+            status: crate::workspace::PatchProposalStatus::Applied,
+            files: vec!["README.md".to_string()],
+            applied_at: proposal.applied_at.unwrap(),
+            already_applied: false,
+        };
+
+        let task = runtime
+            .record_patch_applied(&proposal, &result, "approval-1")
+            .unwrap();
+
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(task.artifacts[0]["kind"], serde_json::json!("patchApplied"));
+        assert_eq!(
+            task.artifacts[0]["patchId"],
+            serde_json::json!("patch-task-1")
+        );
+        assert_eq!(
+            task.artifacts[0]["approvalId"],
+            serde_json::json!("approval-1")
+        );
+        assert_eq!(
+            task.artifacts[0]["files"][0],
+            serde_json::json!("README.md")
+        );
+
+        let events = runtime.get_events(task_id);
+        let event = events
+            .iter()
+            .find(|event| event.kind == TaskEventKind::ArtifactCreated)
+            .unwrap();
+        assert_eq!(event.step_id.as_deref(), Some("task-patch-artifact-1"));
+        assert_eq!(event.payload["patchId"], serde_json::json!("patch-task-1"));
+    }
+
+    #[test]
+    fn test_record_patch_applied_is_idempotent_for_same_patch() {
+        let task_id = "task-patch-idempotent";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "重复应用补丁"));
+        let proposal = patch_proposal_for_task(task_id);
+        let result = PatchApplyResult {
+            patch_id: proposal.id.clone(),
+            status: crate::workspace::PatchProposalStatus::Applied,
+            files: vec!["README.md".to_string()],
+            applied_at: proposal.applied_at.unwrap(),
+            already_applied: false,
+        };
+
+        runtime
+            .record_patch_applied(&proposal, &result, "approval-1")
+            .unwrap();
+        runtime
+            .record_patch_applied(&proposal, &result, "approval-1")
+            .unwrap();
+
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            runtime
+                .get_events(task_id)
+                .iter()
+                .filter(|event| event.kind == TaskEventKind::ArtifactCreated)
+                .count(),
+            1
+        );
     }
 
     #[test]

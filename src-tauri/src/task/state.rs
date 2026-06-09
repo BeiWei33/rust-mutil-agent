@@ -183,6 +183,11 @@ impl Task {
         self.error = None;
         self.touch();
     }
+
+    pub fn add_artifact(&mut self, artifact: serde_json::Value) {
+        self.artifacts.push(artifact);
+        self.touch();
+    }
 }
 
 fn summarize_title(text: &str, max_chars: usize) -> String {

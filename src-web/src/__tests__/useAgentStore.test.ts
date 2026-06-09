@@ -19,6 +19,8 @@ vi.mock("@/lib/tauri", () => ({
     sendMessage: vi.fn(),
     listAgents: vi.fn(),
     healthCheck: vi.fn(),
+    getTask: vi.fn(),
+    getTaskEvents: vi.fn(),
     getHistory: vi.fn(),
     clearHistory: vi.fn(),
     runProjectCommand: vi.fn(),
@@ -41,6 +43,8 @@ const mockApi = api as unknown as {
   sendMessage: ReturnType<typeof vi.fn>;
   listAgents: ReturnType<typeof vi.fn>;
   healthCheck: ReturnType<typeof vi.fn>;
+  getTask: ReturnType<typeof vi.fn>;
+  getTaskEvents: ReturnType<typeof vi.fn>;
   getHistory: ReturnType<typeof vi.fn>;
   clearHistory: ReturnType<typeof vi.fn>;
   runProjectCommand: ReturnType<typeof vi.fn>;
@@ -905,5 +909,81 @@ describe("useAgentStore", () => {
       id: "patch-apply-1",
       status: "applied",
     });
+  });
+
+  /// 测试 — applyApprovedPatch 成功时刷新关联任务
+  /// 验证：补丁提案带 taskId 时会拉取最新任务和事件，显示 artifact 时间线
+  it("applyApprovedPatch 成功时应刷新关联任务和事件", async () => {
+    const proposal = {
+      id: "patch-task-1",
+      taskId: "task-1",
+      stepId: "task-1-2",
+      approvalId: "approval-patch-task-1",
+      summary: "更新任务文件",
+      status: "approved" as const,
+      files: [
+        {
+          path: "README.md",
+          changeType: "modify" as const,
+          oldContent: "old",
+          newContent: "new",
+          diff: "diff --git a/README.md b/README.md\n-old\n+new",
+        },
+      ],
+      unifiedDiff: "diff --git a/README.md b/README.md\n-old\n+new",
+      requestedBy: "ProjectPanel",
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:01:00Z",
+      appliedAt: null,
+      appliedBy: null,
+    };
+    const task = {
+      id: "task-1",
+      title: "更新任务文件",
+      userGoal: "更新任务文件",
+      status: "completed" as const,
+      steps: [],
+      artifacts: [
+        {
+          kind: "patchApplied",
+          patchId: "patch-task-1",
+          summary: "更新任务文件",
+          files: ["README.md"],
+          appliedAt: "2026-06-09T12:02:00Z",
+        },
+      ],
+      output: "完成",
+      error: null,
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:02:00Z",
+    };
+    const event = {
+      id: "event-artifact-1",
+      taskId: "task-1",
+      stepId: "task-1-2",
+      kind: "artifactCreated" as const,
+      message: "补丁已应用：更新任务文件",
+      payload: task.artifacts[0],
+      createdAt: "2026-06-09T12:02:00Z",
+    };
+    const result = {
+      patchId: "patch-task-1",
+      status: "applied" as const,
+      files: ["README.md"],
+      appliedAt: "2026-06-09T12:02:00Z",
+      alreadyApplied: false,
+    };
+    useAgentStore.setState({ patchProposals: [proposal], lastPatchProposal: proposal });
+    mockApi.applyApprovedPatch.mockResolvedValue(result);
+    mockApi.listPatchProposals.mockResolvedValue({ proposals: [] });
+    mockApi.getTask.mockResolvedValue(task);
+    mockApi.getTaskEvents.mockResolvedValue([event]);
+
+    await getState().applyApprovedPatch("approval-patch-task-1");
+
+    expect(mockApi.getTask).toHaveBeenCalledWith("task-1");
+    expect(mockApi.getTaskEvents).toHaveBeenCalledWith("task-1");
+    expect(getState().selectedTask).toEqual(task);
+    expect(getState().taskEvents).toEqual([event]);
   });
 });

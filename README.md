@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、补丁提案持久化和 diff 审批预览已经落地；补丁应用写入、任务调度器自动审批等待/恢复和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、补丁提案持久化、diff 审批预览、已审批补丁手动应用和任务产物记录已经落地；任务调度器自动审批等待/恢复和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -271,7 +271,7 @@ cp .env.example .env
 | `list_project_command_runs` | 已实现 | 查询最近命令运行记录。 |
 | `create_patch_proposal` | 已实现 | 为现有文本文件生成补丁提案、持久化 diff，并创建 `workspace.applyPatch` 审批请求。 |
 | `list_patch_proposals` / `get_patch_proposal` | 已实现 | 查询最近补丁提案或指定补丁提案。 |
-| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，并把提案状态更新为 `applied`。 |
+| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，把提案状态更新为 `applied`，并在关联任务中写入 patch artifact/event。 |
 | `list_approval_requests` | 已实现 | 查询审批请求，可按状态过滤。 |
 | `approve_action` | 已实现 | 对审批请求执行通过或拒绝；`workspace.applyPatch` 审批会同步补丁提案状态。 |
 | `get_history` / `clear_history` | 已实现 | 读取或清理指定会话聊天历史。 |
@@ -297,7 +297,7 @@ cp .env.example .env
 
 项目面板在读取文本文件后可编辑草稿并调用 `create_patch_proposal`。后端会校验路径仍在 workspace 内、目标是普通文本文件、基线内容与当前文件一致，并拒绝 `.git`、密钥文件和构建产物目录。创建成功后会写入 `patch_proposals` SQLite 表，并同步生成 `workspace.applyPatch` 审批请求；审批 payload 包含 `patchId`、文件列表和统一 diff。
 
-审批面板会对 `workspace.applyPatch` 展开文件列表和 diff。用户通过或拒绝审批时，后端会把对应补丁提案状态更新为 `approved` 或 `rejected`；通过后可继续调用 `apply_approved_patch` 手动写入工作区。应用时后端会重新校验目标文件仍与提案基线一致，拒绝过期补丁，并把提案状态更新为 `applied`。当前版本尚未提供自动回滚、artifact 记录或应用后自动测试。
+审批面板会对 `workspace.applyPatch` 展开文件列表和 diff。用户通过或拒绝审批时，后端会把对应补丁提案状态更新为 `approved` 或 `rejected`；通过后可继续调用 `apply_approved_patch` 手动写入工作区。应用时后端会重新校验目标文件仍与提案基线一致，拒绝过期补丁，并把提案状态更新为 `applied`。若补丁提案关联了任务，系统会同步写入 `patchApplied` artifact 和 `artifactCreated` 事件。当前版本尚未提供自动回滚或应用后自动测试。
 
 ## 已知限制
 
@@ -313,7 +313,7 @@ cp .env.example .env
 
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
-1. 把已具备的 patch/diff 审批继续推进到安全应用 patch、产物回滚和任务步骤暂停/恢复。
+1. 把已具备的 patch/diff 审批继续推进到产物回滚、应用后自动验证和任务步骤暂停/恢复。
 2. 增强调度器控制面：步骤超时、单步骤跳过、审批等待与恢复。
 3. 将审批执行结果回写到任务事件和步骤状态，形成端到端的任务暂停/恢复链路。
 4. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。

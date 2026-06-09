@@ -577,6 +577,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ patchApplyLoadingId: approvalId, approvalsError: null });
     try {
       const result = await api.applyApprovedPatch({ approvalId });
+      const linkedTaskId =
+        get().patchProposals.find((proposal) => proposal.id === result.patchId)?.taskId ??
+        (get().lastPatchProposal?.id === result.patchId ? get().lastPatchProposal?.taskId : null);
       set((s) => ({
         lastPatchApplyResult: result,
         patchApplyLoadingId: null,
@@ -604,6 +607,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       get().fetchPatchProposals(10).catch(() => {
         // 应用结果已返回，列表刷新失败不影响审批面板状态。
       });
+      if (linkedTaskId) {
+        await get().fetchTask(linkedTaskId).catch(() => {
+          // 任务 artifact 刷新失败不影响补丁应用主流程。
+        });
+      }
     } catch (err: unknown) {
       set({
         approvalsError: getErrorMessage(err, "应用已审批补丁失败"),

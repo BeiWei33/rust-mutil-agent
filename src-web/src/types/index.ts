@@ -182,7 +182,8 @@ export type TaskEventKind =
   | "completed"
   | "failed"
   | "cancelled"
-  | "retried";
+  | "retried"
+  | "artifactCreated";
 
 /** 任务事件 */
 export interface TaskEvent {

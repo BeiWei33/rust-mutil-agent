@@ -16,6 +16,7 @@ pub enum TaskEventKind {
     Failed,
     Cancelled,
     Retried,
+    ArtifactCreated,
 }
 
 /// A timestamped task event.

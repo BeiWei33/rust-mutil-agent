@@ -165,6 +165,82 @@ function EventRow({ event }: { event: TaskEvent }) {
   );
 }
 
+interface PatchAppliedArtifact {
+  kind: "patchApplied";
+  patchId: string;
+  approvalId?: string;
+  summary?: string;
+  files?: string[];
+  appliedAt?: string;
+}
+
+function patchAppliedArtifact(value: unknown): PatchAppliedArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as {
+    kind?: unknown;
+    patchId?: unknown;
+    approvalId?: unknown;
+    summary?: unknown;
+    files?: unknown;
+    appliedAt?: unknown;
+  };
+  if (artifact.kind !== "patchApplied" || typeof artifact.patchId !== "string") {
+    return null;
+  }
+  return {
+    kind: "patchApplied",
+    patchId: artifact.patchId,
+    approvalId: typeof artifact.approvalId === "string" ? artifact.approvalId : undefined,
+    summary: typeof artifact.summary === "string" ? artifact.summary : undefined,
+    files: Array.isArray(artifact.files)
+      ? artifact.files.filter((file): file is string => typeof file === "string")
+      : undefined,
+    appliedAt: typeof artifact.appliedAt === "string" ? artifact.appliedAt : undefined,
+  };
+}
+
+function ArtifactRow({ artifact }: { artifact: unknown }) {
+  const patchArtifact = patchAppliedArtifact(artifact);
+  if (patchArtifact) {
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-zinc-200">
+              {patchArtifact.summary || patchArtifact.patchId}
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {patchArtifact.files?.length ?? 0} 文件
+              {patchArtifact.appliedAt && ` · ${formatTime(patchArtifact.appliedAt)}`}
+            </div>
+          </div>
+          <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">
+            Patch
+          </span>
+        </div>
+        {patchArtifact.files && patchArtifact.files.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {patchArtifact.files.map((file) => (
+              <span
+                key={file}
+                className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300"
+              >
+                {file}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">
+      {JSON.stringify(artifact, null, 2)}
+    </pre>
+  );
+}
+
 export default function TaskBoard() {
   const tasks = useAgentStore((s) => s.tasks);
   const tasksLoading = useAgentStore((s) => s.tasksLoading);
@@ -345,6 +421,17 @@ export default function TaskBoard() {
                   <h4 className="mb-2 text-sm font-medium text-zinc-300">输出</h4>
                   <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-100">
                     {selectedTask.output}
+                  </div>
+                </div>
+              )}
+
+              {selectedTask.artifacts.length > 0 && (
+                <div>
+                  <h4 className="mb-2 text-sm font-medium text-zinc-300">产物</h4>
+                  <div className="space-y-2">
+                    {selectedTask.artifacts.map((artifact, index) => (
+                      <ArtifactRow key={index} artifact={artifact} />
+                    ))}
                   </div>
                 </div>
               )}
