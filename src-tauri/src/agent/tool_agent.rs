@@ -344,7 +344,6 @@ fn shunting_yard(tokens: &[Token]) -> Result<Vec<Token>, String> {
                 }
                 stack.push(op.clone());
             }
-            _ => unreachable!(),
         }
     }
 

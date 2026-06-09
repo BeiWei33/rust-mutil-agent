@@ -326,6 +326,7 @@ async fn test_end_to_end_task_lifecycle() {
         .await
         .unwrap();
     // 至少应有一条记录（与 task_id 相关的）
+    assert!(!recall.is_empty());
     assert!(!memory.recent_turns(10).is_empty());
 }
 
