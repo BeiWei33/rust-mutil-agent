@@ -17,6 +17,8 @@ import type {
   CancelTaskResponse,
   RetryTaskRequest,
   RetryTaskResponse,
+  SkipTaskStepRequest,
+  SkipTaskStepResponse,
   Task,
   TaskEvent,
   TaskListResponse,
@@ -98,6 +100,19 @@ export async function retryTask(
   request: RetryTaskRequest
 ): Promise<RetryTaskResponse> {
   return invoke<RetryTaskResponse>(`${CMD_PREFIX}retry_task`, {
+    request,
+  });
+}
+
+/**
+ * 跳过单个任务步骤
+ * @param request 跳过步骤请求
+ * @returns 更新后的任务
+ */
+export async function skipTaskStep(
+  request: SkipTaskStepRequest
+): Promise<SkipTaskStepResponse> {
+  return invoke<SkipTaskStepResponse>(`${CMD_PREFIX}skip_task_step`, {
     request,
   });
 }
@@ -682,6 +697,94 @@ async function mockRetryTask(
   ];
 
   return { taskId: request.taskId, task: retried };
+}
+
+async function mockSkipTaskStep(
+  request: SkipTaskStepRequest
+): Promise<SkipTaskStepResponse> {
+  await new Promise((r) => setTimeout(r, 150));
+  const now = new Date().toISOString();
+  const task = MOCK_TASKS.find((item) => item.id === request.taskId) ?? null;
+  if (!task) return { taskId: request.taskId, stepId: request.stepId, task: null };
+
+  const reason = request.reason || "用户跳过步骤。";
+  const skippedSteps = task.steps.map((step) =>
+    step.id === request.stepId && step.status !== "completed" && step.status !== "skipped"
+      ? {
+          ...step,
+          status: "skipped" as const,
+          result: { skipped: true, reason },
+          error: reason,
+          completedAt: now,
+        }
+      : step
+  );
+  const readySteps = skippedSteps.map((step) => {
+    if (step.status !== "pending") return step;
+    const ready = step.dependsOn.every((depId) =>
+      skippedSteps.some(
+        (candidate) =>
+          candidate.id === depId &&
+          (candidate.status === "completed" || candidate.status === "skipped")
+      )
+    );
+    return ready
+      ? {
+          ...step,
+          status: "running" as const,
+          attempts: step.attempts + 1,
+          startedAt: now,
+          error: null,
+        }
+      : step;
+  });
+  const completedSteps = readySteps.filter((step) => step.status === "completed").length;
+  const skippedCount = readySteps.filter((step) => step.status === "skipped").length;
+  const done =
+    readySteps.length > 0 &&
+    readySteps.every((step) => step.status === "completed" || step.status === "skipped");
+  const updated: Task = {
+    ...task,
+    status: done ? "completed" : task.status === "cancelled" ? task.status : "running",
+    output: done
+      ? skippedCount === 0
+        ? `任务执行调度器已完成，共完成 ${completedSteps} 个步骤。`
+        : `任务执行调度器已完成，共完成 ${completedSteps} 个步骤，跳过 ${skippedCount} 个步骤。`
+      : task.output,
+    error: null,
+    updatedAt: now,
+    steps: readySteps,
+  };
+
+  MOCK_TASKS = MOCK_TASKS.map((item) => (item.id === request.taskId ? updated : item));
+  MOCK_EVENTS[request.taskId] = [
+    ...(MOCK_EVENTS[request.taskId] ?? []),
+    {
+      id: generateId(),
+      taskId: request.taskId,
+      stepId: request.stepId,
+      kind: "stepSkipped",
+      message: `步骤已跳过：${reason}`,
+      payload: { stepId: request.stepId, reason },
+      createdAt: now,
+    },
+  ];
+  if (done) {
+    MOCK_EVENTS[request.taskId] = [
+      ...(MOCK_EVENTS[request.taskId] ?? []),
+      {
+        id: generateId(),
+        taskId: request.taskId,
+        stepId: null,
+        kind: "completed",
+        message: updated.output || "任务已完成。",
+        payload: { completedSteps, skippedSteps: skippedCount },
+        createdAt: now,
+      },
+    ];
+  }
+
+  return { taskId: request.taskId, stepId: request.stepId, task: updated };
 }
 
 /** 浏览器环境下降级的 listAgents */
@@ -1615,6 +1718,7 @@ export const api = {
   createTask: isTauri() ? createTask : mockCreateTask,
   cancelTask: isTauri() ? cancelTask : mockCancelTask,
   retryTask: isTauri() ? retryTask : mockRetryTask,
+  skipTaskStep: isTauri() ? skipTaskStep : mockSkipTaskStep,
   getAgentStatus: isTauri()
     ? getAgentStatus
     : async (id: string) => {

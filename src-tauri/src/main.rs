@@ -148,6 +148,7 @@ async fn main() {
             commands::get_task_events,
             commands::cancel_task,
             commands::retry_task,
+            commands::skip_task_step,
             commands::get_project_snapshot,
             commands::list_project_files,
             commands::read_project_file,

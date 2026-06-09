@@ -11,6 +11,7 @@ pub enum TaskEventKind {
     Planned,
     StepStarted,
     StepCompleted,
+    StepSkipped,
     StepFailed,
     Completed,
     Failed,

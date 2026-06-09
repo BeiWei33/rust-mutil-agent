@@ -82,6 +82,10 @@ function canRetryTask(task: Task): boolean {
   return ["failed", "cancelled"].includes(task.status);
 }
 
+function canSkipStep(step: Task["steps"][number]): boolean {
+  return ["pending", "waitingApproval", "running", "failed"].includes(step.status);
+}
+
 function TaskListItem({
   task,
   selected,
@@ -122,19 +126,43 @@ function TaskListItem({
   );
 }
 
-function StepRow({ step }: { step: Task["steps"][number] }) {
+function StepRow({
+  step,
+  skipping,
+  onSkip,
+}: {
+  step: Task["steps"][number];
+  skipping: boolean;
+  onSkip: () => void;
+}) {
   const status = STEP_STATUS[step.status];
+  const skippable = canSkipStep(step);
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/35 px-4 py-3">
       <div className="flex items-start gap-3">
         <span className={`mt-1.5 h-2 w-2 rounded-full ${status.dot}`} />
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-zinc-500">#{step.order}</span>
-            <h4 className="text-sm font-medium text-zinc-200">{step.title}</h4>
-            <span className={`rounded-md border px-2 py-0.5 text-[11px] ${status.className}`}>
-              {status.label}
-            </span>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-zinc-500">#{step.order}</span>
+                <h4 className="text-sm font-medium text-zinc-200">{step.title}</h4>
+                <span className={`rounded-md border px-2 py-0.5 text-[11px] ${status.className}`}>
+                  {status.label}
+                </span>
+              </div>
+            </div>
+            {skippable && (
+              <button
+                type="button"
+                onClick={onSkip}
+                disabled={skipping}
+                className="shrink-0 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-300 transition-colors hover:border-amber-400/40 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
+                title="跳过这个步骤"
+              >
+                {skipping ? "跳过中..." : "跳过"}
+              </button>
+            )}
           </div>
           <p className="mt-1 text-xs leading-relaxed text-zinc-400">{step.instruction}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
@@ -749,9 +777,11 @@ export default function TaskBoard() {
   const selectedTask = useAgentStore((s) => s.selectedTask);
   const taskEvents = useAgentStore((s) => s.taskEvents);
   const taskEventsLoading = useAgentStore((s) => s.taskEventsLoading);
+  const skipTaskStepLoadingId = useAgentStore((s) => s.skipTaskStepLoadingId);
   const createTask = useAgentStore((s) => s.createTask);
   const cancelTask = useAgentStore((s) => s.cancelTask);
   const retryTask = useAgentStore((s) => s.retryTask);
+  const skipTaskStep = useAgentStore((s) => s.skipTaskStep);
   const fetchTasks = useAgentStore((s) => s.fetchTasks);
   const setSelectedTaskId = useAgentStore((s) => s.setSelectedTaskId);
   const startTaskPolling = useAgentStore((s) => s.startTaskPolling);
@@ -792,6 +822,11 @@ export default function TaskBoard() {
     setRetryingTaskId(task.id);
     await retryTask(task.id);
     setRetryingTaskId(null);
+  };
+
+  const handleSkipStep = async (task: Task, step: Task["steps"][number]) => {
+    if (!canSkipStep(step) || skipTaskStepLoadingId) return;
+    await skipTaskStep(task.id, step.id);
   };
 
   return (
@@ -911,7 +946,12 @@ export default function TaskBoard() {
                 </div>
                 <div className="space-y-3">
                   {selectedTask.steps.map((step) => (
-                    <StepRow key={step.id} step={step} />
+                    <StepRow
+                      key={step.id}
+                      step={step}
+                      skipping={skipTaskStepLoadingId === step.id}
+                      onSkip={() => handleSkipStep(selectedTask, step)}
+                    />
                   ))}
                 </div>
               </div>

@@ -114,6 +114,7 @@ interface AgentState {
   selectedTask: Task | null;
   taskEvents: TaskEvent[];
   taskEventsLoading: boolean;
+  skipTaskStepLoadingId: string | null;
   /** 获取任务列表 */
   fetchTasks: () => Promise<void>;
   /** 获取单个任务详情 */
@@ -126,6 +127,8 @@ interface AgentState {
   cancelTask: (taskId: string, reason?: string) => Promise<void>;
   /** 重试任务 */
   retryTask: (taskId: string, reason?: string) => Promise<void>;
+  /** 跳过单个任务步骤 */
+  skipTaskStep: (taskId: string, stepId: string, reason?: string) => Promise<void>;
   /** 设置当前选中任务 */
   setSelectedTaskId: (taskId: string | null) => void;
   /** 开启任务轮询 */
@@ -361,6 +364,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   selectedTask: null,
   taskEvents: [],
   taskEventsLoading: false,
+  skipTaskStepLoadingId: null,
 
   fetchTasks: async () => {
     set({ tasksLoading: true, tasksError: null });
@@ -484,6 +488,31 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await get().fetchTaskEvents(taskId);
     } catch (err: unknown) {
       set({ tasksError: getErrorMessage(err, "重试任务失败") });
+    }
+  },
+
+  skipTaskStep: async (taskId, stepId, reason = "用户跳过步骤。") => {
+    set({ tasksError: null, skipTaskStepLoadingId: stepId });
+    try {
+      const res = await api.skipTaskStep({ taskId, stepId, reason });
+      set((s) => {
+        const task = res.task ?? null;
+        const tasks = task
+          ? s.tasks.map((item) => (item.id === taskId ? task : item))
+          : s.tasks.filter((item) => item.id !== taskId);
+        return {
+          tasks,
+          selectedTask: s.selectedTaskId === taskId ? task : s.selectedTask,
+          tasksError: null,
+          skipTaskStepLoadingId: null,
+        };
+      });
+      await get().fetchTaskEvents(taskId);
+    } catch (err: unknown) {
+      set({
+        tasksError: getErrorMessage(err, "跳过任务步骤失败"),
+        skipTaskStepLoadingId: null,
+      });
     }
   },
 

@@ -317,6 +317,7 @@ Planner LLM 相关环境变量：
 | `get_task_events` | `{ taskId }` | `TaskEvent[]` | 已实现 |
 | `cancel_task` | `{ request: { taskId, reason? } }` | `CancelTaskResponse` | 已实现任务取消 |
 | `retry_task` | `{ request: { taskId, reason? } }` | `RetryTaskResponse` | 已实现失败/取消任务重试 |
+| `skip_task_step` | `{ request: { taskId, stepId, reason? } }` | `SkipTaskStepResponse` | 已实现单步骤跳过、依赖继续推进和 `stepSkipped` 事件 |
 | `get_project_snapshot` | 无 | `ProjectSnapshot` | 已实现 |
 | `list_project_files` | `{ maxFiles? }` | `{ files }` | 已实现 |
 | `read_project_file` | `{ path }` | `FileReadResponse` | 已实现只读沙箱 |
@@ -574,7 +575,7 @@ npm test
 
 1. Planner 默认仍是关键词规则；真实 LLM 规划需要通过 `PLANNER_USE_LLM` 显式开启。
 2. Planner 已有 JSON plan schema、解析校验和失败降级策略；前端模型/API 配置可作为请求级临时 LLMClient 使用，API Key 不写入普通上下文或持久化数据。
-3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、失败/取消后的任务重试、任务/事件持久化，以及命令/补丁审批对任务步骤的等待、恢复和失败回写，尚未实现步骤超时，也尚未覆盖所有通用工具审批。
+3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、单步骤跳过、失败/取消后的任务重试、任务/事件持久化，以及命令/补丁审批对任务步骤的等待、恢复和失败回写，尚未实现步骤超时，也尚未覆盖所有通用工具审批。
 4. Planner 分析步骤仍由运行时内部模拟完成，避免把计划内 Planner 子步骤再次送入 Planner 触发嵌套规划。
 5. 聊天历史已按 `sessionId` 持久化；当前前端默认使用 `default` 单会话，尚未实现多会话管理界面。
 6. MemoryAgent 默认不使用 SQLite；长期记忆未接入应用启动流程。
@@ -586,7 +587,7 @@ npm test
 
 ## 13. 建议后续路线
 
-1. 增强调度器控制面：实现步骤超时、单步骤跳过和通用工具审批状态流转。
+1. 增强调度器控制面：实现步骤超时和通用工具审批状态流转。
 2. 扩展请求级真实 LLM：在 Planner 临时 LLMClient 基础上，继续让 Executor/Tool 使用受控工具调用，并接入安全存储。
 3. 扩展工具执行层：在受控验证命令运行、审计、审批请求和补丁提案基础上，引入差异审查、验证失败自动返工和高风险动作自动暂停。
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。

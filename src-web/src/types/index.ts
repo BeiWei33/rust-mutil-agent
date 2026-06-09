@@ -178,6 +178,7 @@ export type TaskEventKind =
   | "planned"
   | "stepStarted"
   | "stepCompleted"
+  | "stepSkipped"
   | "stepFailed"
   | "completed"
   | "failed"
@@ -232,6 +233,20 @@ export interface RetryTaskRequest {
 /** 重试任务响应 */
 export interface RetryTaskResponse {
   taskId: string;
+  task?: Task | null;
+}
+
+/** 跳过任务步骤请求 */
+export interface SkipTaskStepRequest {
+  taskId: string;
+  stepId: string;
+  reason?: string;
+}
+
+/** 跳过任务步骤响应 */
+export interface SkipTaskStepResponse {
+  taskId: string;
+  stepId: string;
   task?: Task | null;
 }
 

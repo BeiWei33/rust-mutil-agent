@@ -309,7 +309,7 @@ cp .env.example .env
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
 4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 仍需补齐同等级别权限控制。
-6. 步骤超时、单步骤跳过、ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
+6. 步骤超时、ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
 7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
 
 ## 路线图
@@ -317,7 +317,7 @@ cp .env.example .env
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
 1. 把已具备的命令/patch 审批等待恢复、手动回滚、失败回滚默认策略和验证失败可重试状态继续推进到验证失败自动返工。
-2. 增强调度器控制面：步骤超时、单步骤跳过和通用工具审批暂停/恢复。
+2. 增强调度器控制面：步骤超时和通用工具审批暂停/恢复。
 3. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
 4. 统一前端设置、安全存储和后端 LLMClient 配置。
 

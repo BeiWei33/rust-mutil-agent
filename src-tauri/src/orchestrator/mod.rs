@@ -52,6 +52,12 @@ struct RetryTaskResult {
     needs_planner: bool,
 }
 
+#[derive(Debug, Clone)]
+struct SkipStepResult {
+    task: Task,
+    dispatches: Vec<StepDispatch>,
+}
+
 /// 任务执行结果（旧接口兼容结构）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskResult {
@@ -425,6 +431,68 @@ impl TaskRuntime {
             dispatches,
             needs_planner,
         })
+    }
+
+    fn skip_step(&mut self, task_id: &str, step_id: &str, reason: &str) -> Option<SkipStepResult> {
+        {
+            let mut emitted = Vec::new();
+            let task = self.tasks.get_mut(task_id)?;
+
+            if task.status == TaskStatus::Cancelled {
+                return Some(SkipStepResult {
+                    task: task.clone(),
+                    dispatches: Vec::new(),
+                });
+            }
+
+            let skipped_step_id = {
+                let step = task.steps.iter_mut().find(|step| step.id == step_id)?;
+                if matches!(step.status, StepStatus::Completed | StepStatus::Skipped) {
+                    return Some(SkipStepResult {
+                        task: task.clone(),
+                        dispatches: Vec::new(),
+                    });
+                }
+
+                step.status = StepStatus::Skipped;
+                step.error = Some(reason.to_string());
+                step.completed_at = Some(chrono::Utc::now());
+                step.result = Some(serde_json::json!({
+                    "skipped": true,
+                    "reason": reason,
+                }));
+                step.id.clone()
+            };
+
+            if matches!(
+                task.status,
+                TaskStatus::Failed | TaskStatus::WaitingApproval
+            ) {
+                task.status = TaskStatus::Running;
+                task.error = None;
+            }
+            task.touch();
+
+            emitted.push(TaskEvent::new(
+                task_id.to_string(),
+                Some(skipped_step_id.clone()),
+                TaskEventKind::StepSkipped,
+                format!("步骤已跳过：{reason}"),
+                serde_json::json!({
+                    "stepId": skipped_step_id,
+                    "reason": reason,
+                }),
+            ));
+
+            self.complete_task_if_ready(task_id, &mut emitted);
+            self.extend_events(emitted);
+            self.persist_task_by_id(task_id);
+        }
+
+        let dispatches = self.advance_task(task_id);
+        let task = self.get_task(task_id)?;
+
+        Some(SkipStepResult { task, dispatches })
     }
 
     fn record_patch_applied(
@@ -815,17 +883,29 @@ impl TaskRuntime {
                 && task
                     .steps
                     .iter()
-                    .all(|step| step.status == StepStatus::Completed)
+                    .all(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
             {
-                let completed_steps = task.steps.len();
-                let output = format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。");
+                let completed_steps = task
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == StepStatus::Completed)
+                    .count();
+                let skipped_steps = task
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == StepStatus::Skipped)
+                    .count();
+                let output = completion_output(completed_steps, skipped_steps);
                 task.complete(output.clone());
                 emitted.push(TaskEvent::new(
                     task_id.to_string(),
                     None,
                     TaskEventKind::Completed,
                     output,
-                    serde_json::json!({ "completedSteps": completed_steps }),
+                    serde_json::json!({
+                        "completedSteps": completed_steps,
+                        "skippedSteps": skipped_steps,
+                    }),
                 ));
             }
         }
@@ -935,17 +1015,29 @@ impl TaskRuntime {
                 && task
                     .steps
                     .iter()
-                    .all(|step| step.status == StepStatus::Completed)
+                    .all(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
             {
-                let completed_steps = task.steps.len();
-                let output = format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。");
+                let completed_steps = task
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == StepStatus::Completed)
+                    .count();
+                let skipped_steps = task
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == StepStatus::Skipped)
+                    .count();
+                let output = completion_output(completed_steps, skipped_steps);
                 task.complete(output.clone());
                 emitted.push(TaskEvent::new(
                     task_id.to_string(),
                     None,
                     TaskEventKind::Completed,
                     output,
-                    serde_json::json!({ "completedSteps": completed_steps }),
+                    serde_json::json!({
+                        "completedSteps": completed_steps,
+                        "skippedSteps": skipped_steps,
+                    }),
                 ));
             }
         }
@@ -1121,17 +1213,29 @@ impl TaskRuntime {
         if task
             .steps
             .iter()
-            .all(|step| step.status == StepStatus::Completed)
+            .all(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
         {
-            let completed_steps = task.steps.len();
-            let output = format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。");
+            let completed_steps = task
+                .steps
+                .iter()
+                .filter(|step| step.status == StepStatus::Completed)
+                .count();
+            let skipped_steps = task
+                .steps
+                .iter()
+                .filter(|step| step.status == StepStatus::Skipped)
+                .count();
+            let output = completion_output(completed_steps, skipped_steps);
             task.complete(output.clone());
             emitted.push(TaskEvent::new(
                 task_id.to_string(),
                 None,
                 TaskEventKind::Completed,
                 output,
-                serde_json::json!({ "completedSteps": completed_steps }),
+                serde_json::json!({
+                    "completedSteps": completed_steps,
+                    "skippedSteps": skipped_steps,
+                }),
             ));
         }
     }
@@ -1493,6 +1597,24 @@ impl Orchestrator {
         runtime.get_task(task_id)
     }
 
+    /// 跳过单个步骤，并继续调度依赖已满足的后续步骤。
+    pub async fn skip_task_step(&self, task_id: &str, step_id: &str, reason: &str) -> Option<Task> {
+        let skipped = {
+            let mut runtime = self.runtime.lock().await;
+            runtime.skip_step(task_id, step_id, reason)
+        }?;
+
+        dispatch_steps(
+            self.runtime.clone(),
+            self.agent_senders(),
+            skipped.dispatches,
+        )
+        .await;
+
+        let runtime = self.runtime.lock().await;
+        runtime.get_task(&skipped.task.id)
+    }
+
     /// 列出所有已注册的 Agent 名称
     pub fn list_agents(&self) -> Vec<String> {
         self.agents
@@ -1661,7 +1783,11 @@ fn ready_step_indices(task: &Task) -> Vec<usize> {
 
             let dependencies_completed = step.depends_on.iter().all(|dep_id| {
                 task.steps.iter().any(|candidate| {
-                    candidate.id == *dep_id && candidate.status == StepStatus::Completed
+                    candidate.id == *dep_id
+                        && matches!(
+                            candidate.status,
+                            StepStatus::Completed | StepStatus::Skipped
+                        )
                 })
             });
 
@@ -1671,6 +1797,16 @@ fn ready_step_indices(task: &Task) -> Vec<usize> {
 
     indices.sort_by_key(|index| task.steps[*index].order);
     indices
+}
+
+fn completion_output(completed_steps: usize, skipped_steps: usize) -> String {
+    if skipped_steps == 0 {
+        format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。")
+    } else {
+        format!(
+            "任务执行调度器已完成，共完成 {completed_steps} 个步骤，跳过 {skipped_steps} 个步骤。"
+        )
+    }
 }
 
 fn build_step_dispatch_context(task: &Task, step_index: usize) -> serde_json::Value {
@@ -2430,6 +2566,116 @@ mod tests {
         first.complete(serde_json::json!({ "ok": true }));
         task.steps[0] = first;
         assert_eq!(ready_step_indices(&task), vec![1]);
+    }
+
+    #[test]
+    fn test_ready_step_indices_treats_skipped_dependencies_as_ready() {
+        let mut task = Task::new("task-skip-ready", "跳过依赖");
+        let mut first = TaskStep::new(
+            "task-skip-ready-1",
+            "task-skip-ready",
+            1,
+            "Tool",
+            "可跳过步骤",
+            vec![],
+        );
+        first.status = StepStatus::Skipped;
+        first.completed_at = Some(chrono::Utc::now());
+        let second = TaskStep::new(
+            "task-skip-ready-2",
+            "task-skip-ready",
+            2,
+            "Executor",
+            "继续执行",
+            vec!["task-skip-ready-1".to_string()],
+        );
+
+        task.set_steps(vec![first, second]);
+
+        assert_eq!(ready_step_indices(&task), vec![1]);
+    }
+
+    #[test]
+    fn test_skip_step_dispatches_dependent_step() {
+        let task_id = "task-skip-dispatch";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "跳过后继续"));
+        runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "跳过后继续".to_string(),
+                steps: vec![
+                    crate::agent::planner_agent::PlanStep {
+                        step_id: format!("{task_id}-1"),
+                        order: 1,
+                        agent: "Tool".to_string(),
+                        instruction: "等待外部信息".to_string(),
+                        depends_on: vec![],
+                        status: crate::agent::planner_agent::StepStatus::Pending,
+                    },
+                    crate::agent::planner_agent::PlanStep {
+                        step_id: format!("{task_id}-2"),
+                        order: 2,
+                        agent: "Executor".to_string(),
+                        instruction: "根据现有信息继续".to_string(),
+                        depends_on: vec![format!("{task_id}-1")],
+                        status: crate::agent::planner_agent::StepStatus::Pending,
+                    },
+                ],
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let result = runtime
+            .skip_step(task_id, &format!("{task_id}-1"), "信息不足，跳过")
+            .unwrap();
+
+        assert_eq!(result.dispatches.len(), 1);
+        assert_eq!(result.dispatches[0].step_id, format!("{task_id}-2"));
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.steps[0].status, StepStatus::Skipped);
+        assert_eq!(task.steps[1].status, StepStatus::Running);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::StepSkipped));
+    }
+
+    #[test]
+    fn test_skip_last_step_completes_task_with_skipped_count() {
+        let task_id = "task-skip-complete";
+        let mut task = Task::new(task_id, "跳过最后一步");
+        let mut first = TaskStep::new(format!("{task_id}-1"), task_id, 1, "Tool", "检索", vec![]);
+        first.complete(serde_json::json!({ "ok": true }));
+        let mut second = TaskStep::new(
+            format!("{task_id}-2"),
+            task_id,
+            2,
+            "Executor",
+            "整理输出",
+            vec![format!("{task_id}-1")],
+        );
+        second.start();
+        task.steps = vec![first, second];
+        task.status = TaskStatus::Running;
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+
+        let result = runtime
+            .skip_step(task_id, &format!("{task_id}-2"), "无需整理")
+            .unwrap();
+
+        assert!(result.dispatches.is_empty());
+        assert_eq!(result.task.status, TaskStatus::Completed);
+        assert_eq!(result.task.steps[1].status, StepStatus::Skipped);
+        let completed = runtime
+            .get_events(task_id)
+            .into_iter()
+            .find(|event| event.kind == TaskEventKind::Completed)
+            .unwrap();
+        assert_eq!(completed.payload["completedSteps"], serde_json::json!(1));
+        assert_eq!(completed.payload["skippedSteps"], serde_json::json!(1));
     }
 
     #[test]

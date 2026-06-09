@@ -277,6 +277,24 @@ pub struct RetryTaskResponse {
     pub task: Option<Task>,
 }
 
+/// 跳过任务步骤请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkipTaskStepRequest {
+    pub task_id: String,
+    pub step_id: String,
+    pub reason: Option<String>,
+}
+
+/// 跳过任务步骤响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkipTaskStepResponse {
+    pub task_id: String,
+    pub step_id: String,
+    pub task: Option<Task>,
+}
+
 /// 任务列表响应。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -897,6 +915,39 @@ pub async fn retry_task(
     let task = orch.retry_task(task_id, reason).await;
     Ok(RetryTaskResponse {
         task_id: task_id.to_string(),
+        task,
+    })
+}
+
+/// 跳过单个任务步骤。
+///
+/// 前端调用：`invoke('skip_task_step', { request: { taskId, stepId, reason } })`
+#[tauri::command]
+pub async fn skip_task_step(
+    request: SkipTaskStepRequest,
+    state: State<'_, AppState>,
+) -> Result<SkipTaskStepResponse, ApiError> {
+    let task_id = request.task_id.trim();
+    if task_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少要操作的任务 ID。"));
+    }
+    let step_id = request.step_id.trim();
+    if step_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少要跳过的步骤 ID。"));
+    }
+
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("用户跳过步骤。");
+
+    let orch = state.orchestrator.lock().await;
+    let task = orch.skip_task_step(task_id, step_id, reason).await;
+    Ok(SkipTaskStepResponse {
+        task_id: task_id.to_string(),
+        step_id: step_id.to_string(),
         task,
     })
 }
