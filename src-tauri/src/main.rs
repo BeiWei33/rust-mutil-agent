@@ -25,12 +25,13 @@ use crate::approval::ApprovalStore;
 use crate::bus::MessageBus;
 use crate::chat::ChatStore;
 use crate::orchestrator::Orchestrator;
-use crate::runtime::CommandRunStore;
+use crate::runtime::{CommandRunStore, ToolInvocationStore};
 use crate::workspace::PatchProposalStore;
 
 const DEFAULT_TASK_DB_PATH: &str = "rust-mutil-agent-tasks.sqlite3";
 const DEFAULT_CHAT_DB_PATH: &str = "rust-mutil-agent-chat.sqlite3";
 const DEFAULT_COMMAND_DB_PATH: &str = "rust-mutil-agent-commands.sqlite3";
+const DEFAULT_TOOL_INVOCATION_DB_PATH: &str = "rust-mutil-agent-tool-invocations.sqlite3";
 const DEFAULT_APPROVAL_DB_PATH: &str = "rust-mutil-agent-approvals.sqlite3";
 const DEFAULT_PATCH_DB_PATH: &str = "rust-mutil-agent-patches.sqlite3";
 
@@ -40,6 +41,7 @@ pub struct AppState {
     pub orchestrator: Arc<Mutex<Orchestrator>>,
     pub chat_store: Arc<ChatStore>,
     pub command_store: Arc<CommandRunStore>,
+    pub tool_invocation_store: Arc<ToolInvocationStore>,
     pub approval_store: Arc<ApprovalStore>,
     pub patch_store: Arc<PatchProposalStore>,
 }
@@ -97,6 +99,18 @@ async fn main() {
             Arc::new(CommandRunStore::open(":memory:").expect("内存命令审计初始化失败"))
         }
     };
+    let tool_invocation_db_path = std::env::var("TOOL_INVOCATION_DB_PATH")
+        .unwrap_or_else(|_| DEFAULT_TOOL_INVOCATION_DB_PATH.to_string());
+    let tool_invocation_store = match ToolInvocationStore::open(&tool_invocation_db_path) {
+        Ok(store) => {
+            tracing::info!("工具调用审计数据库已启用: {}", tool_invocation_db_path);
+            Arc::new(store)
+        }
+        Err(err) => {
+            tracing::warn!("工具调用审计数据库初始化失败，将使用内存审计记录: {}", err);
+            Arc::new(ToolInvocationStore::open(":memory:").expect("内存工具调用审计初始化失败"))
+        }
+    };
     let approval_db_path =
         std::env::var("APPROVAL_DB_PATH").unwrap_or_else(|_| DEFAULT_APPROVAL_DB_PATH.to_string());
     let approval_store = match ApprovalStore::open(&approval_db_path) {
@@ -125,6 +139,7 @@ async fn main() {
     {
         let mut orch = orchestrator.lock().await;
         orch.set_approval_store(approval_store.clone());
+        orch.set_tool_invocation_store(tool_invocation_store.clone());
         orch.register_builtin_agents().await;
     }
     tracing::info!("Agent 运行时初始化完成");
@@ -135,6 +150,7 @@ async fn main() {
             orchestrator,
             chat_store,
             command_store,
+            tool_invocation_store,
             approval_store,
             patch_store,
         })
@@ -159,6 +175,7 @@ async fn main() {
             commands::request_tool_action_approval,
             commands::run_approved_project_command,
             commands::list_project_command_runs,
+            commands::list_tool_invocations,
             commands::create_patch_proposal,
             commands::list_patch_proposals,
             commands::get_patch_proposal,

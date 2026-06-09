@@ -19,6 +19,7 @@ import type {
   SearchMatch,
   ProjectCommandRunRequest,
   ProjectCommandRunResponse,
+  ToolInvocationRecord,
   ApprovalRequest,
   ApprovalStatus,
   CreatePatchProposalRequest,
@@ -176,6 +177,8 @@ interface AgentState {
   lastCommandApproval: ApprovalRequest | null;
   latestCommandRun: ProjectCommandRunResponse | null;
   commandRuns: ProjectCommandRunResponse[];
+  toolInvocations: ToolInvocationRecord[];
+  toolInvocationError: string | null;
   patchProposals: PatchProposal[];
   patchProposalLoading: boolean;
   patchProposalError: string | null;
@@ -184,6 +187,8 @@ interface AgentState {
   fetchProjectOverview: () => Promise<void>;
   /** 加载最近命令运行记录 */
   fetchCommandRuns: (limit?: number) => Promise<void>;
+  /** 加载最近工具调用记录 */
+  fetchToolInvocations: (limit?: number) => Promise<void>;
   /** 加载最近补丁提案 */
   fetchPatchProposals: (limit?: number) => Promise<void>;
   /** 读取项目文件 */
@@ -752,6 +757,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   lastCommandApproval: null,
   latestCommandRun: null,
   commandRuns: [],
+  toolInvocations: [],
+  toolInvocationError: null,
   patchProposals: [],
   patchProposalLoading: false,
   patchProposalError: null,
@@ -772,6 +779,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       get().fetchCommandRuns(10).catch(() => {
         // 命令审计记录加载失败不影响项目概览。
       });
+      get().fetchToolInvocations(10).catch(() => {
+        // 工具审计记录加载失败不影响项目概览。
+      });
       get().fetchPatchProposals(10).catch(() => {
         // 补丁提案加载失败不影响项目概览。
       });
@@ -789,6 +799,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set({ commandRuns: result.runs, commandRunError: null });
     } catch (err: unknown) {
       set({ commandRunError: getErrorMessage(err, "获取命令运行记录失败") });
+    }
+  },
+
+  fetchToolInvocations: async (limit = 10) => {
+    try {
+      const result = await api.listToolInvocations(limit);
+      set({ toolInvocations: result.invocations, toolInvocationError: null });
+    } catch (err: unknown) {
+      set({ toolInvocationError: getErrorMessage(err, "获取工具调用记录失败") });
     }
   },
 
@@ -915,6 +934,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({
       projectError: null,
       commandRunError: null,
+      toolInvocationError: null,
       commandApprovalError: null,
       patchProposalError: null,
     }),

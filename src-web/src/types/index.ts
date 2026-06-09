@@ -309,6 +309,25 @@ export interface ProjectCommandRunListResponse {
   runs: ProjectCommandRunResponse[];
 }
 
+/** ToolAgent 工具调用审计记录 */
+export interface ToolInvocationRecord {
+  id: string;
+  taskId?: string | null;
+  stepId?: string | null;
+  approvalId?: string | null;
+  toolName: string;
+  argsSummary: unknown;
+  success: boolean;
+  error?: string | null;
+  durationMs: number;
+  createdAt: string;
+}
+
+/** 最近工具调用审计响应 */
+export interface ToolInvocationListResponse {
+  invocations: ToolInvocationRecord[];
+}
+
 /** 审批风险等级 */
 export type ApprovalRisk = "low" | "medium" | "high" | "critical";
 

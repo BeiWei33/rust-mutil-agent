@@ -27,6 +27,7 @@ vi.mock("@/lib/tauri", () => ({
     requestProjectCommandApproval: vi.fn(),
     runApprovedProjectCommand: vi.fn(),
     listProjectCommandRuns: vi.fn(),
+    listToolInvocations: vi.fn(),
     createPatchProposal: vi.fn(),
     listPatchProposals: vi.fn(),
     getPatchProposal: vi.fn(),
@@ -52,6 +53,7 @@ const mockApi = api as unknown as {
   requestProjectCommandApproval: ReturnType<typeof vi.fn>;
   runApprovedProjectCommand: ReturnType<typeof vi.fn>;
   listProjectCommandRuns: ReturnType<typeof vi.fn>;
+  listToolInvocations: ReturnType<typeof vi.fn>;
   createPatchProposal: ReturnType<typeof vi.fn>;
   listPatchProposals: ReturnType<typeof vi.fn>;
   getPatchProposal: ReturnType<typeof vi.fn>;
@@ -115,6 +117,8 @@ describe("useAgentStore", () => {
       lastCommandApproval: null,
       latestCommandRun: null,
       commandRuns: [],
+      toolInvocations: [],
+      toolInvocationError: null,
       patchProposals: [],
       patchProposalLoading: false,
       patchProposalError: null,
@@ -619,6 +623,32 @@ describe("useAgentStore", () => {
     expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(5);
     expect(getState().commandRuns).toEqual(runs);
     expect(getState().commandRunError).toBeNull();
+  });
+
+  /// 测试 — fetchToolInvocations 成功时保存最近工具调用记录
+  /// 验证：项目面板可读取 ToolAgent 持久化审计记录
+  it("fetchToolInvocations 成功时应保存最近工具调用记录", async () => {
+    const invocations = [
+      {
+        id: "tool-run-1",
+        taskId: "task-1",
+        stepId: "task-1-1",
+        approvalId: "approval-1",
+        toolName: "file_read",
+        argsSummary: { path: "README.md" },
+        success: true,
+        error: null,
+        durationMs: 12,
+        createdAt: "2026-06-09T11:30:00Z",
+      },
+    ];
+    mockApi.listToolInvocations.mockResolvedValue({ invocations });
+
+    await getState().fetchToolInvocations(5);
+
+    expect(mockApi.listToolInvocations).toHaveBeenCalledWith(5);
+    expect(getState().toolInvocations).toEqual(invocations);
+    expect(getState().toolInvocationError).toBeNull();
   });
 
   /// 测试 — requestProjectCommandApproval 成功时保存审批请求

@@ -30,6 +30,8 @@ import type {
   ProjectCommandRunRequest,
   ProjectCommandRunResponse,
   ProjectCommandRunListResponse,
+  ToolInvocationListResponse,
+  ToolInvocationRecord,
   ApprovalDecisionRequest,
   ApprovalListResponse,
   ApprovalRequest,
@@ -286,6 +288,19 @@ export async function listProjectCommandRuns(
 }
 
 /**
+ * 获取最近 ToolAgent 工具调用审计记录
+ * @param limit 最大返回数量
+ * @returns 工具调用记录列表
+ */
+export async function listToolInvocations(
+  limit = 20
+): Promise<ToolInvocationListResponse> {
+  return invoke<ToolInvocationListResponse>(`${CMD_PREFIX}list_tool_invocations`, {
+    limit,
+  });
+}
+
+/**
  * 创建补丁提案并生成审批请求
  * @param request 补丁摘要和文件变更
  * @returns 补丁提案和对应审批
@@ -485,6 +500,20 @@ const MOCK_AGENTS: AgentStatus[] = [
 let MOCK_TASKS: Task[] = [];
 let MOCK_EVENTS: Record<string, TaskEvent[]> = {};
 let MOCK_COMMAND_RUNS: ProjectCommandRunResponse[] = [];
+let MOCK_TOOL_INVOCATIONS: ToolInvocationRecord[] = [
+  {
+    id: "mock-tool-invocation-1",
+    taskId: null,
+    stepId: null,
+    approvalId: null,
+    toolName: "web_search",
+    argsSummary: { query: "Rust Agent 审计", max_results: 5 },
+    success: true,
+    error: null,
+    durationMs: 36,
+    createdAt: new Date().toISOString(),
+  },
+];
 let MOCK_APPROVALS: ApprovalRequest[] = [];
 let MOCK_PATCH_PROPOSALS: PatchProposal[] = [];
 
@@ -1403,6 +1432,13 @@ async function mockListProjectCommandRuns(
   return { runs: MOCK_COMMAND_RUNS.slice(0, limit) };
 }
 
+async function mockListToolInvocations(
+  limit = 20
+): Promise<ToolInvocationListResponse> {
+  await new Promise((r) => setTimeout(r, 80));
+  return { invocations: MOCK_TOOL_INVOCATIONS.slice(0, limit) };
+}
+
 function buildMockPatchDiff(path: string, oldContent: string, newContent: string): string {
   const oldLines = oldContent.split("\n").filter((_, index, lines) =>
     index < lines.length - 1 || lines[index] !== ""
@@ -1908,6 +1944,7 @@ export const api = {
     ? runApprovedProjectCommand
     : mockRunApprovedProjectCommand,
   listProjectCommandRuns: isTauri() ? listProjectCommandRuns : mockListProjectCommandRuns,
+  listToolInvocations: isTauri() ? listToolInvocations : mockListToolInvocations,
   createPatchProposal: isTauri() ? createPatchProposal : mockCreatePatchProposal,
   listPatchProposals: isTauri() ? listPatchProposals : mockListPatchProposals,
   getPatchProposal: isTauri() ? getPatchProposal : mockGetPatchProposal,

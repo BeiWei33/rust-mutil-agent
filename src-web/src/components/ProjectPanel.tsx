@@ -5,7 +5,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAgentStore } from "@/store/useAgentStore";
-import type { PatchProposal, ProjectCommandRunResponse, WorkspaceEntry } from "@/types";
+import type {
+  PatchProposal,
+  ProjectCommandRunResponse,
+  ToolInvocationRecord,
+  WorkspaceEntry,
+} from "@/types";
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -41,6 +46,21 @@ function commandStatusLabel(result: ProjectCommandRunResponse): string {
   return result.success ? "通过" : "失败";
 }
 
+function toolStatusLabel(invocation: ToolInvocationRecord): string {
+  return invocation.success ? "通过" : "失败";
+}
+
+function formatArgsSummary(value: unknown): string {
+  if (value === null || value === undefined) return "-";
+  if (typeof value === "string") return value;
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 96 ? `${text.slice(0, 96)}...` : text;
+  } catch {
+    return String(value);
+  }
+}
+
 function formatRunTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -73,6 +93,8 @@ export default function ProjectPanel() {
   const lastCommandApproval = useAgentStore((s) => s.lastCommandApproval);
   const latestCommandRun = useAgentStore((s) => s.latestCommandRun);
   const commandRuns = useAgentStore((s) => s.commandRuns);
+  const toolInvocations = useAgentStore((s) => s.toolInvocations);
+  const toolInvocationError = useAgentStore((s) => s.toolInvocationError);
   const patchProposals = useAgentStore((s) => s.patchProposals);
   const patchProposalLoading = useAgentStore((s) => s.patchProposalLoading);
   const patchProposalError = useAgentStore((s) => s.patchProposalError);
@@ -370,6 +392,56 @@ export default function ProjectPanel() {
                               {run.durationMs}ms · {formatRunTime(run.createdAt)}
                             </span>
                           </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {(toolInvocationError || toolInvocations.length > 0) && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h4 className="text-xs font-medium text-zinc-300">最近工具</h4>
+                      <span className="text-[11px] text-zinc-500">
+                        {toolInvocations.length}
+                      </span>
+                    </div>
+                    {toolInvocationError && (
+                      <div className="mb-2 text-xs text-red-300">{toolInvocationError}</div>
+                    )}
+                    <div className="space-y-2">
+                      {toolInvocations.slice(0, 5).map((invocation) => (
+                        <div
+                          key={invocation.id}
+                          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <code className="truncate text-[11px] text-primary-200">
+                              {invocation.toolName}
+                            </code>
+                            <span
+                              className={`shrink-0 text-[11px] ${
+                                invocation.success ? "text-emerald-300" : "text-amber-300"
+                              }`}
+                            >
+                              {toolStatusLabel(invocation)}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate text-[11px] text-zinc-500">
+                            {formatArgsSummary(invocation.argsSummary)}
+                          </div>
+                          <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+                            <span className="truncate">
+                              {invocation.approvalId ? `审批 ${invocation.approvalId}` : "无审批"}
+                            </span>
+                            <span className="shrink-0">
+                              {invocation.durationMs}ms · {formatRunTime(invocation.createdAt)}
+                            </span>
+                          </div>
+                          {invocation.error && (
+                            <div className="mt-1 truncate text-[11px] text-red-300">
+                              {invocation.error}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>

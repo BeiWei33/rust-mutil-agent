@@ -20,6 +20,9 @@ use std::sync::Arc;
 
 use super::traits::{Agent, AgentMessage, Capability};
 use crate::error::AgentError;
+use crate::runtime::tool_invocation::summarize_tool_args;
+use crate::runtime::{ToolInvocationInput, ToolInvocationRecord, ToolInvocationStore};
+use std::time::Instant;
 
 // ============================================================
 // 工具注册表
@@ -409,6 +412,9 @@ pub struct ToolAgent {
 
     /// 调用计数
     count: u64,
+
+    /// 可选工具调用审计存储。
+    invocation_store: Option<Arc<ToolInvocationStore>>,
 }
 
 impl ToolAgent {
@@ -416,12 +422,51 @@ impl ToolAgent {
         Self {
             registry: ToolRegistry::new(),
             count: 0,
+            invocation_store: None,
         }
     }
 
     /// 使用预配置的注册表创建
     pub fn with_registry(registry: ToolRegistry) -> Self {
-        Self { registry, count: 0 }
+        Self {
+            registry,
+            count: 0,
+            invocation_store: None,
+        }
+    }
+
+    /// 启用工具调用审计。
+    pub fn with_invocation_store(mut self, store: Arc<ToolInvocationStore>) -> Self {
+        self.invocation_store = Some(store);
+        self
+    }
+
+    fn record_invocation(
+        &self,
+        msg: &AgentMessage,
+        tool_name: &str,
+        args: serde_json::Value,
+        success: bool,
+        error: Option<String>,
+        duration_ms: u64,
+    ) -> Option<String> {
+        let store = self.invocation_store.as_ref()?;
+        let record = ToolInvocationRecord::from_input(ToolInvocationInput {
+            task_id: msg.task_id.clone(),
+            step_id: json_string_field(&msg.context, "stepId"),
+            approval_id: json_string_field(&msg.context, "toolApprovalId"),
+            tool_name: tool_name.to_string(),
+            args,
+            success,
+            error,
+            duration_ms,
+        });
+        let id = record.id.clone();
+        if let Err(err) = store.append_invocation(&record) {
+            tracing::warn!("工具调用审计写入失败: {err}");
+            return None;
+        }
+        Some(id)
     }
 }
 
@@ -469,32 +514,73 @@ impl Agent for ToolAgent {
             .cloned()
             .unwrap_or_else(|| default_tool_args(tool_name, &msg.content));
 
-        tracing::info!("ToolAgent 调用工具: {tool_name}, 参数: {args}");
+        tracing::info!(
+            "ToolAgent 调用工具: {tool_name}, 参数摘要: {}",
+            summarize_tool_args(&args)
+        );
 
         // 调用工具
+        let start = Instant::now();
+        let args_for_audit = args.clone();
         match self.registry.call(tool_name, args) {
             Ok(result) => {
+                let audit_id = self.record_invocation(
+                    &msg,
+                    tool_name,
+                    args_for_audit,
+                    true,
+                    None,
+                    elapsed_ms(start),
+                );
                 let reply = msg
                     .reply_to(&format!("工具 [{tool_name}] 执行结果: {result}",))
                     .with_type("tool_result")
                     .with_context(serde_json::json!({
                         "tool": tool_name,
                         "result": result,
+                        "toolInvocationId": audit_id,
                     }));
 
                 Ok(vec![reply])
             }
             Err(e) => {
-                tracing::error!("工具调用失败: {e}");
+                let error = format!("{e}");
+                let audit_id = self.record_invocation(
+                    &msg,
+                    tool_name,
+                    args_for_audit,
+                    false,
+                    Some(error.clone()),
+                    elapsed_ms(start),
+                );
+                tracing::error!("工具调用失败: {error}");
 
                 let reply = msg
-                    .reply_to(&format!("工具调用失败: {e}"))
-                    .with_type("tool_error");
+                    .reply_to(&format!("工具调用失败: {error}"))
+                    .with_type("tool_error")
+                    .with_context(serde_json::json!({
+                        "tool": tool_name,
+                        "error": error,
+                        "toolInvocationId": audit_id,
+                    }));
 
                 Ok(vec![reply])
             }
         }
     }
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn default_tool_args(tool_name: &str, content: &str) -> serde_json::Value {
@@ -668,6 +754,40 @@ mod tests {
         let replies = agent.handle_message(msg).await.unwrap();
         assert_eq!(replies[0].msg_type, "tool_result");
         assert!(replies[0].content.contains("14"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_agent_records_invocation_audit() {
+        let store = Arc::new(ToolInvocationStore::open(":memory:").unwrap());
+        let mut agent = ToolAgent::default().with_invocation_store(store.clone());
+
+        let msg = AgentMessage::new("Orchestrator", "Tool", "2 + 2")
+            .with_task_id("task-1")
+            .with_context(serde_json::json!({
+                "tool": "calculator",
+                "args": { "expression": "2 + 2", "apiKey": "sk-secret" },
+                "stepId": "task-1-1",
+                "toolApprovalId": "approval-1",
+            }));
+
+        let replies = agent.handle_message(msg).await.unwrap();
+        assert_eq!(replies[0].msg_type, "tool_result");
+
+        let invocations = store.list_invocations(Some(10)).unwrap();
+        assert_eq!(invocations.len(), 1);
+        assert_eq!(invocations[0].task_id.as_deref(), Some("task-1"));
+        assert_eq!(invocations[0].step_id.as_deref(), Some("task-1-1"));
+        assert_eq!(invocations[0].approval_id.as_deref(), Some("approval-1"));
+        assert_eq!(invocations[0].tool_name, "calculator");
+        assert!(invocations[0].success);
+        assert_eq!(
+            invocations[0].args_summary["apiKey"],
+            serde_json::json!("[redacted]")
+        );
+        assert_eq!(
+            replies[0].context["toolInvocationId"],
+            serde_json::json!(invocations[0].id)
+        );
     }
 
     #[test]

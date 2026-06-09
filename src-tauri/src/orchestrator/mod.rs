@@ -16,7 +16,7 @@ use crate::agent::traits::{Agent, AgentMessage};
 use crate::approval::{ApprovalRequest, ApprovalStatus, ApprovalStore, CreateApprovalRequest};
 use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
-use crate::runtime::ProjectCommandRunResponse;
+use crate::runtime::{ProjectCommandRunResponse, ToolInvocationStore};
 use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep, TaskStore};
 use crate::workspace::{
     self, PatchApplyResult, PatchAutoRollbackResult, PatchProposal, PatchRevertResult,
@@ -1495,6 +1495,8 @@ pub struct Orchestrator {
     runtime: Arc<Mutex<TaskRuntime>>,
     /// 审批请求存储，用于调度器自动拦截高风险工具步骤。
     approval_store: Option<Arc<ApprovalStore>>,
+    /// 工具调用审计存储。
+    tool_invocation_store: Option<Arc<ToolInvocationStore>>,
     /// 是否已启动后台事件监听器
     event_loop_started: bool,
 }
@@ -1507,6 +1509,7 @@ impl Orchestrator {
             bus,
             runtime: Arc::new(Mutex::new(TaskRuntime::default())),
             approval_store: None,
+            tool_invocation_store: None,
             event_loop_started: false,
         }
     }
@@ -1522,6 +1525,7 @@ impl Orchestrator {
             bus,
             runtime: Arc::new(Mutex::new(TaskRuntime::with_store(store))),
             approval_store: None,
+            tool_invocation_store: None,
             event_loop_started: false,
         })
     }
@@ -1529,6 +1533,11 @@ impl Orchestrator {
     /// 设置审批存储，供调度器自动创建工具审批请求。
     pub fn set_approval_store(&mut self, approval_store: Arc<ApprovalStore>) {
         self.approval_store = Some(approval_store);
+    }
+
+    /// 设置工具调用审计存储。
+    pub fn set_tool_invocation_store(&mut self, store: Arc<ToolInvocationStore>) {
+        self.tool_invocation_store = Some(store);
     }
 
     /// 注册所有内置 Agent 并启动其运行循环
@@ -1543,8 +1552,11 @@ impl Orchestrator {
         self.register_and_spawn(Box::new(ExecutorAgent::new()))
             .await;
         self.register_and_spawn(Box::new(MemoryAgent::new())).await;
-        self.register_and_spawn(Box::new(ToolAgent::default()))
-            .await;
+        let tool_agent = match self.tool_invocation_store.clone() {
+            Some(store) => ToolAgent::default().with_invocation_store(store),
+            None => ToolAgent::default(),
+        };
+        self.register_and_spawn(Box::new(tool_agent)).await;
         self.start_task_event_loop();
 
         tracing::info!(
@@ -2109,52 +2121,120 @@ fn auto_tool_approval_input_from_dispatch(
     if dispatch.agent_name != "Tool" {
         return None;
     }
-
-    let tool_name = inferred_tool_name_from_dispatch(dispatch);
-    if tool_name != "file_read" {
+    if dispatch.context.get("toolApprovalId").is_some() {
         return None;
     }
 
-    let args = dispatch
-        .context
-        .get("args")
-        .cloned()
-        .or_else(|| infer_file_read_args_from_content(&dispatch.instruction))
-        .unwrap_or_else(|| serde_json::json!({}));
+    let tool_name = inferred_tool_name_from_dispatch(dispatch);
+    let args = tool_approval_args_from_dispatch(&tool_name, dispatch)?;
     let mut context = dispatch.context.clone();
     if context.get("tool").is_none() {
-        context = merge_message_context(context, serde_json::json!({ "tool": "file_read" }));
+        context = merge_message_context(context, serde_json::json!({ "tool": tool_name }));
     }
     if context.get("args").is_none() {
         context = merge_message_context(context, serde_json::json!({ "args": args.clone() }));
     }
 
-    let path = args
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    let target = path.as_deref().unwrap_or("未指定路径");
+    let (action_type, title, reason, risk, extra_payload) =
+        tool_approval_metadata(&tool_name, &args)?;
 
     Some(CreateApprovalRequest {
         task_id: Some(dispatch.task_id.clone()),
         step_id: Some(dispatch.step_id.clone()),
-        title: format!("ToolAgent 请求读取文件：{target}"),
-        reason: "ToolAgent 即将调用 legacy file_read，需要先确认该工具动作。".to_string(),
-        risk: RiskLevel::Medium,
-        action_type: "tool.fileRead".to_string(),
+        title,
+        reason,
+        risk,
+        action_type,
         action_payload: serde_json::json!({
-            "tool": "file_read",
-            "path": path,
+            "tool": tool_name,
             "args": args,
             "autoDispatch": true,
             "agentName": dispatch.agent_name,
             "instruction": dispatch.instruction,
             "context": context,
+            "taskId": dispatch.task_id,
+            "stepId": dispatch.step_id,
+            "details": extra_payload,
         }),
         requested_by: Some("ToolAgent".to_string()),
     })
+}
+
+fn tool_approval_args_from_dispatch(
+    tool_name: &str,
+    dispatch: &StepDispatch,
+) -> Option<serde_json::Value> {
+    let args = dispatch.context.get("args").cloned();
+    match tool_name {
+        "file_read" => Some(
+            args.or_else(|| infer_file_read_args_from_content(&dispatch.instruction))
+                .unwrap_or_else(|| serde_json::json!({})),
+        ),
+        "web_search" => {
+            let mut args = args.unwrap_or_else(|| {
+                serde_json::json!({
+                    "query": dispatch.instruction,
+                    "max_results": 5,
+                })
+            });
+            if args
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                args = merge_message_context(
+                    args,
+                    serde_json::json!({ "query": dispatch.instruction }),
+                );
+            }
+            Some(args)
+        }
+        _ => None,
+    }
+}
+
+fn tool_approval_metadata(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<(String, String, String, RiskLevel, serde_json::Value)> {
+    match tool_name {
+        "file_read" => {
+            let path = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let target = path.as_deref().unwrap_or("未指定路径");
+            Some((
+                "tool.fileRead".to_string(),
+                format!("ToolAgent 请求读取文件：{target}"),
+                "ToolAgent 即将调用 legacy file_read，需要先确认该工具动作。".to_string(),
+                RiskLevel::Medium,
+                serde_json::json!({ "path": path }),
+            ))
+        }
+        "web_search" => {
+            let query = args
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let target = query.as_deref().unwrap_or("未指定搜索词");
+            Some((
+                "tool.webSearch".to_string(),
+                format!("ToolAgent 请求联网搜索：{target}"),
+                "ToolAgent 即将调用 web_search；真实搜索接入后可能产生网络请求和信息外发，需要先确认。"
+                    .to_string(),
+                RiskLevel::Medium,
+                serde_json::json!({ "query": query }),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn tool_dispatch_from_approval(approval: &ApprovalRequest) -> Option<StepDispatch> {
@@ -3531,7 +3611,10 @@ mod tests {
         assert_eq!(input.action_type, "tool.fileRead");
         assert_eq!(input.requested_by.as_deref(), Some("ToolAgent"));
         assert_eq!(input.action_payload["tool"], serde_json::json!("file_read"));
-        assert_eq!(input.action_payload["path"], serde_json::json!("README.md"));
+        assert_eq!(
+            input.action_payload["details"]["path"],
+            serde_json::json!("README.md")
+        );
         assert_eq!(
             input.action_payload["autoDispatch"],
             serde_json::json!(true)
@@ -3543,16 +3626,33 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_tool_approval_input_keeps_search_unintercepted() {
+    fn test_auto_tool_approval_input_intercepts_web_search() {
         let dispatch = StepDispatch {
             task_id: "task-search-tool".to_string(),
             step_id: "task-search-tool-1".to_string(),
             agent_name: "Tool".to_string(),
-            instruction: "搜索 file_read 相关资料".to_string(),
-            context: serde_json::json!({}),
+            instruction: "搜索 Rust Agent 审计资料".to_string(),
+            context: serde_json::json!({
+                "args": { "query": "Rust Agent 审计", "max_results": 3 },
+            }),
         };
 
-        assert!(auto_tool_approval_input_from_dispatch(&dispatch).is_none());
+        let input = auto_tool_approval_input_from_dispatch(&dispatch).unwrap();
+
+        assert_eq!(input.action_type, "tool.webSearch");
+        assert_eq!(input.risk, crate::agent::action::RiskLevel::Medium);
+        assert_eq!(
+            input.action_payload["tool"],
+            serde_json::json!("web_search")
+        );
+        assert_eq!(
+            input.action_payload["details"]["query"],
+            serde_json::json!("Rust Agent 审计")
+        );
+        assert_eq!(
+            input.action_payload["context"]["args"]["max_results"],
+            serde_json::json!(3)
+        );
     }
 
     #[test]

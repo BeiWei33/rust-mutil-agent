@@ -14,7 +14,7 @@ use crate::error::AgentError;
 use crate::project::ProjectSnapshot;
 use crate::runtime::{
     CommandRunStore, ProjectCommandInspection, ProjectCommandRunListResponse,
-    ProjectCommandRunRequest, ProjectCommandRunResponse,
+    ProjectCommandRunRequest, ProjectCommandRunResponse, ToolInvocationListResponse,
 };
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{
@@ -192,6 +192,15 @@ impl ApiError {
         Self::new(
             "COMMAND_ERROR",
             "运行项目命令时失败。请检查本机开发环境是否可用。",
+            Some(detail),
+            true,
+        )
+    }
+
+    fn tool_audit_failed(detail: String) -> Self {
+        Self::new(
+            "TOOL_AUDIT_ERROR",
+            "读取工具调用审计时失败。请刷新项目面板后重试。",
             Some(detail),
             true,
         )
@@ -1340,6 +1349,21 @@ pub async fn list_project_command_runs(
         .list_runs(limit)
         .map(|runs| ProjectCommandRunListResponse { runs })
         .map_err(|err| ApiError::command_failed(format!("{}", err)))
+}
+
+/// 列出最近的 ToolAgent 工具调用审计记录。
+///
+/// 前端调用：`invoke('list_tool_invocations', { limit })`
+#[tauri::command]
+pub async fn list_tool_invocations(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<ToolInvocationListResponse, ApiError> {
+    state
+        .tool_invocation_store
+        .list_invocations(limit)
+        .map(|invocations| ToolInvocationListResponse { invocations })
+        .map_err(|err| ApiError::tool_audit_failed(format!("{}", err)))
 }
 
 fn map_patch_error(err: AgentError) -> ApiError {

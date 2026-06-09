@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact 和验证失败任务/步骤状态回写已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact 和验证失败任务/步骤状态回写已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -267,7 +267,7 @@ pub type ToolFn = Arc<
 
 `ToolAgent` 可通过 `context.tool` 显式指定工具；未指定时会根据消息内容关键词推断工具。
 
-通用工具审批状态流已通过 `request_tool_action_approval` 和 `approve_action` 接入调度器：`tool.*` 审批可让关联任务/步骤进入 `waitingApproval`，通过后恢复运行，拒绝后标记失败。调度器已能在 Tool 步骤即将调用 legacy `file_read` 时自动创建 `tool.fileRead` 审批，并在审批通过后恢复原 Tool 步骤投递；`file_read` 本身复用 workspace 只读文件 API 的路径沙箱。后续还需要把同类机制扩展到更多工具和审计记录。
+通用工具审批状态流已通过 `request_tool_action_approval` 和 `approve_action` 接入调度器：`tool.*` 审批可让关联任务/步骤进入 `waitingApproval`，通过后恢复运行，拒绝后标记失败。调度器已能在 Tool 步骤即将调用 legacy `file_read` 或 `web_search` 时自动创建 `tool.fileRead` / `tool.webSearch` 审批，并在审批通过后恢复原 Tool 步骤投递；`file_read` 本身复用 workspace 只读文件 API 的路径沙箱。ToolAgent 调用会写入 `tool_invocations` SQLite 审计表，参数摘要会脱敏和截断，并可通过 `list_tool_invocations` 查询。后续还需要把同类机制扩展到更多工具。
 
 ### 6.8 LLMClient
 
@@ -303,6 +303,7 @@ Planner LLM 相关环境变量：
 | `TASK_DB_PATH` | 任务/事件 SQLite 数据库路径，默认 `rust-mutil-agent-tasks.sqlite3` |
 | `CHAT_DB_PATH` | 聊天历史 SQLite 数据库路径，默认 `rust-mutil-agent-chat.sqlite3` |
 | `COMMAND_DB_PATH` | 命令运行审计 SQLite 数据库路径，默认 `rust-mutil-agent-commands.sqlite3` |
+| `TOOL_INVOCATION_DB_PATH` | ToolAgent 工具调用审计 SQLite 数据库路径，默认 `rust-mutil-agent-tool-invocations.sqlite3` |
 | `APPROVAL_DB_PATH` | 审批请求 SQLite 数据库路径，默认 `rust-mutil-agent-approvals.sqlite3` |
 | `PATCH_DB_PATH` | 补丁提案 SQLite 数据库路径，默认 `rust-mutil-agent-patches.sqlite3` |
 | `PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE` | 设为 `true` / `1` / `yes` / `on` 时，新补丁审批默认开启验证失败自动回滚；单次 `apply_approved_patch` 请求可覆盖 |
@@ -330,6 +331,7 @@ Planner LLM 相关环境变量：
 | `request_tool_action_approval` | `{ request: { taskId?, stepId?, title, reason, actionType, actionPayload?, risk?, requestedBy? } }` | `ApprovalRequest` | 已实现通用 `tool.*` 审批创建和关联任务/步骤等待审批 |
 | `run_approved_project_command` | `{ request: { approvalId } }` | `ProjectCommandRunResponse` | 已实现已审批命令执行、审计关联和关联任务结果回写 |
 | `list_project_command_runs` | `{ limit? }` | `{ runs }` | 已实现最近命令审计读取 |
+| `list_tool_invocations` | `{ limit? }` | `{ invocations }` | 已实现最近 ToolAgent 调用审计读取，参数摘要会脱敏和截断 |
 | `create_patch_proposal` | `{ request: { summary, files, taskId?, stepId?, requestedBy? } }` | `{ proposal, approval }` | 已实现补丁提案持久化、diff 审批创建和关联任务/步骤等待审批 |
 | `list_patch_proposals` | `{ limit? }` | `{ proposals }` | 已实现最近补丁提案读取 |
 | `get_patch_proposal` | `{ patchId }` | `PatchProposal` 或 `null` | 已实现单个补丁提案读取 |
@@ -351,11 +353,11 @@ Planner LLM 相关环境变量：
 
 该命令不会经过 shell；工作目录会解析到 workspace 内部，拒绝父目录穿越和 shell 控制字符；执行超时为 120 秒，stdout/stderr 会截断到前 96 KB 并返回截断标记。
 
-每次成功进入 allowlist 的命令运行都会写入 `command_runs` 审计表，保存命令、工作目录、退出码、是否成功、stdout/stderr、耗时、超时标记、截断标记、创建时间和可选 `approval_id`。前端项目面板会通过 `list_project_command_runs` 展示最近记录。
+每次成功进入 allowlist 的命令运行都会写入 `command_runs` 审计表，保存命令、工作目录、退出码、是否成功、stdout/stderr、耗时、超时标记、截断标记、创建时间和可选 `approval_id`。前端项目面板会通过 `list_project_command_runs` 展示最近记录。ToolAgent 每次真实工具调用会写入 `tool_invocations` 审计表，保存任务/步骤、approvalId、工具名、脱敏参数摘要、成功状态、错误、耗时和创建时间；前端项目面板通过 `list_tool_invocations` 展示最近记录。
 
 非 allowlist 命令不会直接执行。前端项目面板可调用 `request_project_command_approval` 创建高风险审批请求；后端会复用命令解析逻辑，仍然拒绝空命令、shell 控制字符、父目录穿越和 workspace 外目录。审批 payload 记录归一化命令、工作目录、默认 allowlist 判定和可选 `taskId` / `stepId`。
 
-审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护、非 allowlist 命令手动审批、补丁提案审批和通用 `tool.*` 工具审批。命令审批创建时会把关联任务/步骤置为 `waitingApproval`，写入 `commandApproval` artifact 并生成 `approvalRequested` 事件；命令审批通过会把关联任务/步骤恢复到运行态，拒绝会标记为 `failed`，并写入 `commandApprovalResolved` artifact 与 `approvalResolved` 事件。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令，结果会写入命令审计和关联任务的 `commandRun` artifact；执行通过会完成关联步骤，失败会把关联任务/步骤标记为 `failed`，便于 `retry_task` 重新调度。补丁提案创建审批时也会把关联任务/步骤置为 `waitingApproval`，写入 `patchApproval` artifact 并生成 `approvalRequested` 事件；补丁审批通过会把关联任务/步骤恢复到运行态，拒绝会标记为 `failed`，并写入 `patchApprovalResolved` artifact 与 `approvalResolved` 事件。审批通过后，也可调用 `apply_approved_patch` 应用原审批 payload 关联的补丁提案，并在已应用后调用 `revert_applied_patch` 回滚补丁。通用 `tool.*` 审批创建时会写入 `toolApproval` artifact 并生成 `approvalRequested` 事件；审批通过会恢复等待中的关联任务/步骤，拒绝会标记为 `failed`，并写入 `toolApprovalResolved` artifact 与 `approvalResolved` 事件。自动拦截的 legacy `file_read` 审批 payload 会保存原 Tool dispatch，上述审批通过后会恢复投递原步骤；实际读取会复用 workspace 只读 API，拒绝父目录穿越、绝对路径、敏感文件和超大文件。后端不会接受前端重新传入命令文本或补丁内容。补丁应用结果会在关联任务上生成 `patchApplied` artifact 和 `artifactCreated` 事件，首次应用成功后还会自动运行推荐验证命令，写入命令审计和 `patchVerification` artifact；验证通过或跳过会完成关联步骤，验证失败会把关联任务/步骤标记为 `failed` 并生成失败事件，便于 `retry_task` 重新调度。`PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE` 控制新补丁审批的失败回滚默认值，调用方也可显式传入 `autoRollbackOnVerificationFailure` 覆盖；触发时会执行安全回滚，并把 `autoRollback` 写入 `patchVerification` artifact，同时生成 `patchReverted` artifact 和事件。通用工具审批状态流和 `file_read` 路径沙箱已具备，更多 ToolAgent 工具拦截与审计仍待扩展。
+审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选、重复决策保护、非 allowlist 命令手动审批、补丁提案审批和通用 `tool.*` 工具审批。命令审批创建时会把关联任务/步骤置为 `waitingApproval`，写入 `commandApproval` artifact 并生成 `approvalRequested` 事件；命令审批通过会把关联任务/步骤恢复到运行态，拒绝会标记为 `failed`，并写入 `commandApprovalResolved` artifact 与 `approvalResolved` 事件。审批通过后，前端审批面板可调用 `run_approved_project_command` 按 approvalId 执行原 payload 中的项目命令，结果会写入命令审计和关联任务的 `commandRun` artifact；执行通过会完成关联步骤，失败会把关联任务/步骤标记为 `failed`，便于 `retry_task` 重新调度。补丁提案创建审批时也会把关联任务/步骤置为 `waitingApproval`，写入 `patchApproval` artifact 并生成 `approvalRequested` 事件；补丁审批通过会把关联任务/步骤恢复到运行态，拒绝会标记为 `failed`，并写入 `patchApprovalResolved` artifact 与 `approvalResolved` 事件。审批通过后，也可调用 `apply_approved_patch` 应用原审批 payload 关联的补丁提案，并在已应用后调用 `revert_applied_patch` 回滚补丁。通用 `tool.*` 审批创建时会写入 `toolApproval` artifact 并生成 `approvalRequested` 事件；审批通过会恢复等待中的关联任务/步骤，拒绝会标记为 `failed`，并写入 `toolApprovalResolved` artifact 与 `approvalResolved` 事件。自动拦截的 legacy `file_read` 和 `web_search` 审批 payload 会保存原 Tool dispatch，上述审批通过后会恢复投递原步骤；实际文件读取会复用 workspace 只读 API，拒绝父目录穿越、绝对路径、敏感文件和超大文件；工具调用结果会写入 `tool_invocations` 审计表并关联 approvalId。后端不会接受前端重新传入命令文本或补丁内容。补丁应用结果会在关联任务上生成 `patchApplied` artifact 和 `artifactCreated` 事件，首次应用成功后还会自动运行推荐验证命令，写入命令审计和 `patchVerification` artifact；验证通过或跳过会完成关联步骤，验证失败会把关联任务/步骤标记为 `failed` 并生成失败事件，便于 `retry_task` 重新调度。`PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE` 控制新补丁审批的失败回滚默认值，调用方也可显式传入 `autoRollbackOnVerificationFailure` 覆盖；触发时会执行安全回滚，并把 `autoRollback` 写入 `patchVerification` artifact，同时生成 `patchReverted` artifact 和事件。通用工具审批状态流、`file_read` 路径沙箱和工具调用审计已具备，更多 ToolAgent 工具拦截仍待扩展。
 
 补丁提案由 `src-tauri/src/workspace/patch.rs` 提供，持久化到 `patch_proposals` 表。`create_patch_proposal` 当前支持修改 workspace 内已有文本文件：后端会拒绝父目录穿越、workspace 外路径、受保护目录、密钥文件、空变更和基线内容不一致的请求；成功后生成统一 diff，保存 proposal，并创建 `workspace.applyPatch` 审批，审批 payload 会记录当时的 `defaultAutoRollbackOnVerificationFailure` 供前端初始化“失败回滚”选项。若 proposal 带 `taskId` / `stepId`，任务运行时会进入等待审批。审批面板会展开 diff 预览；`approve_action` 对补丁审批做出通过或拒绝时，会把 proposal 状态同步为 `approved` 或 `rejected`，并把关联任务/步骤恢复为运行态或标记失败。`apply_approved_patch` 会重新校验审批已通过、proposal 与 approval 匹配、目标文件仍等于提案基线，再把 `new_content` 写入工作区并将 proposal 更新为 `applied`；首次应用成功后会运行 `scan_project` 返回的推荐 allowlist 验证命令，把每次运行写入 `command_runs`，并在关联任务上按 patchId 幂等写入 `patchVerification` artifact。验证通过或跳过会完成关联步骤；验证失败会把关联任务与 proposal 绑定的步骤标记为 `failed`，已有 `retry_task` 流程可重新调度失败步骤。若默认策略或本次请求开启 `autoRollbackOnVerificationFailure` 且验证失败，后端会调用同一套安全回滚逻辑恢复 `old_content`，成功后 proposal 进入 `reverted`，`PatchApplyResult.autoRollback` 返回回滚结果。重复应用已应用 proposal 会返回幂等结果，不重复执行自动验证。`revert_applied_patch` 只允许回滚 `applied` proposal；回滚前会确认当前文件内容仍等于 `new_content`，再恢复 `old_content` 并把 proposal 更新为 `reverted`。重复回滚会返回幂等结果；若文件内容已偏离补丁应用结果，会拒绝回滚以保护用户后续修改。
 
@@ -579,22 +581,22 @@ npm test
 
 1. Planner 默认仍是关键词规则；真实 LLM 规划需要通过 `PLANNER_USE_LLM` 显式开启。
 2. Planner 已有 JSON plan schema、解析校验和失败降级策略；前端模型/API 配置可作为请求级临时 LLMClient 使用，API Key 不写入普通上下文或持久化数据。
-3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、单步骤跳过、步骤超时、失败/取消后的任务重试、任务/事件持久化，以及命令、补丁和通用 `tool.*` 审批对任务步骤的等待、恢复和失败回写；legacy `file_read` 已能自动进入审批，其他高风险工具仍待接入。
+3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、单步骤跳过、步骤超时、失败/取消后的任务重试、任务/事件持久化，以及命令、补丁和通用 `tool.*` 审批对任务步骤的等待、恢复和失败回写；legacy `file_read` 和 `web_search` 已能自动进入审批，其他高风险工具仍待接入。
 4. Planner 分析步骤仍由运行时内部模拟完成，避免把计划内 Planner 子步骤再次送入 Planner 触发嵌套规划。
 5. 聊天历史已按 `sessionId` 持久化；当前前端默认使用 `default` 单会话，尚未实现多会话管理界面。
 6. MemoryAgent 默认不使用 SQLite；长期记忆未接入应用启动流程。
 7. `web_search` 是模拟结果。
-8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截，后续仍需要补齐更完整审计。
+8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截，ToolAgent 调用审计已接入项目面板。
 9. 前端设置中的 API Key 和模型配置保存在 localStorage；后端请求期可使用该配置，但尚未接入系统安全凭据存储。
 10. 运行时环境变量 LLM 配置和前端请求级 LLM 配置已经并存，尚未提供统一的凭据管理界面。
-11. 命令审批已经支持任务等待/恢复和已审批运行结果回写；补丁提案已经支持 diff 预览、审批状态同步、补丁审批等待/恢复、已审批手动应用、应用后自动验证、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚、任务 patch/verification/revert artifact 记录和验证失败任务/步骤 failed 标记；通用 `tool.*` 审批已经支持任务等待/恢复、拒绝失败回写和 legacy `file_read` 自动拦截；还没有验证失败自动返工和更细粒度的回滚策略。
+11. 命令审批已经支持任务等待/恢复和已审批运行结果回写；补丁提案已经支持 diff 预览、审批状态同步、补丁审批等待/恢复、已审批手动应用、应用后自动验证、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚、任务 patch/verification/revert artifact 记录和验证失败任务/步骤 failed 标记；通用 `tool.*` 审批已经支持任务等待/恢复、拒绝失败回写、legacy `file_read` / `web_search` 自动拦截和 ToolAgent 调用审计；还没有验证失败自动返工和更细粒度的回滚策略。
 
 ## 13. 建议后续路线
 
-1. 扩展工具执行层：将 legacy `file_read` 已接入的 `tool.*` 自动审批拦截推广到更多 ToolAgent 高风险动作，并补齐审计记录。
+1. 扩展工具执行层：将 `file_read` / `web_search` 已接入的 `tool.*` 自动审批拦截推广到更多 ToolAgent 高风险动作。
 2. 扩展请求级真实 LLM：在 Planner 临时 LLMClient 基础上，继续让 Executor/Tool 使用受控工具调用，并接入安全存储。
 3. 扩展工程闭环：在受控验证命令运行、审计、审批请求和补丁提案基础上，引入差异审查、验证失败自动返工和高风险动作自动暂停。
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。
-5. 强化工具权限：对 `file_read`、命令执行和网络请求增加白名单、确认流和审计日志。
+5. 强化工具权限：继续对文件写入、命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。
-7. 在已写回命令、补丁、通用工具审批结果、legacy `file_read` 自动拦截和路径沙箱、补丁应用、验证结果、手动回滚、失败回滚默认策略和验证失败 failed 状态的基础上，将更多工具拦截与验证失败自动返工继续纳入任务状态机。
+7. 在已写回命令、补丁、通用工具审批结果、legacy `file_read` / `web_search` 自动拦截、路径沙箱、工具调用审计、补丁应用、验证结果、手动回滚、失败回滚默认策略和验证失败 failed 状态的基础上，将更多工具拦截与验证失败自动返工继续纳入任务状态机。
