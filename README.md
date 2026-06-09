@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录和验证失败任务/步骤标记已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录和验证失败任务/步骤标记已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -13,6 +13,7 @@
 | Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
 | 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
 | 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
+| 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；初始化失败时回退到短期记忆。 |
 | 项目理解 | 已实现 | 扫描 Rust/Tauri/React/Vite 项目，生成技术栈、Manifest、关键文件和推荐命令。 |
 | Workspace 只读能力 | 已实现 | 支持项目内文件列表、文本读取和源码搜索，并限制路径逃逸和敏感文件读取。 |
 | Planner 规划 | 部分实现 | 默认使用规则/项目上下文规划；可通过环境变量或前端请求级配置启用 LLM JSON 规划并自动降级。 |
@@ -25,7 +26,7 @@
 
 - 多 Agent 协作：Planner 负责任务拆解，Executor 负责执行确认，Tool 负责工具调用，Memory 负责记忆，Echo 用于链路调试。
 - 可追踪任务：每次消息或任务创建都会生成任务 ID，可查看步骤状态、事件时间线、输出、步骤超时、取消和重试。
-- 持久化：任务、任务事件、聊天历史、命令运行记录、审批请求和补丁提案都使用 SQLite 本地保存。
+- 持久化：任务、任务事件、聊天历史、MemoryAgent 长期记忆、命令运行记录、ToolAgent 调用审计、审批请求和补丁提案都使用 SQLite 本地保存。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令、最近运行记录和补丁提案草稿。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
 - 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，通用工具可创建 `tool.*` 审批请求；命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，并可通过重试入口重新调度。
@@ -127,6 +128,7 @@ AppState
   ├─ Orchestrator + TaskStore
   ├─ ChatStore
   ├─ CommandRunStore
+  ├─ ToolInvocationStore
   ├─ ApprovalStore
   └─ PatchProposalStore
         │
@@ -174,14 +176,9 @@ http://localhost:1420
 
 ### Tauri 开发运行
 
-当前 `src-tauri/tauri.conf.json` 的 `beforeDevCommand` 为空，建议先启动 Vite，再启动 Tauri：
+`src-tauri/tauri.conf.json` 已配置 `beforeDevCommand`，运行 Tauri 开发命令时会自动启动 Vite：
 
 ```bash
-# 终端 1
-cd src-web
-npm run dev
-
-# 终端 2
 cd src-tauri
 cargo tauri dev
 ```
@@ -236,6 +233,7 @@ cp .env.example .env
 | `PLANNER_LLM_RETRIES` | Planner LLM 重试次数，范围 1-3。 |
 | `TASK_DB_PATH` | 任务/事件 SQLite 路径，默认 `rust-mutil-agent-tasks.sqlite3`。 |
 | `CHAT_DB_PATH` | 聊天历史 SQLite 路径，默认 `rust-mutil-agent-chat.sqlite3`。 |
+| `MEMORY_DB_PATH` | MemoryAgent 长期记忆 SQLite 路径，默认 `rust-mutil-agent-memory.sqlite3`。 |
 | `COMMAND_DB_PATH` | 命令运行审计 SQLite 路径，默认 `rust-mutil-agent-commands.sqlite3`。 |
 | `TOOL_INVOCATION_DB_PATH` | ToolAgent 工具调用审计 SQLite 路径，默认 `rust-mutil-agent-tool-invocations.sqlite3`。 |
 | `APPROVAL_DB_PATH` | 审批请求 SQLite 路径，默认 `rust-mutil-agent-approvals.sqlite3`。 |
@@ -252,7 +250,7 @@ cp .env.example .env
 | --- | --- | --- | --- |
 | `Planner` | 协调员/总控 | 是 | 理解需求、生成计划、安排协作。 |
 | `Executor` | 执行工程师 | 是 | 执行明确任务；当前真实代码修改仍未接入。 |
-| `Memory` | 记忆管理员 | 否 | 短期记忆、检索和结果记录。 |
+| `Memory` | 记忆管理员 | 否 | 短期记忆、SQLite 长期记忆、检索和结果记录。 |
 | `Tool` | 工具操作员 | 否 | 工具调用和内部只读检索步骤。 |
 | `Echo` | 回声测试员 | 是 | 测试消息链路。 |
 
@@ -317,7 +315,7 @@ cp .env.example .env
 1. `Executor` 还没有接入真实代码修改或沙箱写入，补丁应用仍需要用户在审批面板手动触发。
 2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、通用 `tool.*` 工具审批、legacy `file_read` / `web_search` 自动审批拦截、已审批命令执行结果回写、ToolAgent 调用审计和补丁提案 diff 审批/应用；命令、补丁和通用工具审批已能挂起/恢复关联任务步骤，但尚未覆盖所有 ToolAgent 工具或通用文件写入。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
-4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
+4. `MemoryAgent` 已接入 SQLite 长期记忆，但还没有结构化 ProjectFact / FailureCase 经验模型，也尚未在新任务规划前自动注入相关经验。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截和工具调用审计。
 6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
 7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。

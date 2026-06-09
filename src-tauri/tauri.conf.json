@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../src-web/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeDevCommand": "npm --prefix ../src-web run dev -- --host 127.0.0.1 --port 1420",
+    "beforeBuildCommand": "npm --prefix ../src-web run build"
   },
   "app": {
     "windows": [

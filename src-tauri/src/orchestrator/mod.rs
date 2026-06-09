@@ -1497,6 +1497,8 @@ pub struct Orchestrator {
     approval_store: Option<Arc<ApprovalStore>>,
     /// 工具调用审计存储。
     tool_invocation_store: Option<Arc<ToolInvocationStore>>,
+    /// MemoryAgent 长期记忆数据库路径。
+    memory_db_path: Option<String>,
     /// 是否已启动后台事件监听器
     event_loop_started: bool,
 }
@@ -1510,6 +1512,7 @@ impl Orchestrator {
             runtime: Arc::new(Mutex::new(TaskRuntime::default())),
             approval_store: None,
             tool_invocation_store: None,
+            memory_db_path: None,
             event_loop_started: false,
         }
     }
@@ -1526,6 +1529,7 @@ impl Orchestrator {
             runtime: Arc::new(Mutex::new(TaskRuntime::with_store(store))),
             approval_store: None,
             tool_invocation_store: None,
+            memory_db_path: None,
             event_loop_started: false,
         })
     }
@@ -1540,6 +1544,15 @@ impl Orchestrator {
         self.tool_invocation_store = Some(store);
     }
 
+    /// 设置 MemoryAgent 长期记忆数据库路径。
+    pub fn set_memory_db_path(&mut self, db_path: impl Into<String>) {
+        let db_path = db_path.into();
+        let db_path = db_path.trim();
+        if !db_path.is_empty() {
+            self.memory_db_path = Some(db_path.to_string());
+        }
+    }
+
     /// 注册所有内置 Agent 并启动其运行循环
     ///
     /// 内置 Agent 包括：Echo、Planner、Executor、Memory、Tool。
@@ -1551,7 +1564,8 @@ impl Orchestrator {
             .await;
         self.register_and_spawn(Box::new(ExecutorAgent::new()))
             .await;
-        self.register_and_spawn(Box::new(MemoryAgent::new())).await;
+        self.register_and_spawn(Box::new(self.memory_agent_from_config()))
+            .await;
         let tool_agent = match self.tool_invocation_store.clone() {
             Some(store) => ToolAgent::default().with_invocation_store(store),
             None => ToolAgent::default(),
@@ -1946,6 +1960,22 @@ impl Orchestrator {
                 .map(|(name, runtime)| (name.clone(), runtime.sender.clone()))
                 .collect(),
         )
+    }
+
+    fn memory_agent_from_config(&self) -> MemoryAgent {
+        let Some(db_path) = self.memory_db_path.as_deref() else {
+            return MemoryAgent::new();
+        };
+        match MemoryAgent::with_database(db_path) {
+            Ok(agent) => {
+                tracing::info!("MemoryAgent 长期记忆数据库已启用: {db_path}");
+                agent
+            }
+            Err(err) => {
+                tracing::warn!("MemoryAgent 长期记忆数据库初始化失败，将使用短期记忆: {err}");
+                MemoryAgent::new()
+            }
+        }
     }
 
     async fn dispatch_approved_tool_action(

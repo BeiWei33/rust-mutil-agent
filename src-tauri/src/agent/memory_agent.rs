@@ -30,6 +30,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use super::traits::{Agent, AgentMessage, Capability};
@@ -171,6 +172,35 @@ impl MemoryAgent {
 
         Ok(())
     }
+
+    fn search_long_term(
+        db: &Mutex<rusqlite::Connection>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, AgentError> {
+        let conn = db
+            .lock()
+            .map_err(|e| AgentError::Internal(format!("数据库锁获取失败: {e}")))?;
+        let like_pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT role, content
+             FROM conversations
+             WHERE content LIKE ?1
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![like_pattern, limit as i64], |row| {
+            let role: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            Ok(format!("[{}] {}", role, content))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
 }
 
 impl Default for MemoryAgent {
@@ -240,10 +270,11 @@ impl MemoryAgent {
         msg: AgentMessage,
     ) -> Result<Vec<AgentMessage>, AgentError> {
         let limit = msg.context["limit"].as_u64().unwrap_or(5) as usize;
+        let limit = limit.clamp(1, 50);
 
         // 从短期记忆中检索相关轮次（简单关键词匹配）
         let query_lower = msg.content.to_lowercase();
-        let relevant: Vec<String> = self
+        let mut relevant: Vec<String> = self
             .short_term
             .iter()
             .filter(|turn| turn.content.to_lowercase().contains(&query_lower))
@@ -251,6 +282,21 @@ impl MemoryAgent {
             .take(limit)
             .map(|turn| format!("[{}] {}", turn.role, turn.content))
             .collect();
+        let short_term_count = relevant.len();
+
+        let mut long_term_count = 0usize;
+        if relevant.len() < limit {
+            if let Some(ref db) = self.db {
+                let mut seen = relevant.iter().cloned().collect::<HashSet<_>>();
+                let remaining = limit - relevant.len();
+                for item in Self::search_long_term(db, &msg.content, remaining)? {
+                    if seen.insert(item.clone()) {
+                        relevant.push(item);
+                        long_term_count += 1;
+                    }
+                }
+            }
+        }
 
         let result = if relevant.is_empty() {
             "未找到相关记忆".to_string()
@@ -264,6 +310,8 @@ impl MemoryAgent {
 
         let context = serde_json::json!({
             "count": relevant.len(),
+            "shortTermCount": short_term_count,
+            "longTermCount": long_term_count,
             "results": relevant,
         });
 
@@ -289,6 +337,9 @@ impl MemoryAgent {
             agent_name: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
+        if let Some(ref db) = self.db {
+            Self::store_in_long_term(db, &turn)?;
+        }
         self.store_in_short_term(turn);
 
         // 返回最近的对话上下文
@@ -434,6 +485,33 @@ mod tests {
         assert_eq!(replies[0].msg_type, "memory_stored");
         // 短期记忆应有内容
         assert!(!agent.short_term.is_empty());
+    }
+
+    /// 测试 — 自动存储会写入长期数据库
+    /// 验证：清空短期记忆后仍能从 SQLite 检索到自动存储内容
+    #[tokio::test]
+    async fn test_auto_store_writes_and_retrieves_from_long_term() {
+        let mut agent = MemoryAgent::with_database(":memory:").unwrap();
+
+        agent
+            .handle_message(AgentMessage::new(
+                "User",
+                "Memory",
+                "长期记忆关键词 AlphaBeta",
+            ))
+            .await
+            .unwrap();
+        agent.short_term.clear();
+
+        let replies = agent
+            .handle_message(AgentMessage::new("User", "Memory", "AlphaBeta").with_type("query"))
+            .await
+            .unwrap();
+
+        assert_eq!(replies[0].msg_type, "memory_retrieved");
+        assert!(replies[0].content.contains("AlphaBeta"));
+        assert_eq!(replies[0].context["shortTermCount"], serde_json::json!(0));
+        assert_eq!(replies[0].context["longTermCount"], serde_json::json!(1));
     }
 
     /// 测试 — 能力列表验证

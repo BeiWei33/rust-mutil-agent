@@ -30,6 +30,7 @@ use crate::workspace::PatchProposalStore;
 
 const DEFAULT_TASK_DB_PATH: &str = "rust-mutil-agent-tasks.sqlite3";
 const DEFAULT_CHAT_DB_PATH: &str = "rust-mutil-agent-chat.sqlite3";
+const DEFAULT_MEMORY_DB_PATH: &str = "rust-mutil-agent-memory.sqlite3";
 const DEFAULT_COMMAND_DB_PATH: &str = "rust-mutil-agent-commands.sqlite3";
 const DEFAULT_TOOL_INVOCATION_DB_PATH: &str = "rust-mutil-agent-tool-invocations.sqlite3";
 const DEFAULT_APPROVAL_DB_PATH: &str = "rust-mutil-agent-approvals.sqlite3";
@@ -77,6 +78,8 @@ async fn main() {
     };
     let task_db_path =
         std::env::var("TASK_DB_PATH").unwrap_or_else(|_| DEFAULT_TASK_DB_PATH.to_string());
+    let memory_db_path =
+        std::env::var("MEMORY_DB_PATH").unwrap_or_else(|_| DEFAULT_MEMORY_DB_PATH.to_string());
     let orchestrator = match Orchestrator::with_task_store(bus.clone(), &task_db_path) {
         Ok(orch) => {
             tracing::info!("任务持久化数据库已启用: {}", task_db_path);
@@ -140,6 +143,7 @@ async fn main() {
         let mut orch = orchestrator.lock().await;
         orch.set_approval_store(approval_store.clone());
         orch.set_tool_invocation_store(tool_invocation_store.clone());
+        orch.set_memory_db_path(memory_db_path);
         orch.register_builtin_agents().await;
     }
     tracing::info!("Agent 运行时初始化完成");
