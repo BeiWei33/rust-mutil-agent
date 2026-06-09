@@ -124,6 +124,7 @@ export default function ChatWindow() {
   const clearSendError = useAgentStore((s) => s.clearSendError);
   const sendMessage = useAgentStore((s) => s.sendMessage);
   const clearMessages = useAgentStore((s) => s.clearMessages);
+  const loadHistory = useAgentStore((s) => s.loadHistory ?? (() => Promise.resolve()));
   const agents = useAgentStore((s) => s.agents ?? []);
   const fetchAgents = useAgentStore((s) => s.fetchAgents ?? (() => Promise.resolve()));
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId ?? "");
@@ -138,6 +139,10 @@ export default function ChatWindow() {
     [agents]
   );
   const selectedAgent = selectedAgentId ? findAgentById(agents, selectedAgentId) : undefined;
+
+  useEffect(() => {
+    loadHistory("default");
+  }, [loadHistory]);
 
   // 首次进入聊天页时获取团队成员，保证选择器有数据。
   useEffect(() => {

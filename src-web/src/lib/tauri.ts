@@ -13,6 +13,10 @@ import type {
   Message,
   CreateTaskRequest,
   CreateTaskResponse,
+  CancelTaskRequest,
+  CancelTaskResponse,
+  RetryTaskRequest,
+  RetryTaskResponse,
   Task,
   TaskEvent,
   TaskListResponse,
@@ -21,6 +25,13 @@ import type {
   FileReadResponse,
   SearchProjectTextRequest,
   SearchResponse,
+  ProjectCommandRunRequest,
+  ProjectCommandRunResponse,
+  ProjectCommandRunListResponse,
+  ApprovalDecisionRequest,
+  ApprovalListResponse,
+  ApprovalRequest,
+  ApprovalStatus,
 } from "@/types";
 
 /**
@@ -52,6 +63,32 @@ export async function createTask(
   request: CreateTaskRequest
 ): Promise<CreateTaskResponse> {
   return invoke<CreateTaskResponse>(`${CMD_PREFIX}create_task`, {
+    request,
+  });
+}
+
+/**
+ * 取消软件工程任务
+ * @param request 取消请求
+ * @returns 取消结果
+ */
+export async function cancelTask(
+  request: CancelTaskRequest
+): Promise<CancelTaskResponse> {
+  return invoke<CancelTaskResponse>(`${CMD_PREFIX}cancel_task`, {
+    request,
+  });
+}
+
+/**
+ * 重试软件工程任务
+ * @param request 重试请求
+ * @returns 重试结果
+ */
+export async function retryTask(
+  request: RetryTaskRequest
+): Promise<RetryTaskResponse> {
+  return invoke<RetryTaskResponse>(`${CMD_PREFIX}retry_task`, {
     request,
   });
 }
@@ -154,6 +191,61 @@ export async function searchProjectText(
   request: SearchProjectTextRequest
 ): Promise<SearchResponse> {
   return invoke<SearchResponse>(`${CMD_PREFIX}search_project_text`, {
+    request,
+  });
+}
+
+/**
+ * 运行受控项目命令
+ * @param request 命令和工作目录
+ * @returns 命令运行结果
+ */
+export async function runProjectCommand(
+  request: ProjectCommandRunRequest
+): Promise<ProjectCommandRunResponse> {
+  return invoke<ProjectCommandRunResponse>(`${CMD_PREFIX}run_project_command`, {
+    request,
+  });
+}
+
+/**
+ * 获取最近受控项目命令运行记录
+ * @param limit 最大返回数量
+ * @returns 命令运行记录列表
+ */
+export async function listProjectCommandRuns(
+  limit = 20
+): Promise<ProjectCommandRunListResponse> {
+  return invoke<ProjectCommandRunListResponse>(`${CMD_PREFIX}list_project_command_runs`, {
+    limit,
+  });
+}
+
+/**
+ * 获取审批请求列表
+ * @param status 可选状态过滤
+ * @param limit 最大返回数量
+ * @returns 审批请求列表
+ */
+export async function listApprovalRequests(
+  status?: ApprovalStatus,
+  limit = 50
+): Promise<ApprovalListResponse> {
+  return invoke<ApprovalListResponse>(`${CMD_PREFIX}list_approval_requests`, {
+    status,
+    limit,
+  });
+}
+
+/**
+ * 审批或拒绝一个动作
+ * @param request 审批决策
+ * @returns 更新后的审批请求
+ */
+export async function approveAction(
+  request: ApprovalDecisionRequest
+): Promise<ApprovalRequest | null> {
+  return invoke<ApprovalRequest | null>(`${CMD_PREFIX}approve_action`, {
     request,
   });
 }
@@ -265,6 +357,8 @@ const MOCK_AGENTS: AgentStatus[] = [
 
 let MOCK_TASKS: Task[] = [];
 let MOCK_EVENTS: Record<string, TaskEvent[]> = {};
+let MOCK_COMMAND_RUNS: ProjectCommandRunResponse[] = [];
+let MOCK_APPROVALS: ApprovalRequest[] = [];
 
 const MOCK_PROJECT_FILES = [
   "README.md",
@@ -402,6 +496,95 @@ async function mockCreateTask(
   return { taskId: task.id, task };
 }
 
+async function mockCancelTask(
+  request: CancelTaskRequest
+): Promise<CancelTaskResponse> {
+  await new Promise((r) => setTimeout(r, 150));
+  const now = new Date().toISOString();
+  const task = MOCK_TASKS.find((item) => item.id === request.taskId) ?? null;
+  if (!task) return { taskId: request.taskId, task: null };
+
+  const reason = request.reason || "用户取消任务。";
+  const cancelled: Task = {
+    ...task,
+    status: "cancelled",
+    output: reason,
+    updatedAt: now,
+    steps: task.steps.map((step) =>
+      step.status === "pending" || step.status === "running"
+        ? {
+            ...step,
+            status: "skipped" as const,
+            error: reason,
+            completedAt: now,
+          }
+        : step
+    ),
+  };
+
+  MOCK_TASKS = MOCK_TASKS.map((item) => (item.id === request.taskId ? cancelled : item));
+  MOCK_EVENTS[request.taskId] = [
+    ...(MOCK_EVENTS[request.taskId] ?? []),
+    {
+      id: generateId(),
+      taskId: request.taskId,
+      stepId: null,
+      kind: "cancelled",
+      message: `任务已取消：${reason}`,
+      payload: { reason },
+      createdAt: now,
+    },
+  ];
+
+  return { taskId: request.taskId, task: cancelled };
+}
+
+async function mockRetryTask(
+  request: RetryTaskRequest
+): Promise<RetryTaskResponse> {
+  await new Promise((r) => setTimeout(r, 150));
+  const now = new Date().toISOString();
+  const task = MOCK_TASKS.find((item) => item.id === request.taskId) ?? null;
+  if (!task) return { taskId: request.taskId, task: null };
+
+  const reason = request.reason || "用户重试任务。";
+  const retried: Task = {
+    ...task,
+    status: "running",
+    output: null,
+    error: null,
+    updatedAt: now,
+    steps: task.steps.map((step) =>
+      step.status === "completed"
+        ? step
+        : {
+            ...step,
+            status: "pending" as const,
+            result: null,
+            error: null,
+            startedAt: null,
+            completedAt: null,
+          }
+    ),
+  };
+
+  MOCK_TASKS = MOCK_TASKS.map((item) => (item.id === request.taskId ? retried : item));
+  MOCK_EVENTS[request.taskId] = [
+    ...(MOCK_EVENTS[request.taskId] ?? []),
+    {
+      id: generateId(),
+      taskId: request.taskId,
+      stepId: null,
+      kind: "retried",
+      message: `任务已重新进入调度：${reason}`,
+      payload: { reason },
+      createdAt: now,
+    },
+  ];
+
+  return { taskId: request.taskId, task: retried };
+}
+
 /** 浏览器环境下降级的 listAgents */
 async function mockListAgents(): Promise<AgentListResponse> {
   await new Promise((r) => setTimeout(r, 200));
@@ -509,6 +692,67 @@ async function mockSearchProjectText(
   };
 }
 
+async function mockRunProjectCommand(
+  request: ProjectCommandRunRequest
+): Promise<ProjectCommandRunResponse> {
+  await new Promise((r) => setTimeout(r, 300));
+  const run = {
+    id: generateId(),
+    command: request.command,
+    workingDir: request.workingDir,
+    exitCode: 0,
+    success: true,
+    stdout: `mock run passed\n${request.workingDir}$ ${request.command}`,
+    stderr: "",
+    durationMs: 300,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    createdAt: new Date().toISOString(),
+  };
+  MOCK_COMMAND_RUNS = [run, ...MOCK_COMMAND_RUNS].slice(0, 50);
+  return run;
+}
+
+async function mockListProjectCommandRuns(
+  limit = 20
+): Promise<ProjectCommandRunListResponse> {
+  await new Promise((r) => setTimeout(r, 80));
+  return { runs: MOCK_COMMAND_RUNS.slice(0, limit) };
+}
+
+async function mockListApprovalRequests(
+  status?: ApprovalStatus,
+  limit = 50
+): Promise<ApprovalListResponse> {
+  await new Promise((r) => setTimeout(r, 80));
+  const approvals = status
+    ? MOCK_APPROVALS.filter((approval) => approval.status === status)
+    : MOCK_APPROVALS;
+  return { approvals: approvals.slice(0, limit) };
+}
+
+async function mockApproveAction(
+  request: ApprovalDecisionRequest
+): Promise<ApprovalRequest | null> {
+  await new Promise((r) => setTimeout(r, 120));
+  const approval = MOCK_APPROVALS.find((item) => item.id === request.approvalId) ?? null;
+  if (!approval) return null;
+
+  const updated: ApprovalRequest = {
+    ...approval,
+    status: request.approved ? "approved" : "rejected",
+    decidedBy: request.decidedBy || "user",
+    decisionNote: request.note || null,
+    decidedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  MOCK_APPROVALS = MOCK_APPROVALS.map((item) =>
+    item.id === request.approvalId ? updated : item
+  );
+  return updated;
+}
+
 /** 浏览器环境下降级的 getHistory */
 async function mockGetHistory(_sessionId: string): Promise<Message[]> {
   return [
@@ -528,6 +772,8 @@ async function mockGetHistory(_sessionId: string): Promise<Message[]> {
 export const api = {
   sendMessage: isTauri() ? sendMessage : mockSendMessage,
   createTask: isTauri() ? createTask : mockCreateTask,
+  cancelTask: isTauri() ? cancelTask : mockCancelTask,
+  retryTask: isTauri() ? retryTask : mockRetryTask,
   getAgentStatus: isTauri()
     ? getAgentStatus
     : async (id: string) => {
@@ -543,6 +789,10 @@ export const api = {
   listProjectFiles: isTauri() ? listProjectFiles : mockListProjectFiles,
   readProjectFile: isTauri() ? readProjectFile : mockReadProjectFile,
   searchProjectText: isTauri() ? searchProjectText : mockSearchProjectText,
+  runProjectCommand: isTauri() ? runProjectCommand : mockRunProjectCommand,
+  listProjectCommandRuns: isTauri() ? listProjectCommandRuns : mockListProjectCommandRuns,
+  listApprovalRequests: isTauri() ? listApprovalRequests : mockListApprovalRequests,
+  approveAction: isTauri() ? approveAction : mockApproveAction,
   healthCheck: isTauri() ? healthCheck : mockHealthCheck,
   getHistory: isTauri() ? getHistory : mockGetHistory,
   clearHistory: isTauri()

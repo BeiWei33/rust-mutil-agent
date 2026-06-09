@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAgentStore } from "@/store/useAgentStore";
-import type { WorkspaceEntry } from "@/types";
+import type { ProjectCommandRunResponse, WorkspaceEntry } from "@/types";
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -32,6 +32,21 @@ function isReadable(entry: WorkspaceEntry): boolean {
   ].includes((entry.extension || "").toLowerCase());
 }
 
+function commandKey(command: { command: string; workingDir: string }): string {
+  return `${command.workingDir}:${command.command}`;
+}
+
+function commandStatusLabel(result: ProjectCommandRunResponse): string {
+  if (result.timedOut) return "超时";
+  return result.success ? "通过" : "失败";
+}
+
+function formatRunTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 export default function ProjectPanel() {
   const snapshot = useAgentStore((s) => s.projectSnapshot);
   const files = useAgentStore((s) => s.projectFiles);
@@ -42,9 +57,14 @@ export default function ProjectPanel() {
   const searchResults = useAgentStore((s) => s.searchResults);
   const searchTruncated = useAgentStore((s) => s.searchTruncated);
   const searchLoading = useAgentStore((s) => s.searchLoading);
+  const commandRunLoadingKey = useAgentStore((s) => s.commandRunLoadingKey);
+  const commandRunError = useAgentStore((s) => s.commandRunError);
+  const latestCommandRun = useAgentStore((s) => s.latestCommandRun);
+  const commandRuns = useAgentStore((s) => s.commandRuns);
   const fetchProjectOverview = useAgentStore((s) => s.fetchProjectOverview);
   const readProjectFile = useAgentStore((s) => s.readProjectFile);
   const searchProjectText = useAgentStore((s) => s.searchProjectText);
+  const runProjectCommand = useAgentStore((s) => s.runProjectCommand);
   const clearProjectError = useAgentStore((s) => s.clearProjectError);
 
   const [filter, setFilter] = useState("");
@@ -65,6 +85,13 @@ export default function ProjectPanel() {
 
   const handleSearch = () => {
     searchProjectText(query);
+  };
+
+  const handleRunCommand = (command: { command: string; workingDir: string }) => {
+    runProjectCommand({
+      command: command.command,
+      workingDir: command.workingDir,
+    });
   };
 
   return (
@@ -141,9 +168,20 @@ export default function ProjectPanel() {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-sm text-zinc-200">{command.label}</span>
-                        <span className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400">
-                          {command.kind}
-                        </span>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400">
+                            {command.kind}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRunCommand(command)}
+                            disabled={commandRunLoadingKey !== null}
+                            className="btn-ghost px-2 py-1 text-[11px]"
+                            title="运行命令"
+                          >
+                            {commandRunLoadingKey === commandKey(command) ? "运行中..." : "运行"}
+                          </button>
+                        </div>
                       </div>
                       <code className="mt-2 block rounded-md bg-zinc-950 px-2 py-1 text-xs text-primary-200">
                         {command.command}
@@ -154,6 +192,88 @@ export default function ProjectPanel() {
                     </div>
                   ))}
                 </div>
+                {(commandRunError || latestCommandRun) && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                    {commandRunError && (
+                      <div className="text-sm text-red-300">{commandRunError}</div>
+                    )}
+                    {latestCommandRun && (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div
+                              className={`text-sm font-medium ${
+                                latestCommandRun.success
+                                  ? "text-emerald-300"
+                                  : "text-amber-300"
+                              }`}
+                            >
+                              {commandStatusLabel(latestCommandRun)}
+                            </div>
+                            <div className="mt-1 text-[11px] text-zinc-500">
+                              {latestCommandRun.workingDir} · {latestCommandRun.durationMs}ms
+                              {latestCommandRun.exitCode !== null &&
+                                latestCommandRun.exitCode !== undefined &&
+                                ` · exit ${latestCommandRun.exitCode}`}
+                            </div>
+                          </div>
+                          {(latestCommandRun.stdoutTruncated ||
+                            latestCommandRun.stderrTruncated) && (
+                            <span className="text-[11px] text-amber-300">输出已截断</span>
+                          )}
+                        </div>
+                        <code className="block rounded-md bg-zinc-900 px-2 py-1 text-xs text-primary-200">
+                          {latestCommandRun.command}
+                        </code>
+                        {latestCommandRun.stdout && (
+                          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-zinc-900 p-2 text-[11px] leading-relaxed text-zinc-300">
+                            {latestCommandRun.stdout}
+                          </pre>
+                        )}
+                        {latestCommandRun.stderr && (
+                          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-red-950/30 p-2 text-[11px] leading-relaxed text-red-200">
+                            {latestCommandRun.stderr}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {commandRuns.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/35 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h4 className="text-xs font-medium text-zinc-300">最近运行</h4>
+                      <span className="text-[11px] text-zinc-500">{commandRuns.length}</span>
+                    </div>
+                    <div className="space-y-2">
+                      {commandRuns.slice(0, 5).map((run) => (
+                        <div
+                          key={run.id}
+                          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <code className="truncate text-[11px] text-primary-200">
+                              {run.command}
+                            </code>
+                            <span
+                              className={`shrink-0 text-[11px] ${
+                                run.success ? "text-emerald-300" : "text-amber-300"
+                              }`}
+                            >
+                              {commandStatusLabel(run)}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+                            <span className="truncate">{run.workingDir}</span>
+                            <span className="shrink-0">
+                              {run.durationMs}ms · {formatRunTime(run.createdAt)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </section>
 
               <section>

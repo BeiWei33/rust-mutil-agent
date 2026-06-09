@@ -4,12 +4,15 @@
 //! 注意：commands 模块属于二进制 crate，不在库中导出。
 
 pub mod agent;
+pub mod approval;
 pub mod bus;
+pub mod chat;
 pub mod error;
 pub mod llm;
 pub mod memory;
 pub mod orchestrator;
 pub mod project;
+pub mod runtime;
 pub mod task;
 pub mod tool;
 pub mod workspace;

@@ -180,7 +180,9 @@ export type TaskEventKind =
   | "stepCompleted"
   | "stepFailed"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled"
+  | "retried";
 
 /** 任务事件 */
 export interface TaskEvent {
@@ -202,6 +204,30 @@ export interface CreateTaskRequest {
 
 /** 创建任务响应 */
 export interface CreateTaskResponse {
+  taskId: string;
+  task?: Task | null;
+}
+
+/** 取消任务请求 */
+export interface CancelTaskRequest {
+  taskId: string;
+  reason?: string;
+}
+
+/** 取消任务响应 */
+export interface CancelTaskResponse {
+  taskId: string;
+  task?: Task | null;
+}
+
+/** 重试任务请求 */
+export interface RetryTaskRequest {
+  taskId: string;
+  reason?: string;
+}
+
+/** 重试任务响应 */
+export interface RetryTaskResponse {
   taskId: string;
   task?: Task | null;
 }
@@ -231,6 +257,71 @@ export interface ProjectCommand {
   command: string;
   workingDir: string;
   kind: string;
+}
+
+/** 运行受控项目命令请求 */
+export interface ProjectCommandRunRequest {
+  command: string;
+  workingDir: string;
+}
+
+/** 运行受控项目命令响应 */
+export interface ProjectCommandRunResponse {
+  id: string;
+  command: string;
+  workingDir: string;
+  exitCode?: number | null;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  createdAt: string;
+}
+
+/** 最近命令运行记录响应 */
+export interface ProjectCommandRunListResponse {
+  runs: ProjectCommandRunResponse[];
+}
+
+/** 审批风险等级 */
+export type ApprovalRisk = "low" | "medium" | "high" | "critical";
+
+/** 审批状态 */
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
+
+/** 审批请求 */
+export interface ApprovalRequest {
+  id: string;
+  taskId?: string | null;
+  stepId?: string | null;
+  title: string;
+  reason: string;
+  risk: ApprovalRisk;
+  actionType: string;
+  actionPayload: unknown;
+  status: ApprovalStatus;
+  requestedBy: string;
+  decidedBy?: string | null;
+  decisionNote?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  decidedAt?: string | null;
+}
+
+/** 审批列表响应 */
+export interface ApprovalListResponse {
+  approvals: ApprovalRequest[];
+}
+
+/** 审批动作请求 */
+export interface ApprovalDecisionRequest {
+  approvalId: string;
+  approved: boolean;
+  note?: string;
+  decidedBy?: string;
 }
 
 /** 项目快照 */
@@ -328,4 +419,4 @@ export interface AppSettings {
 }
 
 /** 页面路由（简易状态切换） */
-export type PageRoute = "chat" | "tasks" | "project" | "agents" | "settings";
+export type PageRoute = "chat" | "tasks" | "project" | "approvals" | "agents" | "settings";

@@ -94,6 +94,14 @@ impl TaskStep {
         self.error = Some(error.into());
         self.completed_at = Some(Utc::now());
     }
+
+    pub fn reset_for_retry(&mut self) {
+        self.status = StepStatus::Pending;
+        self.result = None;
+        self.error = None;
+        self.started_at = None;
+        self.completed_at = None;
+    }
 }
 
 /// A software-engineering task tracked by the orchestrator.
@@ -155,6 +163,24 @@ impl Task {
     pub fn fail(&mut self, error: impl Into<String>) {
         self.status = TaskStatus::Failed;
         self.error = Some(error.into());
+        self.touch();
+    }
+
+    pub fn cancel(&mut self, reason: impl Into<String>) {
+        self.status = TaskStatus::Cancelled;
+        self.output = Some(reason.into());
+        self.error = None;
+        self.touch();
+    }
+
+    pub fn retry(&mut self) {
+        self.status = if self.steps.is_empty() {
+            TaskStatus::Planning
+        } else {
+            TaskStatus::Running
+        };
+        self.output = None;
+        self.error = None;
         self.touch();
     }
 }

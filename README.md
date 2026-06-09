@@ -1,176 +1,312 @@
-# 多 Agent 协同智能体 (Multi-Agent Cooperative Intelligence)
+# 多 Agent 协同智能体
 
-基于 Rust 构建的多 Agent 协同智能体系统，提供跨平台桌面应用。
+基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-## 项目概述
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计和审批请求基础已经落地；补丁写入、diff 审查、高风险动作自动暂停和完整自进化闭环仍在路线图中。
 
-本项目构建了一个多 Agent 协同工作框架，多个独立的智能体（Agent）通过消息总线进行通信与协作，完成复杂的任务流程。
+## 当前进度
 
-**核心特性：**
-- 🤖 **多 Agent 协同**：Planner、Executor、Memory、Tool 等异构 Agent 动态协作
-- ⚡ **纯 Rust 后端**：基于 Tokio 异步运行时，高并发、内存安全
-- 🖥️ **跨平台 GUI**：使用 Tauri v2 构建桌面应用（Windows/macOS/Linux）
-- 🔒 **本地优先**：支持离线运行，敏感数据保留在用户设备
-- 🔌 **可扩展**：插件化工具注册机制，用户可自定义 Agent 和工具
+| 模块 | 状态 | 说明 |
+| --- | --- | --- |
+| Tauri 桌面壳 | 已实现 | Rust 后端启动 Agent 运行时，注册 IPC 命令和 Tauri 插件。 |
+| React/Vite 前端 | 已实现 | 包含对话、任务看板、项目面板、审批面板、Agent 面板和设置页。 |
+| Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
+| 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、取消、重试和 SQLite 恢复。 |
+| 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
+| 项目理解 | 已实现 | 扫描 Rust/Tauri/React/Vite 项目，生成技术栈、Manifest、关键文件和推荐命令。 |
+| Workspace 只读能力 | 已实现 | 支持项目内文件列表、文本读取和源码搜索，并限制路径逃逸和敏感文件读取。 |
+| Planner 规划 | 部分实现 | 默认使用规则/项目上下文规划；可通过环境变量或前端请求级配置启用 LLM JSON 规划并自动降级。 |
+| LLM Client | 部分实现 | 支持 Mock、OpenAI、DeepSeek 和自定义 OpenAI-compatible 端点；`LlamaCpp` 仍为预留。 |
+| 受控命令运行 | 已实现 | 只允许低风险验证命令，执行不经过 shell，结果写入命令审计 SQLite。 |
+| 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝和重复决策保护；尚未自动拦截高风险动作。 |
+| 工程修改闭环 | 待实现 | 代码 patch、diff 预览、自动审批暂停、测试返工和 ReviewAgent 尚未接入。 |
 
-## 架构概览
+## 功能概览
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    GUI Layer (Tauri)                        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │ 对话面板 │  │ 任务看板 │  │ Agent 管 │  │ 设置面板 │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-└─────────────────────────────────────────────────────────────┘
-                              │ IPC
-┌─────────────────────────────────────────────────────────────┐
-│                 Agent Runtime (Rust)                        │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                 Orchestrator (调度器)                 │  │
-│  └───────────┬──────────┬──────────┬───────────────────┘  │
-│  ┌───────────▼──┐  ┌────▼────┐ ┌───▼──────┐ ┌───────────┐ │
-│  │ PlannerAgent │  │ExecAgent│ │MemoryAgent│ │ToolAgent  │ │
-│  └──────────────┘  └─────────┘ └──────────┘ └───────────┘ │
-│                     Message Bus (broadcast)                 │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │   Knowledge Base (SQLite)     │   Tool Registry      │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+- 多 Agent 协作：Planner 负责任务拆解，Executor 负责执行确认，Tool 负责工具调用，Memory 负责记忆，Echo 用于链路调试。
+- 可追踪任务：每次消息或任务创建都会生成任务 ID，可查看步骤状态、事件时间线、输出、取消和重试。
+- 持久化：任务、任务事件、聊天历史、命令运行记录和审批请求都使用 SQLite 本地保存。
+- 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令和最近运行记录。
+- 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
+- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求。
+- 请求级 LLM 设置：前端可传模型、Base URL、max tokens、temperature 和 API Key；API Key 只进入请求期临时上下文，不写入持久化数据。
+- 浏览器降级：前端单独运行 Vite 时自动使用 mock API，方便开发 UI。
+- 结构化错误：后端返回 `ApiError`，前端统一转换为中文错误提示和技术详情。
+
+## 技术栈
+
+| 层级 | 技术 |
+| --- | --- |
+| 桌面容器 | Tauri v2 |
+| 后端 | Rust 2021, Tokio |
+| IPC | Tauri `invoke` |
+| Agent 通信 | Tokio `mpsc` + `broadcast` |
+| 序列化 | serde, serde_json, rmp-serde |
+| 本地数据 | SQLite via rusqlite |
+| HTTP/LLM | reqwest, OpenAI-compatible Chat Completions |
+| 前端 | React 18, Vite, TypeScript |
+| 状态管理 | Zustand |
+| 样式 | Tailwind CSS |
+| 测试 | Rust tests, Vitest, Testing Library |
 
 ## 项目结构
 
-```
+```text
 rust-mutil-agent/
-├── src-tauri/               # Tauri 后端 (Rust)
-│   ├── src/
-│   │   ├── main.rs          # 应用入口，启动 Tauri + Agent 系统
-│   │   ├── agent/           # Agent 定义与实现
-│   │   │   ├── mod.rs
-│   │   │   ├── traits.rs    # Agent trait、AgentMessage、Capability
-│   │   │   ├── echo_agent.rs      # 回显 Agent（测试用）
-│   │   │   ├── planner_agent.rs   # 任务规划 Agent
-│   │   │   ├── executor_agent.rs  # 执行 Agent
-│   │   │   ├── memory_agent.rs    # 记忆 Agent
-│   │   │   └── tool_agent.rs      # 工具 Agent
-│   │   ├── bus/             # 消息总线
-│   │   │   └── mod.rs
-│   │   ├── orchestrator/    # 调度器
-│   │   │   └── mod.rs
-│   │   ├── memory/          # 记忆与知识库
-│   │   │   └── mod.rs
-│   │   ├── tool/            # 工具注册表
-│   │   │   └── mod.rs
-│   │   ├── llm/             # LLM 客户端封装
-│   │   │   └── mod.rs
-│   │   ├── commands.rs      # Tauri 命令（前后端接口）
-│   │   └── error.rs         # 错误类型定义
+├── README.md
+├── .env.example
+├── docs/
+│   ├── TECHNICAL_DOCUMENTATION.md
+│   └── SELF_EVOLVING_AGENT_ROADMAP.md
+├── src-tauri/
 │   ├── Cargo.toml
 │   ├── tauri.conf.json
-│   └── build.rs
-├── src-web/                 # 前端 (React/Next.js)
-│   └── .gitkeep
-├── plugins/                 # Agent 插件目录
-│   └── .gitkeep
-├── docs/                    # 文档
-│   └── .gitkeep
-├── scripts/                 # 构建脚本
-│   └── .gitkeep
-├── .env.example             # 环境变量模板
-├── .gitignore
-└── README.md
+│   ├── tests/
+│   └── src/
+│       ├── main.rs              # Tauri 入口和 AppState 初始化
+│       ├── lib.rs               # 库模块导出，供测试使用
+│       ├── commands.rs          # Tauri IPC 命令
+│       ├── approval.rs          # 审批请求模型和持久化
+│       ├── chat.rs              # 聊天历史持久化
+│       ├── agent/               # Planner/Executor/Memory/Tool/Echo
+│       ├── bus/                 # MessageBus
+│       ├── llm/                 # LLMClient
+│       ├── orchestrator/        # 任务调度器
+│       ├── project/             # 项目扫描和规划上下文
+│       ├── runtime/             # 受控命令运行和审计
+│       ├── task/                # Task/Step/Event/Store
+│       ├── tool/                # 工具注册表
+│       └── workspace/           # 项目文件列表、读取和搜索
+└── src-web/
+    ├── package.json
+    ├── vite.config.ts
+    └── src/
+        ├── App.tsx
+        ├── components/
+        │   ├── ChatWindow.tsx
+        │   ├── TaskBoard.tsx
+        │   ├── ProjectPanel.tsx
+        │   ├── ApprovalPanel.tsx
+        │   ├── AgentPanel.tsx
+        │   └── SettingsPanel.tsx
+        ├── lib/
+        ├── store/
+        ├── types/
+        └── __tests__/
+```
+
+## 架构概览
+
+```text
+React/Vite UI
+  ├─ ChatWindow
+  ├─ TaskBoard
+  ├─ ProjectPanel
+  ├─ ApprovalPanel
+  ├─ AgentPanel
+  └─ SettingsPanel
+        │
+        │ Tauri invoke
+        ▼
+Rust Commands
+  ├─ send_message / create_task
+  ├─ get_task / list_tasks / get_task_events
+  ├─ cancel_task / retry_task
+  ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
+  ├─ run_project_command / list_project_command_runs
+  ├─ list_approval_requests / approve_action
+  ├─ get_history / clear_history
+  └─ list_agents / health_check
+        │
+        ▼
+AppState
+  ├─ Orchestrator + TaskStore
+  ├─ ChatStore
+  ├─ CommandRunStore
+  └─ ApprovalStore
+        │
+        ▼
+Agents + MessageBus
+  ├─ Planner
+  ├─ Executor
+  ├─ Tool
+  ├─ Memory
+  └─ Echo
 ```
 
 ## 快速开始
 
 ### 前置要求
 
-- **Rust** 1.80+ (stable)
-- **Node.js** 18+
-- **Tauri CLI**：`cargo install tauri-cli`
-- 平台特定依赖：参考 [Tauri 文档](https://v2.tauri.app/start/prerequisites/)
+- Rust stable 1.80+
+- Node.js 18+
+- Tauri v2 本地依赖，参考 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
+- Tauri CLI：`cargo install tauri-cli`
 
-### 开发运行
+### 安装依赖
 
 ```bash
-# 1. 克隆项目
-git clone <repository-url>
-cd rust-mutil-agent
+cd src-web
+npm install
+```
 
-# 2. 配置环境变量
-cp .env.example .env
-# 编辑 .env，填入 API Key 等配置
+Rust 依赖由 Cargo 根据 `src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock` 管理。
 
-# 3. 运行单元测试（纯后端逻辑）
-cd src-tauri && cargo test
+### 前端单独运行
 
-# 4. 启动 Tauri 开发环境（含前端热更新）
+```bash
+cd src-web
+npm run dev
+```
+
+默认地址为：
+
+```text
+http://localhost:1420
+```
+
+非 Tauri 浏览器环境会自动使用 mock API，可用于开发和查看前端界面。
+
+### Tauri 开发运行
+
+当前 `src-tauri/tauri.conf.json` 的 `beforeDevCommand` 为空，建议先启动 Vite，再启动 Tauri：
+
+```bash
+# 终端 1
+cd src-web
+npm run dev
+
+# 终端 2
+cd src-tauri
 cargo tauri dev
-# 或从项目根目录：cd src-tauri && cargo tauri dev
 ```
 
 ### 生产构建
 
 ```bash
+cd src-web
+npm run build
+
+cd ../src-tauri
 cargo tauri build
-# 输出在 src-tauri/target/release/bundle/
 ```
 
-## 核心 Agent 说明
-
-| Agent | 职责 | 能力 |
-|-------|------|------|
-| **Planner** | 将用户目标分解为可执行步骤 | `planning` |
-| **Executor** | 执行具体操作（HTTP 请求、命令） | `code_execution` |
-| **Memory** | 管理对话记忆与知识检索 | `memory`, `retrieval` |
-| **Tool** | 注册和调用外部工具/函数 | `tool_use` |
-| **Echo** | 测试回显（开发调试用） | `chat` |
-
-## 内置工具
-
-| 工具 | 功能 | 状态 |
-|------|------|------|
-| `calculator` | 数学表达式计算 | ✅ 已实现 |
-| `datetime` | 获取当前日期时间 | ✅ 已实现 |
-| `file_read` | 读取文本文件 | ✅ 已实现 |
-| `web_search` | 互联网搜索 | 🔧 占位 |
-
-## 技术栈
-
-- **后端**：Rust + Tokio + Tauri v2
-- **通信**：broadcast/mpsc 消息总线
-- **存储**：SQLite (rusqlite)
-- **序列化**：serde + serde_json
-- **日志**：tracing
-- **前端**：React/Next.js (预留)
+构建产物位于 `src-tauri/target/release/bundle/`。
 
 ## 测试
 
 ```bash
-# 运行所有测试
+# Rust 后端测试
+cd src-tauri
 cargo test
 
-# 运行特定模块测试
-cargo test --package rust-mutil-agent -- agent
-cargo test --package rust-mutil-agent -- bus
-cargo test --package rust-mutil-agent -- orchestrator
-
-# 显示测试输出
-cargo test -- --nocapture
+# 前端测试
+cd src-web
+npm test -- --run
 ```
 
-## 贡献指南
+当前测试覆盖 Agent 消息、MessageBus、Planner 规划、LLM mock/OpenAI-compatible 请求结构、任务运行时、持久化 store、审批 store、项目扫描、workspace 只读能力、受控命令 runner、前端 store 和主要组件交互。
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'feat: 添加新功能'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 创建 Pull Request
+## 配置
+
+复制 `.env.example` 为 `.env` 后按需填写：
+
+```bash
+cp .env.example .env
+```
+
+常用环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `RUST_LOG` | Rust 日志级别，例如 `info`、`debug`。 |
+| `OPENAI_API_KEY` | OpenAI API Key。 |
+| `OPENAI_BASE_URL` | OpenAI-compatible base URL，可填 base URL 或完整 `/chat/completions` 端点。 |
+| `OPENAI_MODEL` / `DEFAULT_MODEL` | OpenAI 默认模型。 |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key。 |
+| `DEEPSEEK_BASE_URL` | DeepSeek OpenAI-compatible base URL。 |
+| `DEEPSEEK_MODEL` | DeepSeek 默认模型。 |
+| `PLANNER_USE_LLM` | 设为 `true`、`1`、`yes` 或 `on` 时启用 Planner LLM JSON 规划。 |
+| `PLANNER_LLM_PROVIDER` | `openai` 或 `deepseek`。 |
+| `PLANNER_LLM_RETRIES` | Planner LLM 重试次数，范围 1-3。 |
+| `TASK_DB_PATH` | 任务/事件 SQLite 路径，默认 `rust-mutil-agent-tasks.sqlite3`。 |
+| `CHAT_DB_PATH` | 聊天历史 SQLite 路径，默认 `rust-mutil-agent-chat.sqlite3`。 |
+| `COMMAND_DB_PATH` | 命令运行审计 SQLite 路径，默认 `rust-mutil-agent-commands.sqlite3`。 |
+| `APPROVAL_DB_PATH` | 审批请求 SQLite 路径，默认 `rust-mutil-agent-approvals.sqlite3`。 |
+
+默认情况下 Planner 不会访问网络，而是使用规则和项目上下文生成计划。启用 LLM 后，Planner 会要求模型输出 JSON，并在解析或调用失败时降级为规则规划。前端设置中的 API Key 只在单次请求中通过 `transient_context` 传给 Planner，不会写入任务事件、聊天历史、命令审计或审批记录。
+
+本地生成的 `*.sqlite` / `*.sqlite3` 已在 `.gitignore` 中忽略。
+
+## 内置 Agent
+
+| Runtime 名称 | 前端名称 | 可直接选择 | 职责 |
+| --- | --- | --- | --- |
+| `Planner` | 协调员/总控 | 是 | 理解需求、生成计划、安排协作。 |
+| `Executor` | 执行工程师 | 是 | 执行明确任务；当前真实代码修改仍未接入。 |
+| `Memory` | 记忆管理员 | 否 | 短期记忆、检索和结果记录。 |
+| `Tool` | 工具操作员 | 否 | 工具调用和内部只读检索步骤。 |
+| `Echo` | 回声测试员 | 是 | 测试消息链路。 |
+
+## IPC 能力
+
+| 命令 | 状态 | 说明 |
+| --- | --- | --- |
+| `send_message` | 已实现 | 聊天入口，返回任务 ID、路由信息并写入聊天历史。 |
+| `create_task` | 已实现 | 创建软件工程任务。 |
+| `get_task` / `list_tasks` | 已实现 | 查询任务详情和任务列表。 |
+| `get_task_events` | 已实现 | 查询任务事件时间线。 |
+| `cancel_task` / `retry_task` | 已实现 | 取消未结束任务，或重试失败/取消任务。 |
+| `get_project_snapshot` | 已实现 | 返回项目技术栈、Manifest、关键文件和推荐命令。 |
+| `list_project_files` | 已实现 | 列出 workspace 内文件。 |
+| `read_project_file` | 已实现 | 只读读取 workspace 内文本文件。 |
+| `search_project_text` | 已实现 | 搜索 workspace 内文本内容。 |
+| `run_project_command` | 已实现 | 运行 allowlist 内低风险验证命令并写审计。 |
+| `list_project_command_runs` | 已实现 | 查询最近命令运行记录。 |
+| `list_approval_requests` | 已实现 | 查询审批请求，可按状态过滤。 |
+| `approve_action` | 已实现 | 对审批请求执行通过或拒绝。 |
+| `get_history` / `clear_history` | 已实现 | 读取或清理指定会话聊天历史。 |
+| `list_agents` / `get_agent_status` | 已实现 | 查询 Agent 列表和状态。 |
+| `health_check` | 已实现 | 返回后端健康状态、版本和 Agent 数量。 |
+
+## 受控命令 allowlist
+
+`run_project_command` 不接受任意 shell 命令，只匹配下列命令和工作目录：
+
+| 工作目录 | 命令 |
+| --- | --- |
+| `src-tauri` | `cargo check` |
+| `src-tauri` | `cargo test` |
+| `src-web` | `npm test -- --run` |
+| `src-web` | `npm run build` |
+
+命令执行使用 `tokio::process::Command`，不经过 shell；工作目录必须解析在 workspace 内；包含 shell 控制字符或父目录穿越会被拒绝。执行超时为 120 秒，stdout/stderr 最多返回前 96 KB，并带截断标记。
+
+## 已知限制
+
+1. `Executor` 还没有接入真实代码修改、patch 应用或沙箱写入。
+2. 审批请求已经可持久化和决策，但还没有自动拦截非 allowlist 命令、文件写入或 patch 应用。
+3. `web_search` 仍是模拟工具，不会访问真实互联网。
+4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
+5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 仍需补齐同等级别权限控制。
+6. 步骤超时、单步骤跳过、ReviewAgent、EvolutionAgent、diff 预览和测试返工策略仍待实现。
+7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
+
+## 路线图
+
+详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
+
+1. 把审批流接到真实高风险入口：非 allowlist 命令、文件写入和 patch 应用。
+2. 增加 patch/diff 产物、前端 diff 预览和人工审批后应用。
+3. 增强调度器控制面：步骤超时、单步骤跳过、审批等待与恢复。
+4. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
+5. 统一前端设置、安全存储和后端 LLMClient 配置。
+
+## 文档
+
+- [技术文档](docs/TECHNICAL_DOCUMENTATION.md)
+- [自进化 Agent 路线图](docs/SELF_EVOLVING_AGENT_ROADMAP.md)
 
 ## 许可证
 
 MIT License
-
----
-
-*文档版本 1.0 · 最后更新 2026年6月*

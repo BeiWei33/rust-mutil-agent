@@ -74,6 +74,14 @@ function progressForTask(task: Task): number {
   return Math.round((completed / task.steps.length) * 100);
 }
 
+function canCancelTask(task: Task): boolean {
+  return ["draft", "planning", "waitingApproval", "running", "reviewing"].includes(task.status);
+}
+
+function canRetryTask(task: Task): boolean {
+  return ["failed", "cancelled"].includes(task.status);
+}
+
 function TaskListItem({
   task,
   selected,
@@ -166,12 +174,16 @@ export default function TaskBoard() {
   const taskEvents = useAgentStore((s) => s.taskEvents);
   const taskEventsLoading = useAgentStore((s) => s.taskEventsLoading);
   const createTask = useAgentStore((s) => s.createTask);
+  const cancelTask = useAgentStore((s) => s.cancelTask);
+  const retryTask = useAgentStore((s) => s.retryTask);
   const fetchTasks = useAgentStore((s) => s.fetchTasks);
   const setSelectedTaskId = useAgentStore((s) => s.setSelectedTaskId);
   const startTaskPolling = useAgentStore((s) => s.startTaskPolling);
 
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
+  const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
+  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
 
   useEffect(() => {
     const stop = startTaskPolling(2500);
@@ -190,6 +202,20 @@ export default function TaskBoard() {
     setDraft("");
     await createTask(content);
     setCreating(false);
+  };
+
+  const handleCancel = async (task: Task) => {
+    if (!canCancelTask(task) || cancellingTaskId) return;
+    setCancellingTaskId(task.id);
+    await cancelTask(task.id);
+    setCancellingTaskId(null);
+  };
+
+  const handleRetry = async (task: Task) => {
+    if (!canRetryTask(task) || retryingTaskId) return;
+    setRetryingTaskId(task.id);
+    await retryTask(task.id);
+    setRetryingTaskId(null);
   };
 
   return (
@@ -270,9 +296,33 @@ export default function TaskBoard() {
                     {selectedTask.userGoal}
                   </p>
                 </div>
-                <div className="text-right text-xs text-zinc-500">
-                  <div>创建 {formatTime(selectedTask.createdAt)}</div>
-                  <div className="mt-1">更新 {formatTime(selectedTask.updatedAt)}</div>
+                <div className="flex shrink-0 flex-col items-end gap-3">
+                  <div className="text-right text-xs text-zinc-500">
+                    <div>创建 {formatTime(selectedTask.createdAt)}</div>
+                    <div className="mt-1">更新 {formatTime(selectedTask.updatedAt)}</div>
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {canRetryTask(selectedTask) && (
+                      <button
+                        type="button"
+                        onClick={() => handleRetry(selectedTask)}
+                        disabled={retryingTaskId === selectedTask.id}
+                        className="rounded-md border border-primary-500/20 bg-primary-500/10 px-3 py-1.5 text-xs text-primary-200 transition-colors hover:border-primary-400/40 hover:bg-primary-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {retryingTaskId === selectedTask.id ? "重试中..." : "重试任务"}
+                      </button>
+                    )}
+                    {canCancelTask(selectedTask) && (
+                      <button
+                        type="button"
+                        onClick={() => handleCancel(selectedTask)}
+                        disabled={cancellingTaskId === selectedTask.id}
+                        className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-xs text-red-200 transition-colors hover:border-red-400/40 hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {cancellingTaskId === selectedTask.id ? "取消中..." : "取消任务"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 

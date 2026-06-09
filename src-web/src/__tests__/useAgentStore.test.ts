@@ -21,6 +21,10 @@ vi.mock("@/lib/tauri", () => ({
     healthCheck: vi.fn(),
     getHistory: vi.fn(),
     clearHistory: vi.fn(),
+    runProjectCommand: vi.fn(),
+    listProjectCommandRuns: vi.fn(),
+    listApprovalRequests: vi.fn(),
+    approveAction: vi.fn(),
   },
   isTauri: vi.fn(() => false),
 }));
@@ -33,6 +37,10 @@ const mockApi = api as unknown as {
   healthCheck: ReturnType<typeof vi.fn>;
   getHistory: ReturnType<typeof vi.fn>;
   clearHistory: ReturnType<typeof vi.fn>;
+  runProjectCommand: ReturnType<typeof vi.fn>;
+  listProjectCommandRuns: ReturnType<typeof vi.fn>;
+  listApprovalRequests: ReturnType<typeof vi.fn>;
+  approveAction: ReturnType<typeof vi.fn>;
 };
 
 /**
@@ -82,6 +90,14 @@ describe("useAgentStore", () => {
       healthy: null,
       healthVersion: "",
       currentPage: "chat",
+      commandRunLoadingKey: null,
+      commandRunError: null,
+      latestCommandRun: null,
+      commandRuns: [],
+      approvals: [],
+      approvalsLoading: false,
+      approvalsError: null,
+      approvalDecisionLoadingId: null,
       settings: {
         model: "deepseek-v4-pro",
         apiKey: "",
@@ -121,6 +137,9 @@ describe("useAgentStore", () => {
 
     setCurrentPage("settings");
     expect(getState().currentPage).toBe("settings");
+
+    setCurrentPage("approvals");
+    expect(getState().currentPage).toBe("approvals");
 
     setCurrentPage("chat");
     expect(getState().currentPage).toBe("chat");
@@ -166,6 +185,12 @@ describe("useAgentStore", () => {
     expect(aiMsg).toBeDefined();
     expect(aiMsg!.role).toBe("assistant");
     expect(aiMsg!.senderName).toBe("Planner Agent");
+    expect(mockApi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "你好，Agent！",
+        sessionId: "default",
+      })
+    );
   });
 
   /// 测试 — sendMessage 失败时添加错误消息
@@ -207,6 +232,7 @@ describe("useAgentStore", () => {
   /// 测试 — clearMessages 清空消息列表
   /// 验证：调用 clearMessages 后 messages 为空且 sendError 被清除
   it("clearMessages 应清空消息列表和错误", () => {
+    mockApi.clearHistory.mockResolvedValue(undefined);
     useAgentStore.setState({
       messages: [makeMsg(), makeMsg()],
       sendError: "之前的错误",
@@ -218,6 +244,7 @@ describe("useAgentStore", () => {
     const state = getState();
     expect(state.messages).toEqual([]);
     expect(state.sendError).toBeNull();
+    expect(mockApi.clearHistory).toHaveBeenCalledWith("default");
   });
 
   // ==========================================================
@@ -481,5 +508,165 @@ describe("useAgentStore", () => {
 
     // 消息不应改变
     expect(getState().messages).toEqual(currentMsgs);
+  });
+
+  // ==========================================================
+  // 项目命令测试
+  // ==========================================================
+
+  /// 测试 — runProjectCommand 成功时保存最近一次命令结果
+  /// 验证：受控项目命令执行成功后 latestCommandRun 被更新
+  it("runProjectCommand 成功时应保存最近一次命令结果", async () => {
+    const result = {
+      id: "run-1",
+      command: "cargo check",
+      workingDir: "src-tauri",
+      exitCode: 0,
+      success: true,
+      stdout: "Finished dev",
+      stderr: "",
+      durationMs: 42,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      createdAt: "2026-06-09T10:00:00Z",
+    };
+    mockApi.runProjectCommand.mockResolvedValue(result);
+
+    await getState().runProjectCommand({
+      command: "cargo check",
+      workingDir: "src-tauri",
+    });
+
+    expect(mockApi.runProjectCommand).toHaveBeenCalledWith({
+      command: "cargo check",
+      workingDir: "src-tauri",
+    });
+    expect(getState().commandRunLoadingKey).toBeNull();
+    expect(getState().commandRunError).toBeNull();
+    expect(getState().latestCommandRun).toEqual(result);
+    expect(getState().commandRuns).toEqual([result]);
+  });
+
+  /// 测试 — runProjectCommand 失败时保存错误提示
+  /// 验证：后端拒绝或运行失败时 commandRunError 可用于界面显示
+  it("runProjectCommand 失败时应保存错误提示", async () => {
+    mockApi.runProjectCommand.mockRejectedValue(new Error("命令不在受控允许列表中"));
+
+    await getState().runProjectCommand({
+      command: "cargo clippy",
+      workingDir: "src-tauri",
+    });
+
+    expect(getState().commandRunLoadingKey).toBeNull();
+    expect(getState().latestCommandRun).toBeNull();
+    expect(getState().commandRunError).toBe("命令不在受控允许列表中");
+  });
+
+  /// 测试 — fetchCommandRuns 成功时保存最近命令记录
+  /// 验证：项目面板可读取后端持久化的审计记录
+  it("fetchCommandRuns 成功时应保存最近命令记录", async () => {
+    const runs = [
+      {
+        id: "run-2",
+        command: "npm test -- --run",
+        workingDir: "src-web",
+        exitCode: 0,
+        success: true,
+        stdout: "passed",
+        stderr: "",
+        durationMs: 88,
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        createdAt: "2026-06-09T11:00:00Z",
+      },
+    ];
+    mockApi.listProjectCommandRuns.mockResolvedValue({ runs });
+
+    await getState().fetchCommandRuns(5);
+
+    expect(mockApi.listProjectCommandRuns).toHaveBeenCalledWith(5);
+    expect(getState().commandRuns).toEqual(runs);
+    expect(getState().commandRunError).toBeNull();
+  });
+
+  // ==========================================================
+  // 审批测试
+  // ==========================================================
+
+  /// 测试 — fetchApprovals 成功时保存审批请求
+  /// 验证：审批面板可读取 pending 请求列表
+  it("fetchApprovals 成功时应保存审批请求", async () => {
+    const approvals = [
+      {
+        id: "approval-1",
+        taskId: "task-1",
+        stepId: "step-1",
+        title: "应用补丁",
+        reason: "需要修改工作区文件。",
+        risk: "high" as const,
+        actionType: "workspace.applyPatch",
+        actionPayload: { files: ["src/main.rs"] },
+        status: "pending" as const,
+        requestedBy: "Planner",
+        decidedBy: null,
+        decisionNote: null,
+        createdAt: "2026-06-09T12:00:00Z",
+        updatedAt: "2026-06-09T12:00:00Z",
+        decidedAt: null,
+      },
+    ];
+    mockApi.listApprovalRequests.mockResolvedValue({ approvals });
+
+    await getState().fetchApprovals("pending");
+
+    expect(mockApi.listApprovalRequests).toHaveBeenCalledWith("pending", 50);
+    expect(getState().approvals).toEqual(approvals);
+    expect(getState().approvalsLoading).toBe(false);
+    expect(getState().approvalsError).toBeNull();
+  });
+
+  /// 测试 — decideApproval 成功时更新审批请求
+  /// 验证：通过审批后 store 中对应请求状态被替换
+  it("decideApproval 成功时应更新审批请求", async () => {
+    const pending = {
+      id: "approval-2",
+      taskId: null,
+      stepId: null,
+      title: "运行命令",
+      reason: "需要执行高风险命令。",
+      risk: "critical" as const,
+      actionType: "runtime.runCommand",
+      actionPayload: { command: "custom command" },
+      status: "pending" as const,
+      requestedBy: "Tool",
+      decidedBy: null,
+      decisionNote: null,
+      createdAt: "2026-06-09T12:00:00Z",
+      updatedAt: "2026-06-09T12:00:00Z",
+      decidedAt: null,
+    };
+    const approved = {
+      ...pending,
+      status: "approved" as const,
+      decidedBy: "user",
+      decisionNote: "同意",
+      updatedAt: "2026-06-09T12:01:00Z",
+      decidedAt: "2026-06-09T12:01:00Z",
+    };
+    useAgentStore.setState({ approvals: [pending] });
+    mockApi.approveAction.mockResolvedValue(approved);
+
+    await getState().decideApproval("approval-2", true, "同意");
+
+    expect(mockApi.approveAction).toHaveBeenCalledWith({
+      approvalId: "approval-2",
+      approved: true,
+      note: "同意",
+      decidedBy: "user",
+    });
+    expect(getState().approvalDecisionLoadingId).toBeNull();
+    expect(getState().approvals).toEqual([approved]);
   });
 });

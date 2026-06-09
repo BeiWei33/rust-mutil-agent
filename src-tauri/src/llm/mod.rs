@@ -224,6 +224,33 @@ impl LLMClient {
         }
     }
 
+    /// 从请求级设置创建 OpenAI-compatible 客户端。
+    pub fn openai_compatible(
+        api_key: String,
+        model: Option<String>,
+        api_base_url: Option<String>,
+    ) -> Self {
+        let endpoint = api_base_url
+            .as_deref()
+            .map(normalize_chat_endpoint)
+            .unwrap_or_else(|| DEFAULT_DEEPSEEK_ENDPOINT.to_string());
+        let normalized_endpoint = endpoint.to_ascii_lowercase();
+        let provider = if normalized_endpoint.contains("api.openai.com") {
+            LLMProvider::OpenAI
+        } else if normalized_endpoint.contains("deepseek") {
+            LLMProvider::DeepSeek
+        } else {
+            LLMProvider::Custom(endpoint.clone())
+        };
+
+        Self {
+            provider,
+            endpoint,
+            api_key: Some(api_key),
+            model: model.unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string()),
+        }
+    }
+
     /// 从用户环境变量创建默认 DeepSeek 客户端。
     ///
     /// 支持的环境变量：
@@ -478,6 +505,23 @@ mod tests {
         let client = LLMClient::openai("sk-custom".to_string(), Some("gpt-4-turbo".to_string()));
         assert_eq!(*client.provider(), LLMProvider::OpenAI);
         assert_eq!(client.model(), "gpt-4-turbo");
+    }
+
+    #[test]
+    fn test_openai_compatible_request_client_normalizes_base_url() {
+        let client = LLMClient::openai_compatible(
+            "sk-request".to_string(),
+            Some("custom-model".to_string()),
+            Some("https://example.com/v1".to_string()),
+        );
+
+        assert_eq!(
+            *client.provider(),
+            LLMProvider::Custom("https://example.com/v1/chat/completions".to_string())
+        );
+        assert_eq!(client.endpoint(), "https://example.com/v1/chat/completions");
+        assert_eq!(client.api_key(), Some("sk-request"));
+        assert_eq!(client.model(), "custom-model");
     }
 
     /// 测试 — DeepSeek 客户端默认模型和端点

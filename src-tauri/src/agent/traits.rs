@@ -38,6 +38,12 @@ pub struct AgentMessage {
     /// 附加上下文信息（JSON 格式，携带结构化数据）
     pub context: serde_json::Value,
 
+    /// 请求期临时上下文，不参与序列化/持久化。
+    ///
+    /// 用于传递 API Key 等敏感配置；Agent 回复默认不会继承该字段。
+    #[serde(skip, default)]
+    pub transient_context: serde_json::Value,
+
     /// 关联的任务 ID（用于追踪执行流）
     pub task_id: Option<String>,
 
@@ -60,6 +66,7 @@ impl AgentMessage {
             to: to.to_string(),
             content: content.to_string(),
             context: serde_json::Value::Null,
+            transient_context: serde_json::Value::Null,
             task_id: None,
             reply_id: None,
             msg_type: "generic".to_string(),
@@ -80,7 +87,8 @@ impl AgentMessage {
             from: self.to.clone(),
             to: self.from.clone(),
             content: content.to_string(),
-            context: serde_json::Value::Null,
+            context: self.context.clone(),
+            transient_context: serde_json::Value::Null,
             task_id: self.task_id.clone(),
             reply_id: self.reply_id.clone(),
             msg_type: "reply".to_string(),
@@ -95,7 +103,13 @@ impl AgentMessage {
 
     /// 设置上下文数据
     pub fn with_context(mut self, context: serde_json::Value) -> Self {
-        self.context = context;
+        self.context = merge_message_context(self.context, context);
+        self
+    }
+
+    /// 设置请求期临时上下文。
+    pub fn with_transient_context(mut self, context: serde_json::Value) -> Self {
+        self.transient_context = merge_message_context(self.transient_context, context);
         self
     }
 
@@ -103,6 +117,18 @@ impl AgentMessage {
     pub fn with_task_id(mut self, task_id: &str) -> Self {
         self.task_id = Some(task_id.to_string());
         self
+    }
+}
+
+fn merge_message_context(base: serde_json::Value, next: serde_json::Value) -> serde_json::Value {
+    match (base, next) {
+        (serde_json::Value::Object(mut base), serde_json::Value::Object(next)) => {
+            for (key, value) in next {
+                base.insert(key, value);
+            }
+            serde_json::Value::Object(base)
+        }
+        (_, next) => next,
     }
 }
 
@@ -310,4 +336,43 @@ pub struct AgentInfo {
     pub current_task: Option<String>,
     /// 已处理的消息数量
     pub messages_processed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_to_preserves_step_context() {
+        let msg = AgentMessage::new("Orchestrator", "Executor", "执行步骤").with_context(
+            serde_json::json!({
+                "taskId": "task-1",
+                "stepId": "task-1-2"
+            }),
+        );
+
+        let reply = msg
+            .reply_to("完成")
+            .with_context(serde_json::json!({ "success": true }));
+
+        assert_eq!(reply.context["taskId"], "task-1");
+        assert_eq!(reply.context["stepId"], "task-1-2");
+        assert_eq!(reply.context["success"], true);
+    }
+
+    #[test]
+    fn transient_context_is_not_serialized_or_copied_to_replies() {
+        let msg = AgentMessage::new("User", "Planner", "规划任务")
+            .with_context(serde_json::json!({ "safe": true }))
+            .with_transient_context(serde_json::json!({
+                "plannerLlmSettings": { "apiKey": "sk-secret" }
+            }));
+
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let reply = msg.reply_to("ok");
+
+        assert!(!serialized.contains("sk-secret"));
+        assert!(reply.transient_context.is_null());
+        assert_eq!(reply.context["safe"], serde_json::json!(true));
+    }
 }

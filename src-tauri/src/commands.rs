@@ -4,7 +4,15 @@
 //! 通过 invoke 机制实现前后端双向通信。
 
 use crate::agent::traits::Capability as AgentCapability;
+use crate::approval::{
+    parse_approval_status, ApprovalDecisionRequest, ApprovalListResponse, ApprovalRequest,
+};
+use crate::chat::ChatMessage as StoredChatMessage;
+use crate::error::AgentError;
 use crate::project::ProjectSnapshot;
+use crate::runtime::{
+    ProjectCommandRunListResponse, ProjectCommandRunRequest, ProjectCommandRunResponse,
+};
 use crate::task::{Task, TaskEvent};
 use crate::workspace::{FileReadResponse, SearchResponse, WorkspaceEntry};
 use crate::AppState;
@@ -14,7 +22,7 @@ use tauri::State;
 
 /// 前端传入的 LLM 设置。
 ///
-/// API Key 只用于请求期传递能力占位；当前不会写入任务上下文或事件。
+/// API Key 只进入请求期临时上下文，不会写入任务上下文、事件或聊天历史。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrontendLlmSettingsRequest {
@@ -117,6 +125,33 @@ impl ApiError {
             false,
         )
     }
+
+    fn history_failed(detail: String) -> Self {
+        Self::new(
+            "HISTORY_ERROR",
+            "读写聊天历史时失败。当前操作没有完成，请稍后重试。",
+            Some(detail),
+            true,
+        )
+    }
+
+    fn command_failed(detail: String) -> Self {
+        Self::new(
+            "COMMAND_ERROR",
+            "运行项目命令时失败。请检查本机开发环境是否可用。",
+            Some(detail),
+            true,
+        )
+    }
+
+    fn approval_failed(detail: String) -> Self {
+        Self::new(
+            "APPROVAL_ERROR",
+            "处理审批请求时失败。请刷新审批列表后重试。",
+            Some(detail),
+            true,
+        )
+    }
 }
 
 /// 前端消息结构。
@@ -159,6 +194,38 @@ pub struct SendMessageResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskResponse {
+    pub task_id: String,
+    pub task: Option<Task>,
+}
+
+/// 取消任务请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelTaskRequest {
+    pub task_id: String,
+    pub reason: Option<String>,
+}
+
+/// 取消任务响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelTaskResponse {
+    pub task_id: String,
+    pub task: Option<Task>,
+}
+
+/// 重试任务请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryTaskRequest {
+    pub task_id: String,
+    pub reason: Option<String>,
+}
+
+/// 重试任务响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryTaskResponse {
     pub task_id: String,
     pub task: Option<Task>,
 }
@@ -436,6 +503,59 @@ fn build_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value
     })
 }
 
+fn build_transient_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value {
+    let Some(settings) = settings else {
+        return Value::Null;
+    };
+
+    let api_key = clean_optional_string(settings.api_key.as_ref());
+    let Some(api_key) = api_key else {
+        return Value::Null;
+    };
+
+    serde_json::json!({
+        "plannerLlmSettings": {
+            "model": clean_optional_string(settings.model.as_ref()),
+            "apiKey": api_key,
+            "apiBaseUrl": clean_optional_string(settings.api_base_url.as_ref()),
+            "maxTokens": settings.max_tokens,
+            "temperature": settings.temperature,
+        }
+    })
+}
+
+fn clean_session_id(session_id: Option<&String>) -> String {
+    session_id
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default")
+        .to_string()
+}
+
+fn stored_message_from_response(
+    session_id: &str,
+    message: &ChatMessageResponse,
+) -> StoredChatMessage {
+    StoredChatMessage {
+        id: message.id.clone(),
+        session_id: session_id.to_string(),
+        role: message.role.clone(),
+        content: message.content.clone(),
+        timestamp: message.timestamp.clone(),
+        sender_name: message.sender_name.clone(),
+    }
+}
+
+fn response_from_stored_message(message: StoredChatMessage) -> ChatMessageResponse {
+    ChatMessageResponse {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        timestamp: message.timestamp,
+        sender_name: message.sender_name,
+    }
+}
+
 /// 发送用户消息给 Agent 系统。
 ///
 /// 前端调用：`invoke('send_message', { request: { content, agentId, llmSettings } })`
@@ -449,6 +569,7 @@ pub async fn send_message(
         return Err(ApiError::invalid_argument("请输入要发送给 AI 成员的内容。"));
     }
 
+    let session_id = clean_session_id(request.session_id.as_ref());
     let (target_meta, reason, fallback) = resolve_agent_meta(request.agent_id.as_deref())?;
     let msg_type = if target_meta.runtime_name == "Planner" {
         "plan_request"
@@ -458,15 +579,18 @@ pub async fn send_message(
 
     let mut orch = state.orchestrator.lock().await;
     let request_context = build_request_context(request.llm_settings.as_ref());
+    let transient_context = build_transient_request_context(request.llm_settings.as_ref());
     let task_id = orch
-        .submit_task_to_agent_with_context(
+        .submit_task_to_agent_with_context_and_transient(
             target_meta.runtime_name,
             content,
             msg_type,
             request_context,
+            transient_context,
         )
         .await
         .map_err(|e| ApiError::route_failed(format!("{}", e)))?;
+    drop(orch);
 
     tracing::info!(
         "[Commands] 任务已提交: {}，处理 Agent: {}({})，route_mode={:?}, session_id={:?}",
@@ -489,14 +613,37 @@ pub async fn send_message(
         )
     };
 
+    let assistant_message = ChatMessageResponse {
+        id: task_id.clone(),
+        role: "assistant".to_string(),
+        content,
+        timestamp: now_iso(),
+        sender_name: Some(target_meta.display_name.to_string()),
+    };
+    let user_message = StoredChatMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        role: "user".to_string(),
+        content: request.content.trim().to_string(),
+        timestamp: now_iso(),
+        sender_name: None,
+    };
+    let mut warnings = Vec::new();
+    if let Err(err) = state.chat_store.append_message(&user_message) {
+        warnings.push(format!("保存用户消息失败: {err}"));
+    }
+    if let Err(err) = state
+        .chat_store
+        .append_message(&stored_message_from_response(
+            &session_id,
+            &assistant_message,
+        ))
+    {
+        warnings.push(format!("保存回复消息失败: {err}"));
+    }
+
     Ok(SendMessageResponse {
-        message: ChatMessageResponse {
-            id: task_id.clone(),
-            role: "assistant".to_string(),
-            content,
-            timestamp: now_iso(),
-            sender_name: Some(target_meta.display_name.to_string()),
-        },
+        message: assistant_message,
         handled_by: target_meta.id.to_string(),
         task_id: task_id.clone(),
         status: "accepted".to_string(),
@@ -513,7 +660,7 @@ pub async fn send_message(
             fallback,
             reason,
         },
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -539,12 +686,14 @@ pub async fn create_task(
 
     let mut orch = state.orchestrator.lock().await;
     let request_context = build_request_context(request.llm_settings.as_ref());
+    let transient_context = build_transient_request_context(request.llm_settings.as_ref());
     let task_id = orch
-        .submit_task_to_agent_with_context(
+        .submit_task_to_agent_with_context_and_transient(
             target_meta.runtime_name,
             content,
             msg_type,
             request_context,
+            transient_context,
         )
         .await
         .map_err(|e| ApiError::route_failed(format!("{}", e)))?;
@@ -649,6 +798,62 @@ pub async fn get_task_events(
     Ok(orch.get_task_events(&task_id).await)
 }
 
+/// 取消任务。
+///
+/// 前端调用：`invoke('cancel_task', { request: { taskId, reason } })`
+#[tauri::command]
+pub async fn cancel_task(
+    request: CancelTaskRequest,
+    state: State<'_, AppState>,
+) -> Result<CancelTaskResponse, ApiError> {
+    let task_id = request.task_id.trim();
+    if task_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少要取消的任务 ID。"));
+    }
+
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("用户取消任务。");
+
+    let orch = state.orchestrator.lock().await;
+    let task = orch.cancel_task(task_id, reason).await;
+    Ok(CancelTaskResponse {
+        task_id: task_id.to_string(),
+        task,
+    })
+}
+
+/// 重试失败或已取消的任务。
+///
+/// 前端调用：`invoke('retry_task', { request: { taskId, reason } })`
+#[tauri::command]
+pub async fn retry_task(
+    request: RetryTaskRequest,
+    state: State<'_, AppState>,
+) -> Result<RetryTaskResponse, ApiError> {
+    let task_id = request.task_id.trim();
+    if task_id.is_empty() {
+        return Err(ApiError::invalid_argument("缺少要重试的任务 ID。"));
+    }
+
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("用户重试任务。");
+
+    let orch = state.orchestrator.lock().await;
+    let task = orch.retry_task(task_id, reason).await;
+    Ok(RetryTaskResponse {
+        task_id: task_id.to_string(),
+        task,
+    })
+}
+
 /// 获取当前项目快照。
 ///
 /// 前端调用：`invoke('get_project_snapshot')`
@@ -688,6 +893,82 @@ pub async fn search_project_text(
         .map_err(|e| ApiError::workspace_failed(format!("{}", e)))
 }
 
+/// 运行受控项目命令。
+///
+/// 前端调用：`invoke('run_project_command', { request: { command, workingDir } })`
+#[tauri::command]
+pub async fn run_project_command(
+    request: ProjectCommandRunRequest,
+    state: State<'_, AppState>,
+) -> Result<ProjectCommandRunResponse, ApiError> {
+    let result = crate::runtime::run_project_command(request)
+        .await
+        .map_err(|err| match err {
+            AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
+            other => ApiError::command_failed(format!("{}", other)),
+        })?;
+    state
+        .command_store
+        .append_run(&result)
+        .map_err(|err| ApiError::command_failed(format!("{}", err)))?;
+    Ok(result)
+}
+
+/// 列出最近的受控项目命令运行记录。
+///
+/// 前端调用：`invoke('list_project_command_runs', { limit })`
+#[tauri::command]
+pub async fn list_project_command_runs(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<ProjectCommandRunListResponse, ApiError> {
+    state
+        .command_store
+        .list_runs(limit)
+        .map(|runs| ProjectCommandRunListResponse { runs })
+        .map_err(|err| ApiError::command_failed(format!("{}", err)))
+}
+
+/// 列出审批请求。
+///
+/// 前端调用：`invoke('list_approval_requests', { status, limit })`
+#[tauri::command]
+pub async fn list_approval_requests(
+    status: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<ApprovalListResponse, ApiError> {
+    let status = parse_approval_status(status.as_deref()).map_err(|err| match err {
+        AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
+        other => ApiError::approval_failed(format!("{}", other)),
+    })?;
+    state
+        .approval_store
+        .list_requests(status, limit)
+        .map(|approvals| ApprovalListResponse { approvals })
+        .map_err(|err| ApiError::approval_failed(format!("{}", err)))
+}
+
+/// 审批或拒绝一个高风险动作。
+///
+/// 前端调用：`invoke('approve_action', { request: { approvalId, approved, note? } })`
+#[tauri::command]
+pub async fn approve_action(
+    request: ApprovalDecisionRequest,
+    state: State<'_, AppState>,
+) -> Result<Option<ApprovalRequest>, ApiError> {
+    if request.approval_id.trim().is_empty() {
+        return Err(ApiError::invalid_argument("缺少审批请求 ID。"));
+    }
+    state
+        .approval_store
+        .decide(request)
+        .map_err(|err| match err {
+            AgentError::MessageFormat(message) => ApiError::invalid_argument(&message),
+            other => ApiError::approval_failed(format!("{}", other)),
+        })
+}
+
 /// 获取系统健康状态。
 ///
 /// 前端调用：`invoke('health_check')`
@@ -703,18 +984,30 @@ pub async fn health_check(state: State<'_, AppState>) -> Result<HealthCheckRespo
 
 /// 获取对话历史。
 ///
-/// 当前后端尚未持久化聊天历史，先返回空数组，避免前端 IPC 调用失败。
 #[tauri::command]
-pub async fn get_history(_session_id: String) -> Result<Vec<ChatMessageResponse>, ApiError> {
-    Ok(Vec::new())
+pub async fn get_history(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ChatMessageResponse>, ApiError> {
+    let session_id = clean_session_id(Some(&session_id));
+    let messages = state
+        .chat_store
+        .list_messages(&session_id)
+        .map_err(|err| ApiError::history_failed(format!("{}", err)))?;
+    Ok(messages
+        .into_iter()
+        .map(response_from_stored_message)
+        .collect())
 }
 
 /// 清空对话历史。
-///
-/// 当前后端尚未持久化聊天历史，先作为幂等 no-op。
 #[tauri::command]
-pub async fn clear_history(_session_id: String) -> Result<(), ApiError> {
-    Ok(())
+pub async fn clear_history(session_id: String, state: State<'_, AppState>) -> Result<(), ApiError> {
+    let session_id = clean_session_id(Some(&session_id));
+    state
+        .chat_store
+        .clear_session(&session_id)
+        .map_err(|err| ApiError::history_failed(format!("{}", err)))
 }
 
 #[cfg(test)]
@@ -756,5 +1049,35 @@ mod tests {
         let context = build_request_context(Some(&settings));
         assert!(context["frontendLlmSettings"]["model"].is_null());
         assert_eq!(context["frontendLlmSettings"]["hasApiKey"], false);
+    }
+
+    #[test]
+    fn test_build_transient_request_context_keeps_api_key_out_of_safe_context() {
+        let settings = FrontendLlmSettingsRequest {
+            model: Some("deepseek-chat".to_string()),
+            api_key: Some("sk-request".to_string()),
+            api_base_url: Some("https://api.deepseek.com/v1".to_string()),
+            max_tokens: Some(1024),
+            temperature: Some(0.2),
+        };
+
+        let safe = build_request_context(Some(&settings));
+        let transient = build_transient_request_context(Some(&settings));
+
+        assert!(!safe.to_string().contains("sk-request"));
+        assert_eq!(
+            transient["plannerLlmSettings"]["apiKey"],
+            serde_json::json!("sk-request")
+        );
+    }
+
+    #[test]
+    fn test_clean_session_id_defaults_blank_values() {
+        assert_eq!(clean_session_id(None), "default");
+        assert_eq!(clean_session_id(Some(&"  ".to_string())), "default");
+        assert_eq!(
+            clean_session_id(Some(&" session-1 ".to_string())),
+            "session-1"
+        );
     }
 }

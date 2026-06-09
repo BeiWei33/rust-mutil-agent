@@ -17,6 +17,10 @@ import type {
   WorkspaceEntry,
   FileReadResponse,
   SearchMatch,
+  ProjectCommandRunRequest,
+  ProjectCommandRunResponse,
+  ApprovalRequest,
+  ApprovalStatus,
 } from "@/types";
 import { api } from "@/lib/tauri";
 import { getErrorDetail, getErrorMessage } from "@/lib/errors";
@@ -34,6 +38,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxTokens: 4096,
   temperature: 0.7,
 };
+
+const DEFAULT_SESSION_ID = "default";
 
 /** 从 localStorage 加载设置 */
 function loadSettings(): AppSettings {
@@ -112,10 +118,24 @@ interface AgentState {
   fetchTaskEvents: (taskId: string) => Promise<void>;
   /** 创建任务 */
   createTask: (content: string, agentId?: string) => Promise<void>;
+  /** 取消任务 */
+  cancelTask: (taskId: string, reason?: string) => Promise<void>;
+  /** 重试任务 */
+  retryTask: (taskId: string, reason?: string) => Promise<void>;
   /** 设置当前选中任务 */
   setSelectedTaskId: (taskId: string | null) => void;
   /** 开启任务轮询 */
   startTaskPolling: (intervalMs?: number) => () => void;
+
+  // ===== 审批管理 =====
+  approvals: ApprovalRequest[];
+  approvalsLoading: boolean;
+  approvalsError: string | null;
+  approvalDecisionLoadingId: string | null;
+  /** 获取审批请求列表 */
+  fetchApprovals: (status?: ApprovalStatus) => Promise<void>;
+  /** 审批或拒绝动作 */
+  decideApproval: (approvalId: string, approved: boolean, note?: string) => Promise<void>;
 
   // ===== 项目理解 =====
   projectSnapshot: ProjectSnapshot | null;
@@ -128,12 +148,20 @@ interface AgentState {
   searchResults: SearchMatch[];
   searchTruncated: boolean;
   searchLoading: boolean;
+  commandRunLoadingKey: string | null;
+  commandRunError: string | null;
+  latestCommandRun: ProjectCommandRunResponse | null;
+  commandRuns: ProjectCommandRunResponse[];
   /** 加载项目快照和文件列表 */
   fetchProjectOverview: () => Promise<void>;
+  /** 加载最近命令运行记录 */
+  fetchCommandRuns: (limit?: number) => Promise<void>;
   /** 读取项目文件 */
   readProjectFile: (path: string) => Promise<void>;
   /** 搜索项目文本 */
   searchProjectText: (query: string) => Promise<void>;
+  /** 运行受控项目命令 */
+  runProjectCommand: (request: ProjectCommandRunRequest) => Promise<void>;
   /** 清除项目错误 */
   clearProjectError: () => void;
 
@@ -228,6 +256,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         content,
         agentId,
         routeMode: agentId ? "direct" : "auto",
+        sessionId: DEFAULT_SESSION_ID,
         llmSettings: buildLlmRequestSettings(get().settings),
       };
       const res = await api.sendMessage(request);
@@ -271,12 +300,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   clearSendError: () => set({ sendError: null, lastFailedSend: null }),
 
-  clearMessages: () =>
+  clearMessages: () => {
+    api.clearHistory(DEFAULT_SESSION_ID).catch(() => {
+      // 清空本地消息不依赖后端历史清理成功。
+    });
     set({
       messages: [],
       sendError: null,
       lastFailedSend: null,
-    }),
+    });
+  },
 
   loadHistory: async (sessionId) => {
     try {
@@ -381,6 +414,48 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
+  cancelTask: async (taskId, reason = "用户取消任务。") => {
+    set({ tasksError: null });
+    try {
+      const res = await api.cancelTask({ taskId, reason });
+      set((s) => {
+        const task = res.task ?? null;
+        const tasks = task
+          ? s.tasks.map((item) => (item.id === taskId ? task : item))
+          : s.tasks.filter((item) => item.id !== taskId);
+        return {
+          tasks,
+          selectedTask: s.selectedTaskId === taskId ? task : s.selectedTask,
+          tasksError: null,
+        };
+      });
+      await get().fetchTaskEvents(taskId);
+    } catch (err: unknown) {
+      set({ tasksError: getErrorMessage(err, "取消任务失败") });
+    }
+  },
+
+  retryTask: async (taskId, reason = "用户重试任务。") => {
+    set({ tasksError: null });
+    try {
+      const res = await api.retryTask({ taskId, reason });
+      set((s) => {
+        const task = res.task ?? null;
+        const tasks = task
+          ? s.tasks.map((item) => (item.id === taskId ? task : item))
+          : s.tasks.filter((item) => item.id !== taskId);
+        return {
+          tasks,
+          selectedTask: s.selectedTaskId === taskId ? task : s.selectedTask,
+          tasksError: null,
+        };
+      });
+      await get().fetchTaskEvents(taskId);
+    } catch (err: unknown) {
+      set({ tasksError: getErrorMessage(err, "重试任务失败") });
+    }
+  },
+
   setSelectedTaskId: (taskId) => {
     const task = taskId ? get().tasks.find((item) => item.id === taskId) ?? null : null;
     set({ selectedTaskId: taskId, selectedTask: task, taskEvents: [] });
@@ -401,6 +476,54 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return () => clearInterval(timer);
   },
 
+  // ===== 审批管理 =====
+  approvals: [],
+  approvalsLoading: false,
+  approvalsError: null,
+  approvalDecisionLoadingId: null,
+
+  fetchApprovals: async (status) => {
+    set({ approvalsLoading: true, approvalsError: null });
+    try {
+      const result = await api.listApprovalRequests(status, 50);
+      set({ approvals: result.approvals, approvalsLoading: false });
+    } catch (err: unknown) {
+      set({
+        approvalsError: getErrorMessage(err, "获取审批请求失败"),
+        approvalsLoading: false,
+      });
+    }
+  },
+
+  decideApproval: async (approvalId, approved, note) => {
+    set({ approvalDecisionLoadingId: approvalId, approvalsError: null });
+    try {
+      const updated = await api.approveAction({
+        approvalId,
+        approved,
+        note,
+        decidedBy: "user",
+      });
+      set((s) => {
+        const approvals = updated
+          ? s.approvals.map((approval) =>
+              approval.id === approvalId ? updated : approval
+            )
+          : s.approvals.filter((approval) => approval.id !== approvalId);
+        return {
+          approvals,
+          approvalDecisionLoadingId: null,
+          approvalsError: null,
+        };
+      });
+    } catch (err: unknown) {
+      set({
+        approvalsError: getErrorMessage(err, "处理审批请求失败"),
+        approvalDecisionLoadingId: null,
+      });
+    }
+  },
+
   // ===== 项目理解 =====
   projectSnapshot: null,
   projectFiles: [],
@@ -412,6 +535,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   searchResults: [],
   searchTruncated: false,
   searchLoading: false,
+  commandRunLoadingKey: null,
+  commandRunError: null,
+  latestCommandRun: null,
+  commandRuns: [],
 
   fetchProjectOverview: async () => {
     set({ projectLoading: true, projectError: null });
@@ -425,11 +552,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         projectFiles: files.files,
         projectLoading: false,
       });
+      get().fetchCommandRuns(10).catch(() => {
+        // 命令审计记录加载失败不影响项目概览。
+      });
     } catch (err: unknown) {
       set({
         projectError: getErrorMessage(err, "获取项目概览失败"),
         projectLoading: false,
       });
+    }
+  },
+
+  fetchCommandRuns: async (limit = 10) => {
+    try {
+      const result = await api.listProjectCommandRuns(limit);
+      set({ commandRuns: result.runs, commandRunError: null });
+    } catch (err: unknown) {
+      set({ commandRunError: getErrorMessage(err, "获取命令运行记录失败") });
     }
   },
 
@@ -470,7 +609,26 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  clearProjectError: () => set({ projectError: null }),
+  runProjectCommand: async (request) => {
+    const key = `${request.workingDir}:${request.command}`;
+    set({ commandRunLoadingKey: key, commandRunError: null, latestCommandRun: null });
+    try {
+      const result = await api.runProjectCommand(request);
+      set((s) => ({
+        latestCommandRun: result,
+        commandRuns: [result, ...s.commandRuns.filter((run) => run.id !== result.id)].slice(0, 10),
+        commandRunLoadingKey: null,
+        commandRunError: null,
+      }));
+    } catch (err: unknown) {
+      set({
+        commandRunError: getErrorMessage(err, "运行项目命令失败"),
+        commandRunLoadingKey: null,
+      });
+    }
+  },
+
+  clearProjectError: () => set({ projectError: null, commandRunError: null }),
 
   // ===== 健康检查 =====
   healthy: null,

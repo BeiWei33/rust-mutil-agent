@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解和任务执行闭环 v1 已具备；真实命令执行、聊天历史持久化、完整步骤调度和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、受控验证命令执行、命令运行审计和审批请求基础已具备；补丁写入、高风险动作自动拦截和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -45,10 +45,12 @@ rust-mutil-agent/
 │       ├── commands.rs
 │       ├── error.rs
 │       ├── agent/
+│       ├── approval.rs
 │       ├── bus/
 │       ├── llm/
 │       ├── memory/
 │       ├── orchestrator/
+│       ├── runtime/
 │       └── tool/
 └── src-web/
     ├── package.json
@@ -80,7 +82,10 @@ Rust Tauri Commands
   ├─ get_agent_status
   ├─ create_task / get_task / list_tasks / get_task_events
   ├─ get_task_result
+  ├─ cancel_task / retry_task
   ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
+  ├─ run_project_command / list_project_command_runs
+  ├─ list_approval_requests / approve_action
   ├─ health_check
   ├─ get_history
   └─ clear_history
@@ -89,8 +94,8 @@ Rust Tauri Commands
 Orchestrator
   ├─ 注册内置 Agent
   ├─ 维护 Agent mpsc 通道
-  ├─ 创建 TaskResult 缓存
-  └─ 将用户任务发送给目标 Agent
+  ├─ 创建可追踪 Task / TaskEvent
+  └─ 按步骤依赖分派计划任务，支持取消后重试
         │
         ▼
 Agents
@@ -113,7 +118,7 @@ MessageBus
 2. 通过 `dotenvy::dotenv()` 尝试加载 `.env`。
 3. 创建全局 `MessageBus`。
 4. 创建 `Orchestrator`，并调用 `register_builtin_agents()` 注册内置 Agent。
-5. 将 `AppState { bus, orchestrator }` 注入 Tauri 状态。
+5. 将 `AppState { bus, orchestrator, chat_store }` 注入 Tauri 状态。
 6. 注册 Tauri IPC 命令。
 7. 注册 Tauri 插件：shell、fs、notification、dialog、clipboard-manager、process。
 8. 启动 Tauri 应用。
@@ -158,9 +163,10 @@ pub trait Agent: Send + Sync {
 - 注册并启动内置 Agent。
 - 维护 Agent 名称到 `mpsc::UnboundedSender<AgentMessage>` 的映射。
 - 接收用户任务，生成任务 ID，创建可追踪 `Task`，并维护任务事件。
+- 通过 SQLite 保存 `Task` 和 `TaskEvent` JSON 快照，应用重启后恢复任务列表和事件时间线。
 - 将消息直接发送给指定 Agent。
 - 提供 Agent 列表和任务结果查询。
-- 监听 `MessageBus` 中的 Agent 回复，应用 Planner 计划并推进任务执行闭环 v1。
+- 监听 `MessageBus` 中的 Agent 回复，应用 Planner 计划，并按步骤依赖推进任务执行。
 
 当前内置 Agent：
 
@@ -172,7 +178,11 @@ pub trait Agent: Send + Sync {
 | `Tool` | 工具操作员 | 否 | 工具调用 |
 | `Echo` | 回声测试员 | 是 | 通信链路测试 |
 
-注意：当前 `submit_task_to_agent()` 会把消息发到 Agent 的 `mpsc` 通道，Agent 回复会发送到 `MessageBus` 的 broadcast 通道；Orchestrator 已订阅 Planner/Echo 等回复并更新任务状态。Planner 生成计划后，任务执行闭环 v1 会对只读 Tool 步骤执行项目搜索/文件预览，其余步骤仍以模拟结果完成。
+注意：当前 `submit_task_to_agent()` 会把消息发到 Agent 的 `mpsc` 通道，Agent 回复会发送到 `MessageBus` 的 broadcast 通道；Orchestrator 已订阅回复并更新任务状态。Planner 生成计划后，Orchestrator 会按 `depends_on` 启动就绪步骤：Planner 分析步骤和只读项目检索在运行时内部完成，Executor/Memory/Echo/通用 Tool 步骤会投递给对应 Agent 的 `mpsc` 通道。
+
+步骤分派上下文会携带 `stepId`、`stepAttempt`、任务目标和依赖步骤结果；Agent 回复会保留并合并该上下文，Orchestrator 优先按 `stepId + stepAttempt` 精确完成或失败对应步骤，缺失时才回退到旧的 Agent 名称匹配。
+
+任务持久化由 `src-tauri/src/task/store.rs` 提供，默认数据库路径是当前工作目录下的 `rust-mutil-agent-tasks.sqlite3`；可通过 `TASK_DB_PATH` 覆盖。持久化初始化失败时，应用会记录 warning 并退回内存任务运行时。
 
 ### 6.3 MessageBus 消息总线
 
@@ -202,7 +212,7 @@ pub trait Agent: Send + Sync {
 输出消息：
 
 - 第一条为 `plan_created`，`context` 内包含完整 `TaskPlan`。
-- 后续为 `plan_step`，分别发往计划中的 Agent。
+- 后续仍会广播 `plan_step` 作为兼容消息；实际执行分派由 Orchestrator 根据 `TaskPlan.depends_on` 统一调度，避免绕过任务状态机。
 
 ### 6.5 ExecutorAgent
 
@@ -214,7 +224,7 @@ pub trait Agent: Send + Sync {
 - 对 `msg_type == "http_request"` 的消息发起 HTTP 请求。
 - 对包含“搜索/search”的消息执行模拟搜索。
 
-当前搜索是占位实现，会等待约 200ms 并返回模拟结果。真实命令执行和沙箱能力尚未接入。
+当前搜索是占位实现，会等待约 200ms 并返回模拟结果。ExecutorAgent 仍不直接执行系统命令；真实项目验证命令通过独立的 `runtime::command` 受控模块和 `run_project_command` IPC 暴露。
 
 ### 6.6 MemoryAgent
 
@@ -274,7 +284,7 @@ pub type ToolFn = Arc<
 - 默认端点：`https://api.deepseek.com/v1/chat/completions`
 - 默认模型：`deepseek-v4-pro`
 
-`ChatCompletionRequest` 支持 `response_format`，其中 `JsonObject` 会映射为 OpenAI-compatible JSON mode。Planner 侧已提供 JSON plan schema 和解析校验入口；通过 `PLANNER_USE_LLM=true` 可启用 LLM JSON 规划，默认仍使用规则规划作为稳定降级路径。
+`ChatCompletionRequest` 支持 `response_format`，其中 `JsonObject` 会映射为 OpenAI-compatible JSON mode。Planner 侧已提供 JSON plan schema 和解析校验入口；通过 `PLANNER_USE_LLM=true` 可启用环境变量 LLM JSON 规划，默认仍使用规则规划作为稳定降级路径。前端传入 API Key 时，后端会通过 `AgentMessage.transient_context` 为本次 Planner 请求构造临时 OpenAI-compatible LLMClient；该临时上下文不参与序列化、持久化或 Planner prompt 的项目上下文拼接。
 
 Planner LLM 相关环境变量：
 
@@ -283,6 +293,10 @@ Planner LLM 相关环境变量：
 | `PLANNER_USE_LLM` | 设为 `true` / `1` / `yes` / `on` 时启用 LLM 规划 |
 | `PLANNER_LLM_PROVIDER` | `openai` 或 `deepseek`，未设置时优先 OpenAI Key，否则 DeepSeek |
 | `PLANNER_LLM_RETRIES` | LLM 调用重试次数，范围 1-3 |
+| `TASK_DB_PATH` | 任务/事件 SQLite 数据库路径，默认 `rust-mutil-agent-tasks.sqlite3` |
+| `CHAT_DB_PATH` | 聊天历史 SQLite 数据库路径，默认 `rust-mutil-agent-chat.sqlite3` |
+| `COMMAND_DB_PATH` | 命令运行审计 SQLite 数据库路径，默认 `rust-mutil-agent-commands.sqlite3` |
+| `APPROVAL_DB_PATH` | 审批请求 SQLite 数据库路径，默认 `rust-mutil-agent-approvals.sqlite3` |
 
 ## 7. Tauri IPC 命令契约
 
@@ -295,16 +309,33 @@ Planner LLM 相关环境变量：
 | `get_task` | `{ taskId }` | `Task` 或 `null` | 已实现 |
 | `list_tasks` | 无 | `{ tasks }` | 已实现 |
 | `get_task_events` | `{ taskId }` | `TaskEvent[]` | 已实现 |
+| `cancel_task` | `{ request: { taskId, reason? } }` | `CancelTaskResponse` | 已实现任务取消 |
+| `retry_task` | `{ request: { taskId, reason? } }` | `RetryTaskResponse` | 已实现失败/取消任务重试 |
 | `get_project_snapshot` | 无 | `ProjectSnapshot` | 已实现 |
 | `list_project_files` | `{ maxFiles? }` | `{ files }` | 已实现 |
 | `read_project_file` | `{ path }` | `FileReadResponse` | 已实现只读沙箱 |
 | `search_project_text` | `{ request: { query, maxResults? } }` | `SearchResponse` | 已实现只读搜索 |
+| `run_project_command` | `{ request: { command, workingDir } }` | `ProjectCommandRunResponse` | 已实现 allowlist 受控运行 |
+| `list_project_command_runs` | `{ limit? }` | `{ runs }` | 已实现最近命令审计读取 |
+| `list_approval_requests` | `{ status?, limit? }` | `{ approvals }` | 已实现审批请求读取 |
+| `approve_action` | `{ request: { approvalId, approved, note?, decidedBy? } }` | `ApprovalRequest` 或 `null` | 已实现审批/拒绝决策 |
 | `get_agent_status` | `{ agentId }` | `AgentStatusResponse` | 已实现 |
 | `list_agents` | 无 | `{ agents }` | 已实现 |
 | `get_task_result` | `{ taskId }` | 兼容旧接口的任务结果或 `null` | 已聚合当前任务步骤和输出 |
 | `health_check` | 无 | `{ healthy, version, agentCount }` | 已实现 |
-| `get_history` | `{ sessionId }` | 消息数组 | 当前返回空数组 |
-| `clear_history` | `{ sessionId }` | `void` | 当前为 no-op |
+| `get_history` | `{ sessionId }` | 消息数组 | 已实现聊天历史读取 |
+| `clear_history` | `{ sessionId }` | `void` | 已实现会话历史清理 |
+
+`run_project_command` 只接受归一化后精确匹配的低风险验证命令：
+
+- `src-tauri`: `cargo check`, `cargo test`
+- `src-web`: `npm test -- --run`, `npm run build`
+
+该命令不会经过 shell；工作目录会解析到 workspace 内部，拒绝父目录穿越和 shell 控制字符；执行超时为 120 秒，stdout/stderr 会截断到前 96 KB 并返回截断标记。
+
+每次成功进入 allowlist 的命令运行都会写入 `command_runs` 审计表，保存命令、工作目录、退出码、是否成功、stdout/stderr、耗时、超时标记、截断标记和创建时间。前端项目面板会通过 `list_project_command_runs` 展示最近记录。
+
+审批请求由 `approval_requests` 表持久化，包含任务/步骤关联、风险等级、动作类型、动作 payload、请求方、状态和决策信息。当前已支持 `pending` / `approved` / `rejected` / `cancelled` 状态、列表筛选和重复决策保护；尚未把补丁应用或非 allowlist 命令自动接入审批暂停。
 
 ### send_message 路由规则
 
@@ -330,6 +361,8 @@ Planner LLM 相关环境变量：
 - `AGENT_NOT_FOUND`
 - `AGENT_NOT_SELECTABLE`
 - `ROUTE_FAILED`
+- `COMMAND_ERROR`
+- `APPROVAL_ERROR`
 
 ## 8. 前端架构
 
@@ -343,6 +376,8 @@ Planner LLM 相关环境变量：
 | 页面 | 组件 | 说明 |
 | --- | --- | --- |
 | 对话 | `ChatWindow` | 消息展示、Markdown 渲染、Agent 选择、发送/重试 |
+| 项目 | `ProjectPanel` | 项目快照、文件检索、只读预览、推荐验证命令运行 |
+| 审批 | `ApprovalPanel` | 高风险动作审批请求列表、通过/拒绝 |
 | Agent | `AgentPanel` | Agent 状态列表、能力展示、5 秒轮询 |
 | 设置 | `SettingsPanel` | 模型、API Key、Base URL、max tokens、temperature |
 
@@ -358,6 +393,8 @@ Planner LLM 相关环境变量：
 - `selectedAgentId`
 - `healthy` / `healthVersion`
 - `settings`
+- `projectSnapshot` / `projectFiles` / `latestCommandRun`
+- `approvals` / `approvalsLoading` / `approvalDecisionLoadingId`
 
 设置项保存在浏览器 `localStorage` 的 `app-settings` 键中。
 
@@ -517,23 +554,23 @@ npm test
 ## 12. 当前限制与风险
 
 1. Planner 默认仍是关键词规则；真实 LLM 规划需要通过 `PLANNER_USE_LLM` 显式开启。
-2. Planner 已有 JSON plan schema、解析校验和失败降级策略；前端模型/API 配置已随请求传给后端，但 API Key 当前只做脱敏占位，尚未用于请求级 LLMClient。
-3. 任务执行闭环 v1 会自动完成计划步骤，其中只读 Tool 步骤能检索项目；Executor/Memory 等步骤仍是模拟结果。
-4. Planner 生成的 `plan_step` 回复发布到 broadcast 后，尚未作为真正的依赖调度队列逐步投递到对应 Agent 的 `mpsc` 通道。
-5. `get_history` 返回空数组，`clear_history` 是 no-op。
+2. Planner 已有 JSON plan schema、解析校验和失败降级策略；前端模型/API 配置可作为请求级临时 LLMClient 使用，API Key 不写入普通上下文或持久化数据。
+3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、失败/取消后的任务重试和任务/事件持久化，尚未实现步骤超时，也尚未把任务步骤自动暂停到审批请求上。
+4. Planner 分析步骤仍由运行时内部模拟完成，避免把计划内 Planner 子步骤再次送入 Planner 触发嵌套规划。
+5. 聊天历史已按 `sessionId` 持久化；当前前端默认使用 `default` 单会话，尚未实现多会话管理界面。
 6. MemoryAgent 默认不使用 SQLite；长期记忆未接入应用启动流程。
 7. `web_search` 是模拟结果。
-8. `file_read` 当前直接读取路径，后续需要加路径权限、沙箱和审计。
-9. 前端设置中的 API Key 和模型配置保存在 localStorage；当前已随请求传递脱敏摘要，但未接入安全存储或请求级 LLMClient。
-10. 运行时 API Key 仍主要依赖环境变量或 localStorage，尚未接入系统安全凭据存储。
+8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 `file_read` 后续仍需要统一路径权限、沙箱和审计。
+9. 前端设置中的 API Key 和模型配置保存在 localStorage；后端请求期可使用该配置，但尚未接入系统安全凭据存储。
+10. 运行时环境变量 LLM 配置和前端请求级 LLM 配置已经并存，尚未提供统一的凭据管理界面。
 11. README 中部分描述仍偏旧，例如前端并非 Next.js 预留，而是 Vite + React 已实现。
 
 ## 13. 建议后续路线
 
-1. 实现计划步骤调度器：将 Planner 产出的 `plan_step` 真正按依赖关系投递给对应 Agent。
-2. 接入请求级真实 LLM：在安全存储方案落地后，让 Planner 可按前端配置构造临时 LLMClient，再让 Executor/Tool 使用工具调用。
-3. 扩展工具执行层：在只读项目检索之后，引入可审批的命令运行、补丁生成和差异审查能力。
+1. 增强调度器控制面：实现步骤超时、单步骤跳过和人工审批状态流转。
+2. 扩展请求级真实 LLM：在 Planner 临时 LLMClient 基础上，继续让 Executor/Tool 使用受控工具调用，并接入安全存储。
+3. 扩展工具执行层：在受控验证命令运行、审计和审批请求基础上，引入补丁生成、差异审查和高风险动作自动暂停。
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。
-5. 强化工具权限：对 `file_read`、未来命令执行和网络请求增加白名单、确认流和审计日志。
+5. 强化工具权限：对 `file_read`、命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。
 7. 更新 README：修正前端技术栈、运行方式和当前实现状态。

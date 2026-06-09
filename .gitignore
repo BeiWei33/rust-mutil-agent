@@ -19,3 +19,7 @@ Thumbs.db
 # Env
 .env
 *.env.local
+
+# Local app data
+*.sqlite
+*.sqlite3

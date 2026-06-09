@@ -4,7 +4,7 @@
 //! 1. 管理所有已注册的 Agent
 //! 2. 接收用户输入，创建可追踪 Task
 //! 3. 监听 Agent 回复并更新任务状态
-//! 4. 在任务执行闭环 v1 中用只读工具观察和模拟执行推进计划步骤
+//! 4. 按计划依赖调度步骤，并用只读工具观察项目状态
 
 use crate::agent::echo_agent::EchoAgent;
 use crate::agent::executor_agent::ExecutorAgent;
@@ -14,11 +14,11 @@ use crate::agent::tool_agent::ToolAgent;
 use crate::agent::traits::{Agent, AgentMessage};
 use crate::bus::message_bus::MessageBus;
 use crate::error::AgentError;
-use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep};
+use crate::task::{StepStatus, Task, TaskEvent, TaskEventKind, TaskStatus, TaskStep, TaskStore};
 use crate::workspace;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc::UnboundedSender, Mutex};
 
 const READONLY_TOOL_SEARCH_LIMIT: usize = 8;
 const READONLY_TOOL_READ_LIMIT: usize = 3;
@@ -30,6 +30,22 @@ struct AgentRuntime {
     sender: tokio::sync::mpsc::UnboundedSender<AgentMessage>,
     /// Agent 名称
     name: String,
+}
+
+#[derive(Debug, Clone)]
+struct StepDispatch {
+    task_id: String,
+    step_id: String,
+    agent_name: String,
+    instruction: String,
+    context: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct RetryTaskResult {
+    task: Task,
+    dispatches: Vec<StepDispatch>,
+    needs_planner: bool,
 }
 
 /// 任务执行结果（旧接口兼容结构）。
@@ -64,12 +80,46 @@ impl From<&Task> for TaskResult {
 struct TaskRuntime {
     tasks: HashMap<String, Task>,
     events: HashMap<String, Vec<TaskEvent>>,
+    store: Option<Arc<TaskStore>>,
 }
 
 impl TaskRuntime {
+    fn with_store(store: Arc<TaskStore>) -> Self {
+        let mut runtime = Self {
+            tasks: HashMap::new(),
+            events: HashMap::new(),
+            store: Some(store.clone()),
+        };
+
+        match store.load_tasks() {
+            Ok(tasks) => {
+                for task in tasks {
+                    runtime.tasks.insert(task.id.clone(), task);
+                }
+            }
+            Err(err) => tracing::warn!("[TaskRuntime] 加载持久化任务失败: {err}"),
+        }
+
+        match store.load_events() {
+            Ok(events) => {
+                for event in events {
+                    runtime
+                        .events
+                        .entry(event.task_id.clone())
+                        .or_default()
+                        .push(event);
+                }
+            }
+            Err(err) => tracing::warn!("[TaskRuntime] 加载持久化任务事件失败: {err}"),
+        }
+
+        runtime
+    }
+
     fn insert_task(&mut self, task: Task) {
         let task_id = task.id.clone();
         self.tasks.insert(task_id.clone(), task);
+        self.persist_task_by_id(&task_id);
         self.push_event(TaskEvent::new(
             task_id,
             None,
@@ -109,10 +159,11 @@ impl TaskRuntime {
             task.touch();
         }
 
+        self.persist_task_by_id(task_id);
         self.extend_events(emitted);
     }
 
-    fn apply_plan(&mut self, task_id: &str, plan: TaskPlan) {
+    fn apply_plan(&mut self, task_id: &str, plan: TaskPlan) -> bool {
         let steps = plan
             .steps
             .into_iter()
@@ -130,10 +181,18 @@ impl TaskRuntime {
 
         let step_count = steps.len();
         if let Some(task) = self.tasks.get_mut(task_id) {
+            if task.status == TaskStatus::Cancelled {
+                return false;
+            }
+
             task.set_steps(steps);
             task.user_goal = plan.goal;
+            task.touch();
+        } else {
+            return false;
         }
 
+        self.persist_task_by_id(task_id);
         self.push_event(TaskEvent::new(
             task_id.to_string(),
             None,
@@ -141,67 +200,87 @@ impl TaskRuntime {
             format!("Planner 已生成 {step_count} 个步骤。"),
             serde_json::json!({ "stepCount": step_count }),
         ));
+
+        true
     }
 
-    fn run_task_v1(&mut self, task_id: &str) {
+    fn advance_task(&mut self, task_id: &str) -> Vec<StepDispatch> {
+        let mut dispatches = Vec::new();
         let mut emitted = Vec::new();
-        let mut completed_count = 0usize;
 
-        if let Some(task) = self.tasks.get_mut(task_id) {
+        loop {
+            let Some(task) = self.tasks.get_mut(task_id) else {
+                break;
+            };
+
+            if matches!(
+                task.status,
+                TaskStatus::Failed | TaskStatus::Completed | TaskStatus::Cancelled
+            ) {
+                break;
+            }
+
             task.status = TaskStatus::Running;
             task.touch();
 
-            for step in &mut task.steps {
-                if step.status != StepStatus::Pending {
-                    continue;
-                }
-
-                step.start();
-                emitted.push(TaskEvent::new(
-                    task_id.to_string(),
-                    Some(step.id.clone()),
-                    TaskEventKind::StepStarted,
-                    format!("{} 开始执行：{}", step.agent_id, step.title),
-                    serde_json::json!({
-                        "agentId": step.agent_id,
-                        "instruction": step.instruction,
-                    }),
-                ));
-
-                let result = execute_task_step_v1(step);
-                step.complete(result.clone());
-                completed_count += 1;
-
-                emitted.push(TaskEvent::new(
-                    task_id.to_string(),
-                    Some(step.id.clone()),
-                    TaskEventKind::StepCompleted,
-                    format!("{} 已完成步骤。", step.agent_id),
-                    result,
-                ));
+            let ready_indices = ready_step_indices(task);
+            if ready_indices.is_empty() {
+                break;
             }
 
-            if task
-                .steps
-                .iter()
-                .all(|step| step.status == StepStatus::Completed)
-            {
-                let output = format!(
-                    "任务执行闭环 v1 已完成，共完成 {} 个步骤。",
-                    task.steps.len()
-                );
-                task.complete(output.clone());
-                emitted.push(TaskEvent::new(
-                    task_id.to_string(),
-                    None,
-                    TaskEventKind::Completed,
-                    output,
-                    serde_json::json!({ "completedSteps": completed_count }),
-                ));
+            let mut completed_inside_runtime = false;
+            for index in ready_indices {
+                {
+                    let step = &mut task.steps[index];
+                    step.start();
+
+                    emitted.push(TaskEvent::new(
+                        task_id.to_string(),
+                        Some(step.id.clone()),
+                        TaskEventKind::StepStarted,
+                        format!("{} 开始执行：{}", step.agent_id, step.title),
+                        serde_json::json!({
+                            "agentId": step.agent_id,
+                            "instruction": step.instruction,
+                            "attempt": step.attempts,
+                        }),
+                    ));
+                }
+
+                let context = build_step_dispatch_context(task, index);
+                let step = &mut task.steps[index];
+
+                if let Some(result) = execute_runtime_step(step) {
+                    step.complete(result.clone());
+                    completed_inside_runtime = true;
+
+                    emitted.push(TaskEvent::new(
+                        task_id.to_string(),
+                        Some(step.id.clone()),
+                        TaskEventKind::StepCompleted,
+                        format!("{} 已完成步骤。", step.agent_id),
+                        result,
+                    ));
+                } else {
+                    dispatches.push(StepDispatch {
+                        task_id: task_id.to_string(),
+                        step_id: step.id.clone(),
+                        agent_name: step.agent_id.clone(),
+                        instruction: step.instruction.clone(),
+                        context,
+                    });
+                }
+            }
+
+            if !completed_inside_runtime {
+                break;
             }
         }
 
+        self.complete_task_if_ready(task_id, &mut emitted);
         self.extend_events(emitted);
+        self.persist_task_by_id(task_id);
+        dispatches
     }
 
     fn complete_running_step(
@@ -210,15 +289,18 @@ impl TaskRuntime {
         agent_name: &str,
         content: &str,
         context: serde_json::Value,
-    ) {
+    ) -> Vec<StepDispatch> {
         let mut emitted = Vec::new();
-        let mut task_completed = None;
 
         if let Some(task) = self.tasks.get_mut(task_id) {
-            if let Some(step) = task
-                .steps
-                .iter_mut()
-                .find(|step| step.status == StepStatus::Running && step.agent_id == agent_name)
+            if task.status == TaskStatus::Cancelled {
+                return Vec::new();
+            }
+
+            let context_step_id = context_step_id(&context);
+            let context_step_attempt = context_step_attempt(&context);
+            if let Some(step) =
+                find_running_step_mut(task, agent_name, context_step_id, context_step_attempt)
             {
                 let result = serde_json::json!({
                     "agentId": agent_name,
@@ -234,41 +316,134 @@ impl TaskRuntime {
                     result,
                 ));
             }
+        }
 
-            if !task.steps.is_empty()
-                && task
-                    .steps
-                    .iter()
-                    .all(|step| step.status == StepStatus::Completed)
-            {
-                let output = content.to_string();
-                task.complete(output.clone());
-                task_completed = Some(output);
+        self.complete_task_if_ready(task_id, &mut emitted);
+
+        self.extend_events(emitted);
+        self.persist_task_by_id(task_id);
+        self.advance_task(task_id)
+    }
+
+    fn cancel_task(&mut self, task_id: &str, reason: &str) -> Option<Task> {
+        let mut emitted = Vec::new();
+        let task = self.tasks.get_mut(task_id)?;
+
+        if task.status == TaskStatus::Completed
+            || task.status == TaskStatus::Failed
+            || task.status == TaskStatus::Cancelled
+        {
+            return Some(task.clone());
+        }
+
+        for step in &mut task.steps {
+            if matches!(step.status, StepStatus::Pending | StepStatus::Running) {
+                step.status = StepStatus::Skipped;
+                step.error = Some(reason.to_string());
+                step.completed_at = Some(chrono::Utc::now());
+                emitted.push(TaskEvent::new(
+                    task_id.to_string(),
+                    Some(step.id.clone()),
+                    TaskEventKind::StepFailed,
+                    format!("{} 已跳过：任务取消。", step.agent_id),
+                    serde_json::json!({
+                        "agentId": step.agent_id,
+                        "reason": reason,
+                    }),
+                ));
             }
         }
 
-        if let Some(output) = task_completed {
-            emitted.push(TaskEvent::new(
-                task_id.to_string(),
-                None,
-                TaskEventKind::Completed,
-                output,
-                serde_json::Value::Null,
-            ));
-        }
+        task.cancel(reason);
+        let cancelled = task.clone();
+
+        emitted.push(TaskEvent::new(
+            task_id.to_string(),
+            None,
+            TaskEventKind::Cancelled,
+            format!("任务已取消：{reason}"),
+            serde_json::json!({ "reason": reason }),
+        ));
 
         self.extend_events(emitted);
+        self.persist_task(&cancelled);
+        Some(cancelled)
     }
 
-    fn fail_running_step(&mut self, task_id: &str, agent_name: &str, error: &str) {
+    fn retry_task(&mut self, task_id: &str, reason: &str) -> Option<RetryTaskResult> {
+        let needs_planner;
+        {
+            let task = self.tasks.get_mut(task_id)?;
+
+            if !matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+                return Some(RetryTaskResult {
+                    task: task.clone(),
+                    dispatches: Vec::new(),
+                    needs_planner: false,
+                });
+            }
+
+            for step in &mut task.steps {
+                if matches!(
+                    step.status,
+                    StepStatus::Pending
+                        | StepStatus::WaitingApproval
+                        | StepStatus::Running
+                        | StepStatus::Failed
+                        | StepStatus::Skipped
+                ) {
+                    step.reset_for_retry();
+                }
+            }
+
+            task.retry();
+            needs_planner = task.steps.is_empty();
+        }
+
+        self.persist_task_by_id(task_id);
+        self.push_event(TaskEvent::new(
+            task_id.to_string(),
+            None,
+            TaskEventKind::Retried,
+            format!("任务已重新进入调度：{reason}"),
+            serde_json::json!({ "reason": reason }),
+        ));
+
+        let dispatches = if needs_planner {
+            Vec::new()
+        } else {
+            self.advance_task(task_id)
+        };
+        let task = self.get_task(task_id)?;
+
+        Some(RetryTaskResult {
+            task,
+            dispatches,
+            needs_planner,
+        })
+    }
+
+    fn fail_running_step(
+        &mut self,
+        task_id: &str,
+        agent_name: &str,
+        error: &str,
+        context: Option<&serde_json::Value>,
+    ) {
         let mut emitted = Vec::new();
 
         if let Some(task) = self.tasks.get_mut(task_id) {
-            if let Some(step) = task
-                .steps
-                .iter_mut()
-                .find(|step| step.status == StepStatus::Running && step.agent_id == agent_name)
+            if task.status == TaskStatus::Cancelled {
+                return;
+            }
+
+            let context_step_id = context.and_then(context_step_id);
+            let context_step_attempt = context.and_then(context_step_attempt);
+            let mut matched_step = false;
+            if let Some(step) =
+                find_running_step_mut(task, agent_name, context_step_id, context_step_attempt)
             {
+                matched_step = true;
                 step.fail(error);
                 emitted.push(TaskEvent::new(
                     task_id.to_string(),
@@ -279,17 +454,22 @@ impl TaskRuntime {
                 ));
             }
 
-            task.fail(error);
-            emitted.push(TaskEvent::new(
-                task_id.to_string(),
-                None,
-                TaskEventKind::Failed,
-                error.to_string(),
-                serde_json::Value::Null,
-            ));
+            let should_fail_task =
+                matched_step || (context_step_id.is_none() && task.steps.is_empty());
+            if should_fail_task {
+                task.fail(error);
+                emitted.push(TaskEvent::new(
+                    task_id.to_string(),
+                    None,
+                    TaskEventKind::Failed,
+                    error.to_string(),
+                    serde_json::Value::Null,
+                ));
+            }
         }
 
         self.extend_events(emitted);
+        self.persist_task_by_id(task_id);
     }
 
     fn get_task(&self, task_id: &str) -> Option<Task> {
@@ -307,6 +487,7 @@ impl TaskRuntime {
     }
 
     fn push_event(&mut self, event: TaskEvent) {
+        self.persist_event(&event);
         self.events
             .entry(event.task_id.clone())
             .or_default()
@@ -316,6 +497,63 @@ impl TaskRuntime {
     fn extend_events(&mut self, events: Vec<TaskEvent>) {
         for event in events {
             self.push_event(event);
+        }
+    }
+
+    fn persist_task_by_id(&self, task_id: &str) {
+        if let Some(task) = self.tasks.get(task_id) {
+            self.persist_task(task);
+        }
+    }
+
+    fn persist_task(&self, task: &Task) {
+        let Some(store) = &self.store else {
+            return;
+        };
+
+        if let Err(err) = store.save_task(task) {
+            tracing::warn!("[TaskRuntime] 保存任务 [{}] 失败: {err}", task.id);
+        }
+    }
+
+    fn persist_event(&self, event: &TaskEvent) {
+        let Some(store) = &self.store else {
+            return;
+        };
+
+        if let Err(err) = store.append_event(event) {
+            tracing::warn!("[TaskRuntime] 保存任务事件 [{}] 失败: {err}", event.id);
+        }
+    }
+
+    fn complete_task_if_ready(&mut self, task_id: &str, emitted: &mut Vec<TaskEvent>) {
+        let Some(task) = self.tasks.get_mut(task_id) else {
+            return;
+        };
+
+        if task.steps.is_empty()
+            || task.status == TaskStatus::Completed
+            || task.status == TaskStatus::Failed
+            || task.status == TaskStatus::Cancelled
+        {
+            return;
+        }
+
+        if task
+            .steps
+            .iter()
+            .all(|step| step.status == StepStatus::Completed)
+        {
+            let completed_steps = task.steps.len();
+            let output = format!("任务执行调度器已完成，共完成 {completed_steps} 个步骤。");
+            task.complete(output.clone());
+            emitted.push(TaskEvent::new(
+                task_id.to_string(),
+                None,
+                TaskEventKind::Completed,
+                output,
+                serde_json::json!({ "completedSteps": completed_steps }),
+            ));
         }
     }
 }
@@ -341,6 +579,20 @@ impl Orchestrator {
             runtime: Arc::new(Mutex::new(TaskRuntime::default())),
             event_loop_started: false,
         }
+    }
+
+    /// 创建启用任务持久化的调度器。
+    pub fn with_task_store(
+        bus: Arc<MessageBus>,
+        db_path: impl Into<String>,
+    ) -> Result<Self, AgentError> {
+        let store = Arc::new(TaskStore::open(db_path)?);
+        Ok(Self {
+            agents: HashMap::new(),
+            bus,
+            runtime: Arc::new(Mutex::new(TaskRuntime::with_store(store))),
+            event_loop_started: false,
+        })
     }
 
     /// 注册所有内置 Agent 并启动其运行循环
@@ -391,11 +643,19 @@ impl Orchestrator {
 
         let mut rx = self.bus.subscribe();
         let runtime = self.runtime.clone();
+        let agent_senders = Arc::new(
+            self.agents
+                .iter()
+                .map(|(name, runtime)| (name.clone(), runtime.sender.clone()))
+                .collect::<HashMap<_, _>>(),
+        );
 
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(msg) => handle_agent_message(runtime.clone(), msg).await,
+                    Ok(msg) => {
+                        handle_agent_message(runtime.clone(), agent_senders.clone(), msg).await
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!("[Orchestrator] 任务事件监听落后，跳过 {skipped} 条消息");
                     }
@@ -445,6 +705,25 @@ impl Orchestrator {
         msg_type: &str,
         extra_context: serde_json::Value,
     ) -> Result<String, AgentError> {
+        self.submit_task_to_agent_with_context_and_transient(
+            agent_name,
+            user_input,
+            msg_type,
+            extra_context,
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
+    /// 提交用户任务到指定 Agent，并附带请求级上下文和进程内临时上下文。
+    pub async fn submit_task_to_agent_with_context_and_transient(
+        &mut self,
+        agent_name: &str,
+        user_input: &str,
+        msg_type: &str,
+        extra_context: serde_json::Value,
+        transient_context: serde_json::Value,
+    ) -> Result<String, AgentError> {
         let task_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(
             "[Orchestrator] 接收任务 [{}]，目标 Agent [{}]: {}",
@@ -470,7 +749,8 @@ impl Orchestrator {
         let msg = AgentMessage::new("Orchestrator", agent_name, user_input)
             .with_task_id(&task_id)
             .with_type(msg_type)
-            .with_context(context);
+            .with_context(context)
+            .with_transient_context(transient_context);
 
         self.send_to_agent(agent_name, msg)?;
 
@@ -520,6 +800,38 @@ impl Orchestrator {
         runtime.get_events(task_id)
     }
 
+    /// 取消任务。
+    pub async fn cancel_task(&self, task_id: &str, reason: &str) -> Option<Task> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.cancel_task(task_id, reason)
+    }
+
+    /// 重试失败或已取消的任务。
+    pub async fn retry_task(&self, task_id: &str, reason: &str) -> Option<Task> {
+        let retry = {
+            let mut runtime = self.runtime.lock().await;
+            runtime.retry_task(task_id, reason)
+        }?;
+
+        if retry.needs_planner {
+            let context = build_planner_message_context(&retry.task.user_goal);
+            let msg = AgentMessage::new("Orchestrator", "Planner", &retry.task.user_goal)
+                .with_task_id(task_id)
+                .with_type("plan_request")
+                .with_context(context);
+
+            if let Err(err) = self.send_to_agent("Planner", msg) {
+                let mut runtime = self.runtime.lock().await;
+                runtime.fail_running_step(task_id, "Planner", &format!("{}", err), None);
+            }
+        } else {
+            dispatch_steps(self.runtime.clone(), self.agent_senders(), retry.dispatches).await;
+        }
+
+        let runtime = self.runtime.lock().await;
+        runtime.get_task(task_id)
+    }
+
     /// 列出所有已注册的 Agent 名称
     pub fn list_agents(&self) -> Vec<String> {
         self.agents
@@ -531,6 +843,15 @@ impl Orchestrator {
     /// 获取消息总线的引用
     pub fn bus(&self) -> &Arc<MessageBus> {
         &self.bus
+    }
+
+    fn agent_senders(&self) -> Arc<HashMap<String, UnboundedSender<AgentMessage>>> {
+        Arc::new(
+            self.agents
+                .iter()
+                .map(|(name, runtime)| (name.clone(), runtime.sender.clone()))
+                .collect(),
+        )
     }
 }
 
@@ -551,7 +872,11 @@ fn merge_message_context(base: serde_json::Value, extra: serde_json::Value) -> s
     }
 }
 
-async fn handle_agent_message(runtime: Arc<Mutex<TaskRuntime>>, msg: AgentMessage) {
+async fn handle_agent_message(
+    runtime: Arc<Mutex<TaskRuntime>>,
+    agent_senders: Arc<HashMap<String, UnboundedSender<AgentMessage>>>,
+    msg: AgentMessage,
+) {
     let Some(task_id) = msg.task_id.clone() else {
         return;
     };
@@ -559,25 +884,163 @@ async fn handle_agent_message(runtime: Arc<Mutex<TaskRuntime>>, msg: AgentMessag
     match msg.msg_type.as_str() {
         "plan_created" => match serde_json::from_value::<TaskPlan>(msg.context.clone()) {
             Ok(plan) => {
-                let mut runtime = runtime.lock().await;
-                runtime.apply_plan(&task_id, plan);
-                runtime.run_task_v1(&task_id);
+                let dispatches = {
+                    let mut runtime = runtime.lock().await;
+                    if runtime.apply_plan(&task_id, plan) {
+                        runtime.advance_task(&task_id)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                dispatch_steps(runtime, agent_senders, dispatches).await;
             }
             Err(err) => {
                 let mut runtime = runtime.lock().await;
-                runtime.fail_running_step(&task_id, "Planner", &format!("计划解析失败: {err}"));
+                runtime.fail_running_step(
+                    &task_id,
+                    "Planner",
+                    &format!("计划解析失败: {err}"),
+                    Some(&msg.context),
+                );
             }
         },
-        "execution_result" | "tool_result" | "memory_ack" | "echo_reply" => {
-            let mut runtime = runtime.lock().await;
-            runtime.complete_running_step(&task_id, &msg.from, &msg.content, msg.context);
+        "execution_result" | "tool_result" | "memory_ack" | "memory_stored"
+        | "memory_retrieved" | "echo_reply" => {
+            let dispatches = {
+                let mut runtime = runtime.lock().await;
+                runtime.complete_running_step(&task_id, &msg.from, &msg.content, msg.context)
+            };
+            dispatch_steps(runtime, agent_senders, dispatches).await;
         }
-        "execution_error" => {
+        "execution_error" | "tool_error" => {
             let mut runtime = runtime.lock().await;
-            runtime.fail_running_step(&task_id, &msg.from, &msg.content);
+            runtime.fail_running_step(&task_id, &msg.from, &msg.content, Some(&msg.context));
         }
         _ => {}
     }
+}
+
+async fn dispatch_steps(
+    runtime: Arc<Mutex<TaskRuntime>>,
+    agent_senders: Arc<HashMap<String, UnboundedSender<AgentMessage>>>,
+    dispatches: Vec<StepDispatch>,
+) {
+    for dispatch in dispatches {
+        let msg = AgentMessage::new("Orchestrator", &dispatch.agent_name, &dispatch.instruction)
+            .with_task_id(&dispatch.task_id)
+            .with_type("plan_step")
+            .with_context(dispatch.context.clone());
+
+        let result = match agent_senders.get(&dispatch.agent_name) {
+            Some(sender) => sender.send(msg).map_err(|err| {
+                format!(
+                    "无法向 Agent [{}] 分派步骤 [{}]: {}",
+                    dispatch.agent_name, dispatch.step_id, err
+                )
+            }),
+            None => Err(format!(
+                "无法分派步骤 [{}]，Agent [{}] 未注册",
+                dispatch.step_id, dispatch.agent_name
+            )),
+        };
+
+        if let Err(error) = result {
+            let mut runtime = runtime.lock().await;
+            runtime.fail_running_step(
+                &dispatch.task_id,
+                &dispatch.agent_name,
+                &error,
+                Some(&dispatch.context),
+            );
+        }
+    }
+}
+
+fn context_step_id(context: &serde_json::Value) -> Option<&str> {
+    context.get("stepId").and_then(|value| value.as_str())
+}
+
+fn context_step_attempt(context: &serde_json::Value) -> Option<u32> {
+    context
+        .get("stepAttempt")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn find_running_step_mut<'a>(
+    task: &'a mut Task,
+    agent_name: &str,
+    step_id: Option<&str>,
+    step_attempt: Option<u32>,
+) -> Option<&'a mut TaskStep> {
+    if let Some(step_id) = step_id {
+        return task.steps.iter_mut().find(|step| {
+            step.status == StepStatus::Running
+                && step.id == step_id
+                && step_attempt.is_none_or(|attempt| step.attempts == attempt)
+        });
+    }
+
+    task.steps.iter_mut().find(|step| {
+        step.status == StepStatus::Running
+            && step.agent_id == agent_name
+            && step_attempt.is_none_or(|attempt| step.attempts == attempt)
+    })
+}
+
+fn ready_step_indices(task: &Task) -> Vec<usize> {
+    let mut indices = task
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            if step.status != StepStatus::Pending {
+                return None;
+            }
+
+            let dependencies_completed = step.depends_on.iter().all(|dep_id| {
+                task.steps.iter().any(|candidate| {
+                    candidate.id == *dep_id && candidate.status == StepStatus::Completed
+                })
+            });
+
+            dependencies_completed.then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    indices.sort_by_key(|index| task.steps[*index].order);
+    indices
+}
+
+fn build_step_dispatch_context(task: &Task, step_index: usize) -> serde_json::Value {
+    let step = &task.steps[step_index];
+    let dependency_results = step
+        .depends_on
+        .iter()
+        .filter_map(|dep_id| {
+            task.steps
+                .iter()
+                .find(|candidate| candidate.id == *dep_id)
+                .map(|dep_step| {
+                    serde_json::json!({
+                        "stepId": dep_step.id,
+                        "agentId": dep_step.agent_id,
+                        "instruction": dep_step.instruction,
+                        "result": dep_step.result,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "taskId": task.id,
+        "taskGoal": task.user_goal,
+        "stepId": step.id,
+        "stepOrder": step.order,
+        "stepAttempt": step.attempts,
+        "dependsOn": step.depends_on,
+        "dependencyResults": dependency_results,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -586,19 +1049,32 @@ struct ReadonlyToolInstruction {
     focus_paths: Vec<String>,
 }
 
-fn execute_task_step_v1(step: &TaskStep) -> serde_json::Value {
+fn execute_runtime_step(step: &TaskStep) -> Option<serde_json::Value> {
+    if step.agent_id == "Planner" {
+        return Some(simulated_step_result(step));
+    }
+
     if step.agent_id == "Tool" {
         if let Some(result) = execute_readonly_tool_step(&step.instruction) {
-            return result;
+            return Some(result);
         }
     }
 
+    None
+}
+
+fn simulated_step_result(step: &TaskStep) -> serde_json::Value {
     serde_json::json!({
         "mode": "simulated",
         "agentId": step.agent_id,
         "summary": format!("{} 已完成模拟执行。", step.agent_id),
         "instruction": step.instruction,
     })
+}
+
+#[cfg(test)]
+fn execute_task_step_v1(step: &TaskStep) -> serde_json::Value {
+    execute_runtime_step(step).unwrap_or_else(|| simulated_step_result(step))
 }
 
 fn execute_readonly_tool_step(instruction: &str) -> Option<serde_json::Value> {
@@ -877,7 +1353,7 @@ mod tests {
         orch.register_builtin_agents().await;
 
         let task_id = orch.submit_task("帮我搜索今日新闻").await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
 
         let task = orch.get_task(&task_id).await.unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
@@ -904,7 +1380,7 @@ mod tests {
         orch.register_builtin_agents().await;
 
         let task_id = orch.submit_task("优化项目任务看板").await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         let task = orch.get_task(&task_id).await.unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
@@ -966,6 +1442,401 @@ mod tests {
 
         let result = execute_task_step_v1(&step);
         assert_eq!(result["mode"], "simulated");
+    }
+
+    #[test]
+    fn test_ready_step_indices_waits_for_dependencies() {
+        let mut task = Task::new("task-1", "测试依赖调度");
+        let mut first = TaskStep::new("task-1-1", "task-1", 1, "Planner", "理解任务", vec![]);
+        let second = TaskStep::new(
+            "task-1-2",
+            "task-1",
+            2,
+            "Executor",
+            "执行任务",
+            vec!["task-1-1".to_string()],
+        );
+
+        task.set_steps(vec![first.clone(), second]);
+        assert_eq!(ready_step_indices(&task), vec![0]);
+
+        first.complete(serde_json::json!({ "ok": true }));
+        task.steps[0] = first;
+        assert_eq!(ready_step_indices(&task), vec![1]);
+    }
+
+    #[test]
+    fn test_step_dispatch_context_includes_dependency_results() {
+        let mut task = Task::new("task-1", "测试上下文");
+        let mut first = TaskStep::new("task-1-1", "task-1", 1, "Tool", "只读检索", vec![]);
+        first.complete(serde_json::json!({ "summary": "found files" }));
+        let second = TaskStep::new(
+            "task-1-2",
+            "task-1",
+            2,
+            "Executor",
+            "整理方案",
+            vec!["task-1-1".to_string()],
+        );
+
+        task.set_steps(vec![first, second]);
+        let context = build_step_dispatch_context(&task, 1);
+
+        assert_eq!(context["stepId"], "task-1-2");
+        assert_eq!(context["stepAttempt"], 0);
+        assert_eq!(
+            context["dependencyResults"][0]["result"]["summary"],
+            "found files"
+        );
+    }
+
+    #[test]
+    fn test_task_runtime_loads_persisted_tasks_and_events() {
+        let path = std::env::temp_dir().join(format!(
+            "rust-mutil-agent-runtime-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        {
+            let store = Arc::new(TaskStore::open(&path_str).unwrap());
+            let mut runtime = TaskRuntime::with_store(store);
+            runtime.insert_task(Task::new("task-persisted", "恢复任务"));
+        }
+        {
+            let store = Arc::new(TaskStore::open(&path_str).unwrap());
+            let runtime = TaskRuntime::with_store(store);
+            let task = runtime.get_task("task-persisted").unwrap();
+            let events = runtime.get_events("task-persisted");
+
+            assert_eq!(task.user_goal, "恢复任务");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, TaskEventKind::Created);
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_cancel_task_marks_pending_steps_skipped() {
+        let task_id = "task-cancel";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "取消任务"));
+        runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "取消任务".to_string(),
+                steps: vec![
+                    crate::agent::planner_agent::PlanStep {
+                        step_id: format!("{task_id}-1"),
+                        order: 1,
+                        agent: "Executor".to_string(),
+                        instruction: "执行任务".to_string(),
+                        depends_on: vec![],
+                        status: crate::agent::planner_agent::StepStatus::Pending,
+                    },
+                    crate::agent::planner_agent::PlanStep {
+                        step_id: format!("{task_id}-2"),
+                        order: 2,
+                        agent: "Memory".to_string(),
+                        instruction: "记录结果".to_string(),
+                        depends_on: vec![format!("{task_id}-1")],
+                        status: crate::agent::planner_agent::StepStatus::Pending,
+                    },
+                ],
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let task = runtime.cancel_task(task_id, "测试取消").unwrap();
+
+        assert_eq!(task.status, TaskStatus::Cancelled);
+        assert!(task
+            .steps
+            .iter()
+            .all(|step| step.status == StepStatus::Skipped));
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::Cancelled));
+    }
+
+    #[test]
+    fn test_cancelled_task_ignores_late_agent_reply() {
+        let task_id = "task-late-reply";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "取消运行中任务"));
+        runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "取消运行中任务".to_string(),
+                steps: vec![crate::agent::planner_agent::PlanStep {
+                    step_id: format!("{task_id}-1"),
+                    order: 1,
+                    agent: "Executor".to_string(),
+                    instruction: "执行任务".to_string(),
+                    depends_on: vec![],
+                    status: crate::agent::planner_agent::StepStatus::Pending,
+                }],
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let dispatches = runtime.advance_task(task_id);
+        assert_eq!(dispatches.len(), 1);
+        runtime.cancel_task(task_id, "测试取消").unwrap();
+
+        let next_dispatches = runtime.complete_running_step(
+            task_id,
+            "Executor",
+            "迟到结果",
+            serde_json::json!({ "ok": true }),
+        );
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert!(next_dispatches.is_empty());
+        assert_eq!(task.status, TaskStatus::Cancelled);
+        assert_eq!(task.steps[0].status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn test_cancelled_task_ignores_late_plan() {
+        let task_id = "task-late-plan";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "取消规划中任务"));
+        runtime.cancel_task(task_id, "测试取消").unwrap();
+
+        let applied = runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "取消规划中任务".to_string(),
+                steps: vec![crate::agent::planner_agent::PlanStep {
+                    step_id: format!("{task_id}-1"),
+                    order: 1,
+                    agent: "Executor".to_string(),
+                    instruction: "执行任务".to_string(),
+                    depends_on: vec![],
+                    status: crate::agent::planner_agent::StepStatus::Pending,
+                }],
+                created_at: chrono::Utc::now(),
+            },
+        );
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert!(!applied);
+        assert_eq!(task.status, TaskStatus::Cancelled);
+        assert!(task.steps.is_empty());
+    }
+
+    #[test]
+    fn test_retry_cancelled_task_resets_skipped_steps_and_dispatches_ready_step() {
+        let task_id = "task-retry-cancelled";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "重试取消任务"));
+        runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "重试取消任务".to_string(),
+                steps: vec![
+                    crate::agent::planner_agent::PlanStep {
+                        step_id: format!("{task_id}-1"),
+                        order: 1,
+                        agent: "Executor".to_string(),
+                        instruction: "执行任务".to_string(),
+                        depends_on: vec![],
+                        status: crate::agent::planner_agent::StepStatus::Pending,
+                    },
+                    crate::agent::planner_agent::PlanStep {
+                        step_id: format!("{task_id}-2"),
+                        order: 2,
+                        agent: "Memory".to_string(),
+                        instruction: "记录结果".to_string(),
+                        depends_on: vec![format!("{task_id}-1")],
+                        status: crate::agent::planner_agent::StepStatus::Pending,
+                    },
+                ],
+                created_at: chrono::Utc::now(),
+            },
+        );
+        runtime.cancel_task(task_id, "测试取消").unwrap();
+
+        let retry = runtime.retry_task(task_id, "测试重试").unwrap();
+
+        assert_eq!(retry.task.status, TaskStatus::Running);
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(retry.dispatches[0].step_id, format!("{task_id}-1"));
+        assert_eq!(retry.dispatches[0].context["stepAttempt"], 1);
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::Retried));
+    }
+
+    #[test]
+    fn test_retry_failed_task_preserves_completed_dependencies() {
+        let task_id = "task-retry-failed";
+        let mut task = Task::new(task_id, "重试失败任务");
+        let mut first = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Tool",
+            "只读检索",
+            vec![],
+        );
+        let mut second = TaskStep::new(
+            format!("{task_id}-2"),
+            task_id,
+            2,
+            "Executor",
+            "执行修复",
+            vec![format!("{task_id}-1")],
+        );
+        first.complete(serde_json::json!({ "summary": "found files" }));
+        second.fail("执行失败");
+        task.steps = vec![first, second];
+        task.fail("执行失败");
+
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+
+        let retry = runtime.retry_task(task_id, "再次执行").unwrap();
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(task.steps[0].status, StepStatus::Completed);
+        assert_eq!(task.steps[1].status, StepStatus::Running);
+        assert!(task.steps[1].error.is_none());
+    }
+
+    #[test]
+    fn test_retry_ignores_late_reply_from_previous_attempt() {
+        let task_id = "task-retry-late-reply";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "重试运行中任务"));
+        runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "重试运行中任务".to_string(),
+                steps: vec![crate::agent::planner_agent::PlanStep {
+                    step_id: format!("{task_id}-1"),
+                    order: 1,
+                    agent: "Executor".to_string(),
+                    instruction: "执行任务".to_string(),
+                    depends_on: vec![],
+                    status: crate::agent::planner_agent::StepStatus::Pending,
+                }],
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let old_dispatches = runtime.advance_task(task_id);
+        runtime.cancel_task(task_id, "测试取消").unwrap();
+        let retry = runtime.retry_task(task_id, "测试重试").unwrap();
+
+        let next_dispatches = runtime.complete_running_step(
+            task_id,
+            "Executor",
+            "迟到结果",
+            old_dispatches[0].context.clone(),
+        );
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert!(next_dispatches.is_empty());
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert_eq!(task.steps[0].attempts, 2);
+
+        runtime.complete_running_step(
+            task_id,
+            "Executor",
+            "新尝试结果",
+            retry.dispatches[0].context.clone(),
+        );
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.steps[0].status, StepStatus::Completed);
+    }
+
+    #[test]
+    fn test_retry_ignores_late_error_from_previous_attempt() {
+        let task_id = "task-retry-late-error";
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(Task::new(task_id, "重试运行中任务"));
+        runtime.apply_plan(
+            task_id,
+            TaskPlan {
+                task_id: task_id.to_string(),
+                goal: "重试运行中任务".to_string(),
+                steps: vec![crate::agent::planner_agent::PlanStep {
+                    step_id: format!("{task_id}-1"),
+                    order: 1,
+                    agent: "Executor".to_string(),
+                    instruction: "执行任务".to_string(),
+                    depends_on: vec![],
+                    status: crate::agent::planner_agent::StepStatus::Pending,
+                }],
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let old_dispatches = runtime.advance_task(task_id);
+        runtime.cancel_task(task_id, "测试取消").unwrap();
+        runtime.retry_task(task_id, "测试重试").unwrap();
+
+        runtime.fail_running_step(
+            task_id,
+            "Executor",
+            "迟到错误",
+            Some(&old_dispatches[0].context),
+        );
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert!(task.error.is_none());
+    }
+
+    #[test]
+    fn test_complete_running_step_prefers_context_step_id() {
+        let task_id = "task-exact-step";
+        let mut task = Task::new(task_id, "精确匹配步骤");
+        let mut first = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Executor",
+            "第一个执行步骤",
+            vec![],
+        );
+        let mut second = TaskStep::new(
+            format!("{task_id}-2"),
+            task_id,
+            2,
+            "Executor",
+            "第二个执行步骤",
+            vec![],
+        );
+        first.start();
+        second.start();
+        task.steps = vec![first, second];
+        task.status = TaskStatus::Running;
+
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+        runtime.complete_running_step(
+            task_id,
+            "Executor",
+            "第二步完成",
+            serde_json::json!({ "stepId": format!("{task_id}-2") }),
+        );
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert_eq!(task.steps[0].status, StepStatus::Running);
+        assert_eq!(task.steps[1].status, StepStatus::Completed);
     }
 
     #[test]

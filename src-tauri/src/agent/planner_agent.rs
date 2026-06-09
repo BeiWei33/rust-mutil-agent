@@ -654,17 +654,48 @@ impl PlannerAgent {
         }
 
         let Some(llm_client) = &self.llm_client else {
+            if let Some(config) = request_planner_llm_config(&msg.transient_context) {
+                return self
+                    .call_llm_plan(
+                        msg,
+                        task_id,
+                        &config.client,
+                        config.max_tokens,
+                        config.temperature,
+                    )
+                    .await
+                    .map(Some);
+            }
             return Ok(None);
         };
 
+        let request_config = request_planner_llm_config(&msg.transient_context);
+        let (llm_client, max_tokens, temperature) = request_config
+            .as_ref()
+            .map(|config| (&config.client, config.max_tokens, config.temperature))
+            .unwrap_or((llm_client, None, None));
+
+        self.call_llm_plan(msg, task_id, llm_client, max_tokens, temperature)
+            .await
+            .map(Some)
+    }
+
+    async fn call_llm_plan(
+        &self,
+        msg: &AgentMessage,
+        task_id: &str,
+        llm_client: &LLMClient,
+        max_tokens: Option<u32>,
+        temperature: Option<f32>,
+    ) -> Result<TaskPlan, AgentError> {
         let request = ChatCompletionRequest {
             system_prompt: Some(planner_json_system_prompt()),
             messages: vec![ChatMessage {
                 role: Role::User,
                 content: build_planner_llm_user_prompt(msg),
             }],
-            max_tokens: Some(1_500),
-            temperature: Some(0.2),
+            max_tokens: Some(max_tokens.unwrap_or(1_500)),
+            temperature: Some(temperature.unwrap_or(0.2)),
             response_format: Some(ResponseFormat::JsonObject),
         };
 
@@ -674,7 +705,7 @@ impl PlannerAgent {
             match llm_client.chat_completion(request.clone()).await {
                 Ok(response) => {
                     return TaskPlan::from_llm_json(&msg.content, task_id, &response.content)
-                        .map(Some);
+                        .map_err(Into::into);
                 }
                 Err(err) => last_error = Some(err),
             }
@@ -683,6 +714,49 @@ impl PlannerAgent {
         Err(last_error
             .unwrap_or_else(|| AgentError::LlmError("Planner LLM 调用未执行".to_string())))
     }
+}
+
+struct RequestPlannerLlmConfig {
+    client: LLMClient,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+}
+
+fn request_planner_llm_config(context: &serde_json::Value) -> Option<RequestPlannerLlmConfig> {
+    let settings = context.get("plannerLlmSettings")?;
+    let api_key = settings
+        .get("apiKey")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let model = settings
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let api_base_url = settings
+        .get("apiBaseUrl")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let max_tokens = settings
+        .get("maxTokens")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0);
+    let temperature = settings
+        .get("temperature")
+        .and_then(|value| value.as_f64())
+        .map(|value| value.clamp(0.0, 2.0) as f32);
+
+    Some(RequestPlannerLlmConfig {
+        client: LLMClient::openai_compatible(api_key, model, api_base_url),
+        max_tokens,
+        temperature,
+    })
 }
 
 impl Default for PlannerAgent {
@@ -1177,6 +1251,44 @@ mod tests {
         std::env::remove_var("PLANNER_USE_LLM");
         let planner = PlannerAgent::from_env();
         assert!(planner.llm_client.is_none());
+    }
+
+    #[test]
+    fn test_request_planner_llm_config_builds_transient_client() {
+        let config = request_planner_llm_config(&serde_json::json!({
+            "plannerLlmSettings": {
+                "apiKey": "sk-request",
+                "model": "custom-model",
+                "apiBaseUrl": "https://example.com/v1",
+                "maxTokens": 2048,
+                "temperature": 0.3
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(config.client.api_key(), Some("sk-request"));
+        assert_eq!(config.client.model(), "custom-model");
+        assert_eq!(
+            config.client.endpoint(),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(config.max_tokens, Some(2048));
+        assert_eq!(config.temperature, Some(0.3));
+    }
+
+    #[test]
+    fn test_planner_llm_prompt_omits_transient_context() {
+        let msg = AgentMessage::new("User", "Planner", "实现功能")
+            .with_context(serde_json::json!({ "projectPlanningContext": { "name": "demo" } }))
+            .with_transient_context(serde_json::json!({
+                "plannerLlmSettings": { "apiKey": "sk-secret" }
+            }));
+
+        let prompt = build_planner_llm_user_prompt(&msg);
+
+        assert!(prompt.contains("projectPlanningContext"));
+        assert!(!prompt.contains("sk-secret"));
+        assert!(!prompt.contains("plannerLlmSettings"));
     }
 
     /// 测试 — PlanStep 序列化反序列化

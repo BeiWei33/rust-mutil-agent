@@ -4,13 +4,16 @@
 //! 并管理全局共享状态（Orchestrator、MessageBus 等）。
 
 mod agent;
+mod approval;
 mod bus;
+mod chat;
 mod commands;
 mod error;
 mod llm;
 mod memory;
 mod orchestrator;
 mod project;
+mod runtime;
 mod task;
 mod tool;
 mod workspace;
@@ -18,13 +21,24 @@ mod workspace;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::approval::ApprovalStore;
 use crate::bus::MessageBus;
+use crate::chat::ChatStore;
 use crate::orchestrator::Orchestrator;
+use crate::runtime::CommandRunStore;
+
+const DEFAULT_TASK_DB_PATH: &str = "rust-mutil-agent-tasks.sqlite3";
+const DEFAULT_CHAT_DB_PATH: &str = "rust-mutil-agent-chat.sqlite3";
+const DEFAULT_COMMAND_DB_PATH: &str = "rust-mutil-agent-commands.sqlite3";
+const DEFAULT_APPROVAL_DB_PATH: &str = "rust-mutil-agent-approvals.sqlite3";
 
 /// 全局应用状态
 pub struct AppState {
     pub bus: Arc<MessageBus>,
     pub orchestrator: Arc<Mutex<Orchestrator>>,
+    pub chat_store: Arc<ChatStore>,
+    pub command_store: Arc<CommandRunStore>,
+    pub approval_store: Arc<ApprovalStore>,
 }
 
 /// Tauri 应用主入口
@@ -44,7 +58,54 @@ async fn main() {
     }
 
     let bus = Arc::new(MessageBus::new());
-    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(bus.clone())));
+    let chat_db_path =
+        std::env::var("CHAT_DB_PATH").unwrap_or_else(|_| DEFAULT_CHAT_DB_PATH.to_string());
+    let chat_store = match ChatStore::open(&chat_db_path) {
+        Ok(store) => {
+            tracing::info!("聊天历史数据库已启用: {}", chat_db_path);
+            Arc::new(store)
+        }
+        Err(err) => {
+            tracing::warn!("聊天历史数据库初始化失败，将使用内存聊天历史: {}", err);
+            Arc::new(ChatStore::open(":memory:").expect("内存聊天历史初始化失败"))
+        }
+    };
+    let task_db_path =
+        std::env::var("TASK_DB_PATH").unwrap_or_else(|_| DEFAULT_TASK_DB_PATH.to_string());
+    let orchestrator = match Orchestrator::with_task_store(bus.clone(), &task_db_path) {
+        Ok(orch) => {
+            tracing::info!("任务持久化数据库已启用: {}", task_db_path);
+            Arc::new(Mutex::new(orch))
+        }
+        Err(err) => {
+            tracing::warn!("任务持久化数据库初始化失败，将使用内存任务运行时: {}", err);
+            Arc::new(Mutex::new(Orchestrator::new(bus.clone())))
+        }
+    };
+    let command_db_path =
+        std::env::var("COMMAND_DB_PATH").unwrap_or_else(|_| DEFAULT_COMMAND_DB_PATH.to_string());
+    let command_store = match CommandRunStore::open(&command_db_path) {
+        Ok(store) => {
+            tracing::info!("命令运行审计数据库已启用: {}", command_db_path);
+            Arc::new(store)
+        }
+        Err(err) => {
+            tracing::warn!("命令运行审计数据库初始化失败，将使用内存审计记录: {}", err);
+            Arc::new(CommandRunStore::open(":memory:").expect("内存命令审计初始化失败"))
+        }
+    };
+    let approval_db_path =
+        std::env::var("APPROVAL_DB_PATH").unwrap_or_else(|_| DEFAULT_APPROVAL_DB_PATH.to_string());
+    let approval_store = match ApprovalStore::open(&approval_db_path) {
+        Ok(store) => {
+            tracing::info!("审批请求数据库已启用: {}", approval_db_path);
+            Arc::new(store)
+        }
+        Err(err) => {
+            tracing::warn!("审批请求数据库初始化失败，将使用内存审批记录: {}", err);
+            Arc::new(ApprovalStore::open(":memory:").expect("内存审批记录初始化失败"))
+        }
+    };
 
     {
         let mut orch = orchestrator.lock().await;
@@ -53,7 +114,13 @@ async fn main() {
     tracing::info!("Agent 运行时初始化完成");
 
     tauri::Builder::default()
-        .manage(AppState { bus, orchestrator })
+        .manage(AppState {
+            bus,
+            orchestrator,
+            chat_store,
+            command_store,
+            approval_store,
+        })
         .invoke_handler(tauri::generate_handler![
             commands::send_message,
             commands::create_task,
@@ -63,10 +130,16 @@ async fn main() {
             commands::get_task,
             commands::list_tasks,
             commands::get_task_events,
+            commands::cancel_task,
+            commands::retry_task,
             commands::get_project_snapshot,
             commands::list_project_files,
             commands::read_project_file,
             commands::search_project_text,
+            commands::run_project_command,
+            commands::list_project_command_runs,
+            commands::list_approval_requests,
+            commands::approve_action,
             commands::health_check,
             commands::get_history,
             commands::clear_history,

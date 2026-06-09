@@ -10,6 +10,7 @@ import AgentPanel from "@/components/AgentPanel";
 import SettingsPanel from "@/components/SettingsPanel";
 import TaskBoard from "@/components/TaskBoard";
 import ProjectPanel from "@/components/ProjectPanel";
+import ApprovalPanel from "@/components/ApprovalPanel";
 import type { PageRoute } from "@/types";
 
 // ============ 侧边栏导航配置 ============
@@ -24,6 +25,7 @@ const NAV_ITEMS: NavItem[] = [
   { route: "chat", label: "对话", icon: "💬" },
   { route: "tasks", label: "任务", icon: "📋" },
   { route: "project", label: "项目", icon: "🗂️" },
+  { route: "approvals", label: "审批", icon: "✅" },
   { route: "agents", label: "Agent", icon: "🤖" },
   { route: "settings", label: "设置", icon: "⚙️" },
 ];
@@ -116,6 +118,8 @@ function PageContent() {
       return <TaskBoard />;
     case "project":
       return <ProjectPanel />;
+    case "approvals":
+      return <ApprovalPanel />;
     case "agents":
       return <AgentPanel />;
     case "settings":

@@ -14,6 +14,8 @@ pub enum TaskEventKind {
     StepFailed,
     Completed,
     Failed,
+    Cancelled,
+    Retried,
 }
 
 /// A timestamped task event.
