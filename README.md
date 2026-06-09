@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、任务产物记录和验证失败任务/步骤标记已经落地；通用工具审批暂停、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、请求级 Planner LLM 配置、受控验证命令、命令审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、任务产物记录和验证失败任务/步骤标记已经落地；通用工具审批暂停、验证失败自动返工和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -11,7 +11,7 @@
 | Tauri 桌面壳 | 已实现 | Rust 后端启动 Agent 运行时，注册 IPC 命令和 Tauri 插件。 |
 | React/Vite 前端 | 已实现 | 包含对话、任务看板、项目面板、审批面板、Agent 面板和设置页。 |
 | Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
-| 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、取消、重试和 SQLite 恢复。 |
+| 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
 | 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
 | 项目理解 | 已实现 | 扫描 Rust/Tauri/React/Vite 项目，生成技术栈、Manifest、关键文件和推荐命令。 |
 | Workspace 只读能力 | 已实现 | 支持项目内文件列表、文本读取和源码搜索，并限制路径逃逸和敏感文件读取。 |
@@ -24,7 +24,7 @@
 ## 功能概览
 
 - 多 Agent 协作：Planner 负责任务拆解，Executor 负责执行确认，Tool 负责工具调用，Memory 负责记忆，Echo 用于链路调试。
-- 可追踪任务：每次消息或任务创建都会生成任务 ID，可查看步骤状态、事件时间线、输出、取消和重试。
+- 可追踪任务：每次消息或任务创建都会生成任务 ID，可查看步骤状态、事件时间线、输出、步骤超时、取消和重试。
 - 持久化：任务、任务事件、聊天历史、命令运行记录、审批请求和补丁提案都使用 SQLite 本地保存。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令、最近运行记录和补丁提案草稿。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
@@ -309,7 +309,7 @@ cp .env.example .env
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
 4. `MemoryAgent` 默认只使用短期内存，SQLite 长期记忆尚未接入应用启动流程。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 仍需补齐同等级别权限控制。
-6. 步骤超时、ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
+6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
 7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
 
 ## 路线图
@@ -317,7 +317,7 @@ cp .env.example .env
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
 1. 把已具备的命令/patch 审批等待恢复、手动回滚、失败回滚默认策略和验证失败可重试状态继续推进到验证失败自动返工。
-2. 增强调度器控制面：步骤超时和通用工具审批暂停/恢复。
+2. 增强调度器控制面：通用工具审批暂停/恢复。
 3. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
 4. 统一前端设置、安全存储和后端 LLMClient 配置。
 

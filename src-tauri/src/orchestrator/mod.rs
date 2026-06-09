@@ -27,6 +27,7 @@ use tokio::sync::{mpsc::UnboundedSender, Mutex};
 const READONLY_TOOL_SEARCH_LIMIT: usize = 8;
 const READONLY_TOOL_READ_LIMIT: usize = 3;
 const READONLY_TOOL_PREVIEW_CHARS: usize = 2_000;
+const TASK_STEP_TIMEOUT_SECS: i64 = 15 * 60;
 
 /// Agent 运行时信息
 struct AgentRuntime {
@@ -215,6 +216,8 @@ impl TaskRuntime {
     }
 
     fn advance_task(&mut self, task_id: &str) -> Vec<StepDispatch> {
+        self.expire_running_steps();
+
         let mut dispatches = Vec::new();
         let mut emitted = Vec::new();
 
@@ -381,6 +384,8 @@ impl TaskRuntime {
     }
 
     fn retry_task(&mut self, task_id: &str, reason: &str) -> Option<RetryTaskResult> {
+        self.expire_running_steps();
+
         let needs_planner;
         {
             let task = self.tasks.get_mut(task_id)?;
@@ -399,6 +404,7 @@ impl TaskRuntime {
                     StepStatus::Pending
                         | StepStatus::WaitingApproval
                         | StepStatus::Running
+                        | StepStatus::TimedOut
                         | StepStatus::Failed
                         | StepStatus::Skipped
                 ) {
@@ -434,6 +440,8 @@ impl TaskRuntime {
     }
 
     fn skip_step(&mut self, task_id: &str, step_id: &str, reason: &str) -> Option<SkipStepResult> {
+        self.expire_running_steps();
+
         {
             let mut emitted = Vec::new();
             let task = self.tasks.get_mut(task_id)?;
@@ -825,7 +833,10 @@ impl TaskRuntime {
             let message = format!("项目命令执行失败：{}", run.command);
             if let Some(step_id) = step_id {
                 if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
-                    if step.status != StepStatus::Failed {
+                    if !matches!(
+                        step.status,
+                        StepStatus::Failed | StepStatus::TimedOut | StepStatus::Skipped
+                    ) {
                         step.fail(message.clone());
                         emitted.push(TaskEvent::new(
                             task_id.to_string(),
@@ -958,7 +969,10 @@ impl TaskRuntime {
             let message = patch_verification_failure_message(proposal, auto_rollback);
             if let Some(step_id) = proposal.step_id.as_deref() {
                 if let Some(step) = task.steps.iter_mut().find(|step| step.id == step_id) {
-                    if step.status != StepStatus::Failed {
+                    if !matches!(
+                        step.status,
+                        StepStatus::Failed | StepStatus::TimedOut | StepStatus::Skipped
+                    ) {
                         step.fail(message.clone());
                         emitted.push(TaskEvent::new(
                             task_id.to_string(),
@@ -1141,6 +1155,100 @@ impl TaskRuntime {
 
         self.extend_events(emitted);
         self.persist_task_by_id(task_id);
+    }
+
+    fn expire_running_steps(&mut self) {
+        let now = chrono::Utc::now();
+        let timeout = chrono::Duration::seconds(TASK_STEP_TIMEOUT_SECS);
+        let mut emitted = Vec::new();
+        let mut task_ids_to_persist = Vec::new();
+
+        for task in self.tasks.values_mut() {
+            if matches!(
+                task.status,
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+            ) {
+                continue;
+            }
+
+            let mut timed_out_steps = Vec::new();
+            for step in &mut task.steps {
+                if step.status != StepStatus::Running {
+                    continue;
+                }
+
+                let Some(started_at) = step.started_at else {
+                    continue;
+                };
+
+                let elapsed = now.signed_duration_since(started_at);
+                if elapsed < timeout {
+                    continue;
+                }
+
+                let elapsed_secs = elapsed.num_seconds().max(0);
+                let message = format!(
+                    "步骤执行超时：{} 运行超过 {} 秒。",
+                    step.title, TASK_STEP_TIMEOUT_SECS
+                );
+                step.timeout(message.clone());
+                timed_out_steps.push((
+                    step.id.clone(),
+                    step.agent_id.clone(),
+                    started_at,
+                    elapsed_secs,
+                    message,
+                ));
+            }
+
+            if timed_out_steps.is_empty() {
+                continue;
+            }
+
+            let failed_message = if timed_out_steps.len() == 1 {
+                timed_out_steps[0].4.clone()
+            } else {
+                format!("{} 个步骤执行超时，任务已停止。", timed_out_steps.len())
+            };
+
+            for (step_id, agent_id, started_at, elapsed_secs, message) in &timed_out_steps {
+                emitted.push(TaskEvent::new(
+                    task.id.clone(),
+                    Some(step_id.clone()),
+                    TaskEventKind::StepTimedOut,
+                    message.clone(),
+                    serde_json::json!({
+                        "stepId": step_id,
+                        "agentId": agent_id,
+                        "timeoutSecs": TASK_STEP_TIMEOUT_SECS,
+                        "elapsedSecs": elapsed_secs,
+                        "startedAt": started_at,
+                    }),
+                ));
+            }
+
+            task.fail(failed_message.clone());
+            emitted.push(TaskEvent::new(
+                task.id.clone(),
+                None,
+                TaskEventKind::Failed,
+                failed_message,
+                serde_json::json!({
+                    "reason": "stepTimeout",
+                    "timeoutSecs": TASK_STEP_TIMEOUT_SECS,
+                    "timedOutSteps": timed_out_steps
+                        .iter()
+                        .map(|(step_id, _, _, _, _)| step_id)
+                        .collect::<Vec<_>>(),
+                }),
+            ));
+            task_ids_to_persist.push(task.id.clone());
+        }
+
+        self.extend_events(emitted);
+        for task_id in task_ids_to_persist {
+            self.persist_task_by_id(&task_id);
+        }
     }
 
     fn get_task(&self, task_id: &str) -> Option<Task> {
@@ -1461,25 +1569,29 @@ impl Orchestrator {
 
     /// 查询任务执行结果（旧接口兼容）。
     pub async fn get_task_result(&self, task_id: &str) -> Option<TaskResult> {
-        let runtime = self.runtime.lock().await;
+        let mut runtime = self.runtime.lock().await;
+        runtime.expire_running_steps();
         runtime.get_task(task_id).as_ref().map(TaskResult::from)
     }
 
     /// 查询单个任务。
     pub async fn get_task(&self, task_id: &str) -> Option<Task> {
-        let runtime = self.runtime.lock().await;
+        let mut runtime = self.runtime.lock().await;
+        runtime.expire_running_steps();
         runtime.get_task(task_id)
     }
 
     /// 列出任务。
     pub async fn list_tasks(&self) -> Vec<Task> {
-        let runtime = self.runtime.lock().await;
+        let mut runtime = self.runtime.lock().await;
+        runtime.expire_running_steps();
         runtime.list_tasks()
     }
 
     /// 获取任务事件。
     pub async fn get_task_events(&self, task_id: &str) -> Vec<TaskEvent> {
-        let runtime = self.runtime.lock().await;
+        let mut runtime = self.runtime.lock().await;
+        runtime.expire_running_steps();
         runtime.get_events(task_id)
     }
 
@@ -2676,6 +2788,116 @@ mod tests {
             .unwrap();
         assert_eq!(completed.payload["completedSteps"], serde_json::json!(1));
         assert_eq!(completed.payload["skippedSteps"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn test_expire_running_steps_marks_step_timed_out() {
+        let task_id = "task-step-timeout";
+        let mut task = Task::new(task_id, "步骤超时");
+        let mut step = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Executor",
+            "长时间执行",
+            vec![],
+        );
+        step.start();
+        step.started_at =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(TASK_STEP_TIMEOUT_SECS + 1));
+        task.steps = vec![step];
+        task.status = TaskStatus::Running;
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+
+        runtime.expire_running_steps();
+
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::TimedOut);
+        assert!(task.steps[0].error.as_deref().unwrap().contains("超时"));
+        assert!(task.steps[0].completed_at.is_some());
+        assert!(runtime
+            .get_events(task_id)
+            .iter()
+            .any(|event| event.kind == TaskEventKind::StepTimedOut));
+        let failed = runtime
+            .get_events(task_id)
+            .into_iter()
+            .find(|event| event.kind == TaskEventKind::Failed)
+            .unwrap();
+        assert_eq!(failed.payload["reason"], serde_json::json!("stepTimeout"));
+    }
+
+    #[test]
+    fn test_late_reply_after_timeout_is_ignored() {
+        let task_id = "task-timeout-late-reply";
+        let mut task = Task::new(task_id, "超时后迟到回复");
+        let mut step = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Executor",
+            "长时间执行",
+            vec![],
+        );
+        step.start();
+        step.started_at =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(TASK_STEP_TIMEOUT_SECS + 1));
+        let context = serde_json::json!({
+            "stepId": step.id.clone(),
+            "stepAttempt": step.attempts,
+        });
+        task.steps = vec![step];
+        task.status = TaskStatus::Running;
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+        runtime.expire_running_steps();
+
+        let dispatches = runtime.complete_running_step(task_id, "Executor", "迟到结果", context);
+        let task = runtime.get_task(task_id).unwrap();
+
+        assert!(dispatches.is_empty());
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.steps[0].status, StepStatus::TimedOut);
+    }
+
+    #[test]
+    fn test_skip_timed_out_step_dispatches_dependent_step() {
+        let task_id = "task-timeout-skip";
+        let mut task = Task::new(task_id, "跳过超时步骤");
+        let mut first = TaskStep::new(
+            format!("{task_id}-1"),
+            task_id,
+            1,
+            "Executor",
+            "超时步骤",
+            vec![],
+        );
+        first.timeout("步骤执行超时。");
+        let second = TaskStep::new(
+            format!("{task_id}-2"),
+            task_id,
+            2,
+            "Memory",
+            "继续整理",
+            vec![format!("{task_id}-1")],
+        );
+        task.steps = vec![first, second];
+        task.fail("步骤执行超时。");
+        let mut runtime = TaskRuntime::default();
+        runtime.insert_task(task);
+
+        let result = runtime
+            .skip_step(task_id, &format!("{task_id}-1"), "手动跳过超时步骤")
+            .unwrap();
+
+        assert_eq!(result.dispatches.len(), 1);
+        assert_eq!(result.dispatches[0].step_id, format!("{task_id}-2"));
+        let task = runtime.get_task(task_id).unwrap();
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.steps[0].status, StepStatus::Skipped);
+        assert_eq!(task.steps[1].status, StepStatus::Running);
     }
 
     #[test]

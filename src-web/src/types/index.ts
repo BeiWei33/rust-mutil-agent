@@ -137,6 +137,7 @@ export type StepStatus =
   | "pending"
   | "waitingApproval"
   | "running"
+  | "timedOut"
   | "failed"
   | "completed"
   | "skipped";
@@ -179,6 +180,7 @@ export type TaskEventKind =
   | "stepStarted"
   | "stepCompleted"
   | "stepSkipped"
+  | "stepTimedOut"
   | "stepFailed"
   | "completed"
   | "failed"

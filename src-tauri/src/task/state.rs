@@ -24,6 +24,7 @@ pub enum StepStatus {
     Pending,
     WaitingApproval,
     Running,
+    TimedOut,
     Failed,
     Completed,
     Skipped,
@@ -91,6 +92,12 @@ impl TaskStep {
 
     pub fn fail(&mut self, error: impl Into<String>) {
         self.status = StepStatus::Failed;
+        self.error = Some(error.into());
+        self.completed_at = Some(Utc::now());
+    }
+
+    pub fn timeout(&mut self, error: impl Into<String>) {
+        self.status = StepStatus::TimedOut;
         self.error = Some(error.into());
         self.completed_at = Some(Utc::now());
     }

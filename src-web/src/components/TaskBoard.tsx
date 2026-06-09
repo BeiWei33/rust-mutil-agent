@@ -34,6 +34,11 @@ const STEP_STATUS: Record<StepStatus, { label: string; dot: string; className: s
     dot: "bg-primary-400 animate-pulse",
     className: "bg-primary-500/10 text-primary-300 border-primary-500/20",
   },
+  timedOut: {
+    label: "超时",
+    dot: "bg-orange-400",
+    className: "bg-orange-500/10 text-orange-300 border-orange-500/20",
+  },
   failed: {
     label: "失败",
     dot: "bg-red-400",
@@ -83,7 +88,7 @@ function canRetryTask(task: Task): boolean {
 }
 
 function canSkipStep(step: Task["steps"][number]): boolean {
-  return ["pending", "waitingApproval", "running", "failed"].includes(step.status);
+  return ["pending", "waitingApproval", "running", "timedOut", "failed"].includes(step.status);
 }
 
 function TaskListItem({
