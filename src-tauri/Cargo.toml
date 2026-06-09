@@ -66,7 +66,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # --- HTTP 客户端 ---
 # 用于调用 LLM API（OpenAI、Claude 等）
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 
 # --- UUID 生成 ---
 # 为 Agent、任务等实体生成唯一标识符

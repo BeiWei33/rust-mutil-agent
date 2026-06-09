@@ -55,6 +55,7 @@ impl Agent for ReviewAgent {
             "summary": summary,
             "findingCount": findings.len(),
             "findings": findings.iter().map(ReviewFinding::to_json).collect::<Vec<_>>(),
+            "diffReviewed": review_has_real_diff(&msg.context),
             "reviewedAt": chrono::Utc::now(),
             "taskId": msg.task_id,
             "stepId": msg.context.get("stepId").cloned().unwrap_or(serde_json::Value::Null),
@@ -158,8 +159,39 @@ fn review_findings(msg: &AgentMessage) -> Vec<ReviewFinding> {
             "需要实际修改时继续使用 patch proposal、审批和验证闭环。",
         ));
     }
+    if msg
+        .context
+        .get("requiresRealDiffReview")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && !review_has_real_diff(&msg.context)
+    {
+        findings.push(ReviewFinding::new(
+            "high",
+            "缺少真实 diff",
+            "审查上下文要求基于真实 unified diff，但没有发现补丁 diff。",
+            "先创建 patch proposal，确保 Review 依赖包含 unifiedDiff 的补丁审批或应用 artifact。",
+        ));
+    }
 
     findings
+}
+
+fn review_has_real_diff(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("unifiedDiff")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|diff| diff.contains("diff --git"))
+            {
+                return true;
+            }
+            map.values().any(review_has_real_diff)
+        }
+        serde_json::Value::Array(items) => items.iter().any(review_has_real_diff),
+        _ => false,
+    }
 }
 
 fn value_contains_false_success(value: &serde_json::Value) -> bool {
@@ -245,6 +277,45 @@ mod tests {
             replies[0].context["findings"][0]["severity"],
             serde_json::json!("high")
         );
+    }
+
+    #[tokio::test]
+    async fn review_agent_marks_real_diff_reviewed() {
+        let mut agent = ReviewAgent::new();
+        let msg =
+            AgentMessage::new("Planner", "Review", "审查补丁").with_context(serde_json::json!({
+                "dependencyResults": [
+                    {
+                        "agentId": "Coder",
+                        "result": {
+                            "unifiedDiff": "diff --git a/README.md b/README.md\n"
+                        }
+                    }
+                ],
+                "requiresRealDiffReview": true
+            }));
+
+        let replies = agent.handle_message(msg).await.unwrap();
+
+        assert_eq!(replies[0].context["passed"], serde_json::json!(true));
+        assert_eq!(replies[0].context["diffReviewed"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn review_agent_fails_when_required_diff_missing() {
+        let mut agent = ReviewAgent::new();
+        let msg =
+            AgentMessage::new("Planner", "Review", "审查补丁").with_context(serde_json::json!({
+                "dependencyResults": [
+                    { "agentId": "Coder", "result": { "summary": "draft only" } }
+                ],
+                "requiresRealDiffReview": true
+            }));
+
+        let replies = agent.handle_message(msg).await.unwrap();
+
+        assert_eq!(replies[0].context["passed"], serde_json::json!(false));
+        assert_eq!(replies[0].context["diffReviewed"], serde_json::json!(false));
     }
 
     #[test]

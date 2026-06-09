@@ -33,6 +33,8 @@ use crate::llm::{ChatCompletionRequest, ChatMessage, LLMClient, ResponseFormat, 
 const PLANNER_ALLOWED_AGENTS: &[&str] = &[
     "Planner",
     "Tool",
+    "Coder",
+    "Tester",
     "Executor",
     "Review",
     "Evolution",
@@ -374,9 +376,9 @@ impl TaskPlan {
             PlanStep {
                 step_id: format!("{task_id}-3"),
                 order: 3,
-                agent: "Executor".to_string(),
+                agent: "Coder".to_string(),
                 instruction: format!(
-                    "结合项目结构和相关经验形成实现方案和模拟执行结果，不直接修改文件: {goal}。相关经验: {knowledge_summary}。建议验证命令: {recommended_commands}。"
+                    "结合项目结构和相关经验生成受控补丁草案，不直接修改文件: {goal}。相关经验: {knowledge_summary}。建议验证命令: {recommended_commands}。"
                 ),
                 depends_on: vec![format!("{task_id}-2")],
                 status: StepStatus::Pending,
@@ -384,9 +386,9 @@ impl TaskPlan {
             PlanStep {
                 step_id: format!("{task_id}-4"),
                 order: 4,
-                agent: "Review".to_string(),
+                agent: "Tester".to_string(),
                 instruction: format!(
-                    "审查 Executor 的方案、风险、缺失验证和后续 patch 闭环要求: {goal}。相关经验: {knowledge_summary}。"
+                    "基于 Coder 草案整理验证计划和失败判定，不直接运行命令: {goal}。建议验证命令: {recommended_commands}。"
                 ),
                 depends_on: vec![format!("{task_id}-3")],
                 status: StepStatus::Pending,
@@ -394,21 +396,31 @@ impl TaskPlan {
             PlanStep {
                 step_id: format!("{task_id}-5"),
                 order: 5,
-                agent: "Evolution".to_string(),
+                agent: "Review".to_string(),
                 instruction: format!(
-                    "基于 Tool、Executor 和 Review 的结果生成本轮任务经验摘要与可接受的改进建议: {goal}。"
+                    "审查 Coder 草案、Tester 验证计划、风险、真实 diff 要求和后续 patch 闭环要求: {goal}。相关经验: {knowledge_summary}。"
                 ),
-                depends_on: vec![format!("{task_id}-4")],
+                depends_on: vec![format!("{task_id}-3"), format!("{task_id}-4")],
                 status: StepStatus::Pending,
             },
             PlanStep {
                 step_id: format!("{task_id}-6"),
                 order: 6,
+                agent: "Evolution".to_string(),
+                instruction: format!(
+                    "基于 Tool、Coder、Tester 和 Review 的结果生成本轮任务经验摘要与可接受的改进建议: {goal}。"
+                ),
+                depends_on: vec![format!("{task_id}-5")],
+                status: StepStatus::Pending,
+            },
+            PlanStep {
+                step_id: format!("{task_id}-7"),
+                order: 7,
                 agent: "Memory".to_string(),
                 instruction: format!(
                     "记录本轮项目事实、ReviewReport、EvolutionNote、相关文件、后续实现建议和可复用经验: {goal}。"
                 ),
-                depends_on: vec![format!("{task_id}-5")],
+                depends_on: vec![format!("{task_id}-6")],
                 status: StepStatus::Pending,
             },
         ];
@@ -554,7 +566,9 @@ fn normalize_agent_id(agent: &str) -> Option<String> {
     match agent.trim().to_ascii_lowercase().as_str() {
         "planner" | "coordinator" => Some("Planner".to_string()),
         "tool" | "toolagent" => Some("Tool".to_string()),
-        "executor" | "coder" | "coderagent" => Some("Executor".to_string()),
+        "coder" | "coderagent" | "developer" | "implementer" => Some("Coder".to_string()),
+        "tester" | "testeragent" | "test" | "qa" => Some("Tester".to_string()),
+        "executor" | "executoragent" => Some("Executor".to_string()),
         "review" | "reviewer" | "reviewagent" | "revieweragent" => Some("Review".to_string()),
         "evolution" | "evolutionagent" | "evolver" => Some("Evolution".to_string()),
         "memory" | "memoryagent" => Some("Memory".to_string()),
@@ -1147,18 +1161,20 @@ mod tests {
             .with_context(context);
         let replies = planner.handle_message(msg).await.unwrap();
 
-        assert_eq!(replies.len(), 7);
+        assert_eq!(replies.len(), 8);
         let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
-        assert_eq!(plan.steps.len(), 6);
+        assert_eq!(plan.steps.len(), 7);
         assert!(plan.steps[0].instruction.contains("Rust"));
         assert!(plan.steps[0].instruction.contains("FailureCase"));
         assert!(plan.steps[1].instruction.contains("TaskBoard.tsx"));
         assert!(plan.steps[2].instruction.contains("cargo test"));
         assert!(plan.steps[2].instruction.contains("npm test 失败"));
-        assert_eq!(plan.steps[3].agent, "Review");
-        assert_eq!(plan.steps[4].agent, "Evolution");
-        assert_eq!(plan.steps[5].agent, "Memory");
-        assert_eq!(plan.steps[5].depends_on, vec!["task-project-5"]);
+        assert_eq!(plan.steps[2].agent, "Coder");
+        assert_eq!(plan.steps[3].agent, "Tester");
+        assert_eq!(plan.steps[4].agent, "Review");
+        assert_eq!(plan.steps[5].agent, "Evolution");
+        assert_eq!(plan.steps[6].agent, "Memory");
+        assert_eq!(plan.steps[6].depends_on, vec!["task-project-6"]);
     }
 
     /// 测试 — 普通搜索任务不会因项目上下文被误判为软件任务
@@ -1249,7 +1265,7 @@ mod tests {
         assert_eq!(plan.steps[0].step_id, "task-llm-1");
         assert_eq!(plan.steps[0].agent, "Planner");
         assert_eq!(plan.steps[1].depends_on, vec!["task-llm-1".to_string()]);
-        assert_eq!(plan.steps[2].agent, "Executor");
+        assert_eq!(plan.steps[2].agent, "Coder");
         assert_eq!(plan.steps[2].depends_on, vec!["task-llm-2".to_string()]);
         assert_eq!(plan.steps[3].agent, "Review");
         assert_eq!(plan.steps[4].agent, "Evolution");

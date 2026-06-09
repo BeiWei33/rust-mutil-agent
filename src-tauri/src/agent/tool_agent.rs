@@ -7,7 +7,7 @@
 //! - `calculator`：简单数学计算
 //! - `datetime`：获取当前时间
 //! - `web_search`：网络搜索（占位，需接入真实 API）
-//! - `file_read` / `file_write`：文件操作
+//! - `file_read` / `file_write`：文件操作（写入必须转为补丁审批）
 //!
 //! # 扩展机制
 //! 通过 `ToolRegistry` 注册自定义工具函数，
@@ -203,7 +203,9 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     registry.register(
         ToolDescription {
             name: "web_search".to_string(),
-            description: "搜索互联网信息（需接入搜索引擎 API）".to_string(),
+            description:
+                "搜索互联网信息；配置 SERPAPI_KEY 或 GOOGLE_API_KEY/GOOGLE_CSE_ID 后使用真实 API"
+                    .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -217,16 +219,178 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
             let query = args["query"].as_str().ok_or("缺少 query 参数")?;
             let max = args["max_results"].as_u64().unwrap_or(5);
 
-            // 占位：返回模拟搜索结果
-            Ok(serde_json::json!({
-                "query": query,
-                "results": [format!("[模拟] 关于 '{query}' 的搜索结果（共 {max} 条）")],
-                "note": "请接入真实搜索引擎 API 以启用此功能"
-            }))
+            web_search(query, max)
+        },
+    );
+
+    // --- 5. 文件写入拦截 ---
+    registry.register(
+        ToolDescription {
+            name: "file_write".to_string(),
+            description: "高风险写文件动作拦截；必须改用 patch proposal 审批流程".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "workspace 内相对文件路径" },
+                    "content": { "type": "string", "description": "拟写入内容" }
+                },
+                "required": ["path", "content"]
+            }),
+        },
+        |args| {
+            let path = args["path"].as_str().unwrap_or("未指定路径");
+            Err(format!(
+                "file_write 不允许直接写入 {path}；请使用 create_patch_proposal 生成 diff，并走审批/验证闭环。"
+            ))
         },
     );
 
     tracing::info!("已注册 {} 个内置工具", registry.list_tools().len());
+}
+
+fn web_search(query: &str, max_results: u64) -> Result<serde_json::Value, String> {
+    let max_results = max_results.clamp(1, 10);
+    if let Some(api_key) = env_value("SERPAPI_KEY") {
+        return serpapi_search(query, max_results, &api_key);
+    }
+    if let (Some(api_key), Some(cx)) = (env_value("GOOGLE_API_KEY"), env_value("GOOGLE_CSE_ID")) {
+        return google_cse_search(query, max_results, &api_key, &cx);
+    }
+
+    Ok(serde_json::json!({
+        "query": query,
+        "provider": "mock",
+        "results": [format!("[模拟] 关于 '{query}' 的搜索结果（共 {max_results} 条）")],
+        "note": "配置 SERPAPI_KEY 或 GOOGLE_API_KEY + GOOGLE_CSE_ID 后会使用真实搜索 API"
+    }))
+}
+
+fn serpapi_search(
+    query: &str,
+    max_results: u64,
+    api_key: &str,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("创建搜索 HTTP 客户端失败: {err}"))?;
+    let num = max_results.to_string();
+    let response = client
+        .get("https://serpapi.com/search.json")
+        .query(&[
+            ("engine", "google"),
+            ("q", query),
+            ("num", num.as_str()),
+            ("api_key", api_key),
+        ])
+        .send()
+        .map_err(|err| format!("SerpAPI 请求失败: {err}"))?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|err| format!("解析 SerpAPI 响应失败: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "SerpAPI 返回状态码 {status}: {}",
+            compact_json(&body)
+        ));
+    }
+    let results = body
+        .get("organic_results")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(max_results as usize)
+                .map(|item| {
+                    serde_json::json!({
+                        "title": item.get("title").and_then(serde_json::Value::as_str),
+                        "url": item.get("link").and_then(serde_json::Value::as_str),
+                        "snippet": item.get("snippet").and_then(serde_json::Value::as_str),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "query": query,
+        "provider": "serpapi",
+        "results": results,
+    }))
+}
+
+fn google_cse_search(
+    query: &str,
+    max_results: u64,
+    api_key: &str,
+    cx: &str,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("创建搜索 HTTP 客户端失败: {err}"))?;
+    let num = max_results.to_string();
+    let response = client
+        .get("https://www.googleapis.com/customsearch/v1")
+        .query(&[
+            ("key", api_key),
+            ("cx", cx),
+            ("q", query),
+            ("num", num.as_str()),
+        ])
+        .send()
+        .map_err(|err| format!("Google CSE 请求失败: {err}"))?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|err| format!("解析 Google CSE 响应失败: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Google CSE 返回状态码 {status}: {}",
+            compact_json(&body)
+        ));
+    }
+    let results = body
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(max_results as usize)
+                .map(|item| {
+                    serde_json::json!({
+                        "title": item.get("title").and_then(serde_json::Value::as_str),
+                        "url": item.get("link").and_then(serde_json::Value::as_str),
+                        "snippet": item.get("snippet").and_then(serde_json::Value::as_str),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "query": query,
+        "provider": "google_cse",
+        "results": results,
+    }))
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    let text = value.to_string();
+    let mut chars = text.chars();
+    let mut preview = chars.by_ref().take(500).collect::<String>();
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    preview
 }
 
 /// 计算数学表达式（简化版，仅支持四则运算）
@@ -500,6 +664,8 @@ impl Agent for ToolAgent {
                 "datetime"
             } else if content.contains("搜索") || content.contains("search") {
                 "web_search"
+            } else if looks_like_file_write_request(content) {
+                "file_write"
             } else if content.contains("文件") || content.contains("file") {
                 "file_read"
             } else {
@@ -587,6 +753,7 @@ fn default_tool_args(tool_name: &str, content: &str) -> serde_json::Value {
         "file_read" => {
             infer_file_read_args_from_content(content).unwrap_or_else(|| serde_json::json!({}))
         }
+        "file_write" => infer_file_write_args_from_content(content),
         _ => serde_json::json!({
             "expression": content,
             "query": content,
@@ -596,6 +763,27 @@ fn default_tool_args(tool_name: &str, content: &str) -> serde_json::Value {
 
 pub(crate) fn infer_file_read_args_from_content(content: &str) -> Option<serde_json::Value> {
     infer_file_path_from_content(content).map(|path| serde_json::json!({ "path": path }))
+}
+
+pub(crate) fn infer_file_write_args_from_content(content: &str) -> serde_json::Value {
+    let path = infer_file_path_from_content(content).unwrap_or_default();
+    serde_json::json!({
+        "path": path,
+        "content": content,
+    })
+}
+
+pub(crate) fn looks_like_file_write_request(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("write")
+        || lower.contains("modify")
+        || lower.contains("update")
+        || lower.contains("create file")
+        || content.contains("写文件")
+        || content.contains("写入")
+        || content.contains("修改文件")
+        || content.contains("更新文件")
+        || content.contains("创建文件")
 }
 
 fn infer_file_path_from_content(content: &str) -> Option<String> {
@@ -828,13 +1016,14 @@ mod tests {
         register_builtin_tools(&mut registry);
 
         let tools = registry.list_tools();
-        assert_eq!(tools.len(), 4); // calculator, datetime, file_read, web_search
+        assert_eq!(tools.len(), 5); // calculator, datetime, file_read, web_search, file_write
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"calculator"));
         assert!(names.contains(&"datetime"));
         assert!(names.contains(&"file_read"));
         assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"file_write"));
     }
 
     /// 测试 — 计算器边界值测试
@@ -879,6 +1068,18 @@ mod tests {
 
         assert_eq!(replies[0].msg_type, "tool_result");
         assert!(replies[0].content.contains("datetime"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_agent_file_write_is_blocked() {
+        let mut agent = ToolAgent::default();
+
+        let msg = AgentMessage::new("User", "Tool", "写文件 README.md")
+            .with_context(serde_json::json!({ "args": { "path": "README.md", "content": "x" } }));
+        let replies = agent.handle_message(msg).await.unwrap();
+
+        assert_eq!(replies[0].msg_type, "tool_error");
+        assert!(replies[0].content.contains("create_patch_proposal"));
     }
 
     /// 测试 — 通过 context 显式指定工具名称

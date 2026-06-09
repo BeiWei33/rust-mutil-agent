@@ -190,6 +190,24 @@ impl Capability {
         }
     }
 
+    /// 代码修改规划能力
+    pub fn coding() -> Self {
+        Self {
+            name: "coding".to_string(),
+            description: "分析代码变更需求并生成受控补丁草案".to_string(),
+            level: CapabilityLevel::Advanced,
+        }
+    }
+
+    /// 验证规划与结果分析能力
+    pub fn testing() -> Self {
+        Self {
+            name: "testing".to_string(),
+            description: "整理验证命令、分析测试结果和失败信号".to_string(),
+            level: CapabilityLevel::Advanced,
+        }
+    }
+
     /// 信息检索能力
     pub fn retrieval() -> Self {
         Self {

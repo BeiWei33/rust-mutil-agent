@@ -19,6 +19,8 @@ import type {
   RetryTaskResponse,
   SkipTaskStepRequest,
   SkipTaskStepResponse,
+  EvolutionDecisionRequest,
+  EvolutionDecisionResponse,
   Task,
   TaskEvent,
   TaskListResponse,
@@ -121,6 +123,19 @@ export async function skipTaskStep(
   request: SkipTaskStepRequest
 ): Promise<SkipTaskStepResponse> {
   return invoke<SkipTaskStepResponse>(`${CMD_PREFIX}skip_task_step`, {
+    request,
+  });
+}
+
+/**
+ * 接受或拒绝 Evolution 建议
+ * @param request 决策请求
+ * @returns 更新后的任务
+ */
+export async function decideEvolutionNote(
+  request: EvolutionDecisionRequest
+): Promise<EvolutionDecisionResponse> {
+  return invoke<EvolutionDecisionResponse>(`${CMD_PREFIX}decide_evolution_note`, {
     request,
   });
 }
@@ -483,6 +498,44 @@ const MOCK_AGENTS: AgentStatus[] = [
     capabilities: [
       { name: "任务拆解", description: "将复杂任务拆分为可执行步骤", available: true },
       { name: "成员调度", description: "根据任务类型安排合适的 AI 成员", available: true },
+    ],
+    lastActive: new Date().toISOString(),
+  },
+  {
+    id: "coder",
+    runtimeName: "Coder",
+    name: "编码工程师",
+    role: "coder",
+    roleLabel: "补丁草案",
+    description: "负责读取上下文并生成受控补丁草案，不直接写文件。",
+    online: true,
+    status: "idle",
+    statusLabel: "空闲",
+    currentTask: null,
+    selectable: true,
+    recommended: false,
+    isInternal: false,
+    capabilities: [
+      { name: "补丁草案", description: "生成可转为 patch proposal 的结构化草案", available: true },
+    ],
+    lastActive: new Date().toISOString(),
+  },
+  {
+    id: "tester",
+    runtimeName: "Tester",
+    name: "测试工程师",
+    role: "tester",
+    roleLabel: "验证计划",
+    description: "负责整理验证命令、分析失败信号，不直接绕过受控命令执行。",
+    online: true,
+    status: "idle",
+    statusLabel: "空闲",
+    currentTask: null,
+    selectable: true,
+    recommended: false,
+    isInternal: false,
+    capabilities: [
+      { name: "验证计划", description: "整理测试命令和失败判定", available: true },
     ],
     lastActive: new Date().toISOString(),
   },
@@ -918,6 +971,42 @@ async function mockSkipTaskStep(
   }
 
   return { taskId: request.taskId, stepId: request.stepId, task: updated };
+}
+
+async function mockDecideEvolutionNote(
+  request: EvolutionDecisionRequest
+): Promise<EvolutionDecisionResponse> {
+  const task = MOCK_TASKS.find((item) => item.id === request.taskId);
+  if (!task) return { taskId: request.taskId, task: null };
+  const artifact = {
+    kind: "evolutionDecision",
+    taskId: request.taskId,
+    decision: request.accepted ? "accepted" : "rejected",
+    accepted: request.accepted,
+    note: request.note ?? null,
+    decidedBy: request.decidedBy ?? "browser-mock",
+    decidedAt: new Date().toISOString(),
+    appliesAutomatically: false,
+  };
+  const updated = {
+    ...task,
+    artifacts: [...task.artifacts, artifact],
+    updatedAt: artifact.decidedAt,
+  };
+  MOCK_TASKS = MOCK_TASKS.map((item) => (item.id === request.taskId ? updated : item));
+  MOCK_EVENTS[request.taskId] = [
+    ...(MOCK_EVENTS[request.taskId] ?? []),
+    {
+      id: generateId(),
+      taskId: request.taskId,
+      stepId: null,
+      kind: "artifactCreated",
+      message: `Evolution 建议已${request.accepted ? "接受" : "拒绝"}。`,
+      payload: artifact,
+      createdAt: artifact.decidedAt,
+    },
+  ];
+  return { taskId: request.taskId, task: updated };
 }
 
 /** 浏览器环境下降级的 listAgents */
@@ -2049,6 +2138,7 @@ export const api = {
   cancelTask: isTauri() ? cancelTask : mockCancelTask,
   retryTask: isTauri() ? retryTask : mockRetryTask,
   skipTaskStep: isTauri() ? skipTaskStep : mockSkipTaskStep,
+  decideEvolutionNote: isTauri() ? decideEvolutionNote : mockDecideEvolutionNote,
   getAgentStatus: isTauri()
     ? getAgentStatus
     : async (id: string) => {

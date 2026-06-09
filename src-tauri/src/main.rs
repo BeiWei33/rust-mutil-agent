@@ -160,6 +160,7 @@ async fn main() {
         let mut orch = orchestrator.lock().await;
         orch.set_approval_store(approval_store.clone());
         orch.set_tool_invocation_store(tool_invocation_store.clone());
+        orch.set_knowledge_base(knowledge_base.clone()).await;
         orch.set_memory_db_path(memory_db_path);
         orch.register_builtin_agents().await;
     }
@@ -194,6 +195,7 @@ async fn main() {
             commands::search_project_text,
             commands::store_knowledge,
             commands::search_knowledge,
+            commands::decide_evolution_note,
             commands::run_project_command,
             commands::request_project_command_approval,
             commands::request_tool_action_approval,

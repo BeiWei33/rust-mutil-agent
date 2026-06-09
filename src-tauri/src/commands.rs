@@ -362,6 +362,24 @@ pub struct SkipTaskStepResponse {
     pub task: Option<Task>,
 }
 
+/// Evolution 建议决策请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvolutionDecisionRequest {
+    pub task_id: String,
+    pub accepted: bool,
+    pub note: Option<String>,
+    pub decided_by: Option<String>,
+}
+
+/// Evolution 建议决策响应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvolutionDecisionResponse {
+    pub task_id: String,
+    pub task: Option<Task>,
+}
+
 /// 任务列表响应。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -454,6 +472,28 @@ const AGENT_CATALOG: &[AgentMeta] = &[
         role: "executor",
         role_label: "任务执行",
         description: "负责执行明确任务，例如代码处理、命令运行、文件操作和问题修复。",
+        selectable: true,
+        recommended: false,
+        is_internal: false,
+    },
+    AgentMeta {
+        id: "coder",
+        runtime_name: "Coder",
+        display_name: "编码工程师",
+        role: "coder",
+        role_label: "补丁草案",
+        description: "负责读取上下文并生成受控补丁草案，不直接写文件。",
+        selectable: true,
+        recommended: false,
+        is_internal: false,
+    },
+    AgentMeta {
+        id: "tester",
+        runtime_name: "Tester",
+        display_name: "测试工程师",
+        role: "tester",
+        role_label: "验证计划",
+        description: "负责整理验证命令、分析失败信号，不直接绕过受控命令执行。",
         selectable: true,
         recommended: false,
         is_internal: false,
@@ -580,6 +620,8 @@ fn capabilities_for_agent(name: &str) -> Vec<AgentCapability> {
             AgentCapability::code_execution(),
             AgentCapability::tool_use(),
         ],
+        "Coder" => vec![AgentCapability::coding()],
+        "Tester" => vec![AgentCapability::testing()],
         "Review" => vec![AgentCapability::review()],
         "Evolution" => vec![AgentCapability::evolution(), AgentCapability::memory()],
         "Memory" => vec![AgentCapability::memory(), AgentCapability::retrieval()],
@@ -593,6 +635,8 @@ fn capability_label(name: &str) -> String {
         "chat" => "自然语言对话".to_string(),
         "planning" => "任务拆解".to_string(),
         "code_execution" => "代码/命令执行".to_string(),
+        "coding" => "补丁草案".to_string(),
+        "testing" => "验证计划".to_string(),
         "retrieval" => "信息检索".to_string(),
         "tool_use" => "工具调用".to_string(),
         "memory" => "上下文记忆".to_string(),
@@ -1256,6 +1300,35 @@ pub async fn search_knowledge(
         .search_knowledge(&query, limit)
         .map_err(|err| ApiError::knowledge_failed(format!("{}", err)))?;
     Ok(SearchKnowledgeResponse { query, items })
+}
+
+/// 接受或拒绝任务级 Evolution 建议。
+///
+/// 前端调用：`invoke('decide_evolution_note', { request: { taskId, accepted, note?, decidedBy? } })`
+#[tauri::command]
+pub async fn decide_evolution_note(
+    request: EvolutionDecisionRequest,
+    state: State<'_, AppState>,
+) -> Result<EvolutionDecisionResponse, ApiError> {
+    let task_id = clean_required_text(&request.task_id, "任务 ID")?;
+    let note = clean_optional_string(request.note.as_ref());
+    let decided_by = clean_optional_string(request.decided_by.as_ref());
+    let orch = state.orchestrator.lock().await;
+    let task = orch
+        .record_evolution_decision(
+            &task_id,
+            request.accepted,
+            note.as_deref(),
+            decided_by.as_deref(),
+        )
+        .await;
+    if task.is_none() {
+        return Err(ApiError::invalid_argument(
+            "任务不存在，无法记录 Evolution 决策。",
+        ));
+    }
+
+    Ok(EvolutionDecisionResponse { task_id, task })
 }
 
 /// 运行受控项目命令。

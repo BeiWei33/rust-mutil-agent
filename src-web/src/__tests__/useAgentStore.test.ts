@@ -456,6 +456,7 @@ describe("useAgentStore", () => {
     const stored: AppSettings = JSON.parse(storedRaw!);
     expect(stored.model).toBe("gpt-4-turbo");
     expect(stored.temperature).toBe(0.9);
+    expect(stored.apiKey).toBeUndefined();
   });
 
   /// 测试 — updateSettings 合并部分更新
@@ -473,9 +474,9 @@ describe("useAgentStore", () => {
     expect(state.settings.apiBaseUrl).toBe("https://api.deepseek.com/v1");
   });
 
-  /// 测试 — 加载时从 localStorage 恢复设置
-  /// 验证：store 初始化时读取 localStorage 中的设置
-  it("store 初始化时应从 localStorage 读取设置", () => {
+  /// 测试 — 持久化设置不保存 API Key
+  /// 验证：API Key 仅保留在内存态，不写入 localStorage
+  it("updateSettings 不应将 API Key 保存到 localStorage", () => {
     const savedSettings: AppSettings = {
       model: "deepseek-v3",
       apiKey: "sk-saved",
@@ -485,13 +486,12 @@ describe("useAgentStore", () => {
     };
     localStorage.setItem("app-settings", JSON.stringify(savedSettings));
 
-    // 通过重新创建 store 来触发初始化（Zustand 单例模式限制，这里只测逻辑）
-    // 直接使用 updateSettings 验证 localStorage 读写链路
     const { updateSettings } = getState();
-    updateSettings({ model: "deepseek-v3" });
+    updateSettings({ apiKey: "sk-new-secret", model: "deepseek-v3" });
 
     const stored = JSON.parse(localStorage.getItem("app-settings")!);
     expect(stored.model).toBe("deepseek-v3");
+    expect(stored.apiKey).toBeUndefined();
   });
 
   /// 测试 — localStorage 不可用时静默失败

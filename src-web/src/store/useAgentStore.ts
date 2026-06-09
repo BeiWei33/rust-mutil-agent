@@ -185,11 +185,19 @@ function touchChatSession(
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem("app-settings");
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<AppSettings>;
+      return { ...DEFAULT_SETTINGS, ...parsed, apiKey: "" };
+    }
   } catch {
     // 解析失败使用默认值
   }
   return { ...DEFAULT_SETTINGS };
+}
+
+function persistableSettings(settings: AppSettings): Omit<AppSettings, "apiKey"> {
+  const { apiKey: _apiKey, ...safeSettings } = settings;
+  return safeSettings;
 }
 
 function optionalText(value: string): string | undefined {
@@ -1156,9 +1164,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   updateSettings: (partial) => {
     const newSettings = { ...get().settings, ...partial };
-    // 持久化到 localStorage
+    // API Key 只保留在内存中用于请求级 transient context，不写入 localStorage。
     try {
-      localStorage.setItem("app-settings", JSON.stringify(newSettings));
+      localStorage.setItem("app-settings", JSON.stringify(persistableSettings(newSettings)));
     } catch {
       // localStorage 不可用时静默失败
     }

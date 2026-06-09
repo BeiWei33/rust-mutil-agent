@@ -44,7 +44,7 @@
 | ProductAgent | 理解用户需求，提炼软件任务、验收标准和约束 | 是 |
 | ArchitectAgent | 分析架构影响、模块边界、技术方案和风险 | 否 |
 | PlannerAgent | 拆解任务步骤，安排执行顺序和负责 Agent | 是 |
-| CoderAgent | 读取代码、生成 patch、修改实现 | 否 |
+| CoderAgent | 读取代码、生成受控补丁草案、等待审批应用 | 否 |
 | ToolAgent | 调用文件、搜索、命令、测试、构建等工具 | 否 |
 | TesterAgent | 运行测试和构建，分析失败原因 | 否 |
 | ReviewerAgent | 审查 diff，发现 bug、风险、缺失测试 | 否 |
@@ -254,7 +254,7 @@ src-tauri/src/workspace/diff.rs
 | `workspace.get_diff` | 获取当前 diff |
 | `workspace.revert_patch` | 回滚指定 patch |
 
-当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、关联任务/步骤等待审批、补丁审批通过恢复或拒绝失败、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与事件写回；命令审批也已支持关联任务/步骤等待审批、审批决策恢复或失败，以及已审批命令运行后的 `commandRun` artifact 与事件回写。调度器已支持单步骤跳过和步骤超时，跳过的依赖可继续解锁后续步骤，运行超时的步骤会进入 `timedOut` 并生成事件。ReviewAgent 和 EvolutionAgent 已作为内置 Agent 注册，软件工程项目感知计划会在 Executor 后加入 Review/Evolution 步骤，分别生成 `ReviewReport` 和 `EvolutionNote`；任务完成时会自动写入任务级 `evolutionNote` artifact。MemoryAgent 已在应用启动时按 `MEMORY_DB_PATH` 接入 SQLite 长期记忆，自动存储会落盘，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已通过 `store_knowledge` / `search_knowledge` 暴露结构化知识条目写入和检索，在前端记忆页提供基础写入/搜索界面，会在补丁验证失败时自动写入 `FailureCase`，验证通过或跳过时自动写入补丁级 `ProjectFact`，并会在 Planner 请求前检索用户目标、`ProjectFact` 和 `FailureCase` 注入规划上下文。通用 `tool.*` 工具审批已支持创建请求、关联任务/步骤等待审批、审批通过恢复和拒绝失败，并写入 `toolApproval` / `toolApprovalResolved` artifact；Tool 步骤即将调用 legacy `file_read` 或 `web_search` 时会自动创建 `tool.fileRead` / `tool.webSearch` 审批，通过后恢复原 Tool 步骤投递，实际读取复用 workspace 只读 API 的路径沙箱。ToolAgent 调用会写入 `tool_invocations` SQLite 审计表，记录任务/步骤、approvalId、工具名、脱敏参数摘要、成功/失败、错误、耗时和创建时间，并在项目页展示最近记录。验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`，写入 `reworkSuggestion`，并可通过 `retry_task` 重新调度。前端聊天页已支持本地多会话选择和新建；项目页、审批页、任务看板、Agent 面板和记忆页已能展示对应状态。更多 ToolAgent 高风险动作拦截、自动生成修复补丁的验证失败返工、更细粒度的回滚策略仍未实现。
+当前进度：`src-tauri/src/workspace/patch.rs` 已落地补丁提案模型、统一 diff 生成、SQLite 持久化、`workspace.applyPatch` 审批请求创建、关联任务/步骤等待审批、补丁审批通过恢复或拒绝失败、已审批补丁手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚，以及关联任务的 `patchApplied` / `patchVerification` / `patchReverted` artifact 与事件写回；命令审批也已支持关联任务/步骤等待审批、审批决策恢复或失败，以及已审批命令运行后的 `commandRun` artifact 与事件回写。调度器已支持单步骤跳过和步骤超时，跳过的依赖可继续解锁后续步骤，运行超时的步骤会进入 `timedOut` 并生成事件。CoderAgent、TesterAgent、ReviewAgent 和 EvolutionAgent 已作为内置 Agent 注册，软件工程项目感知计划会加入 Coder/Tester/Review/Evolution 步骤，分别生成 `PatchProposalDraft`、`TestReport`、`ReviewReport` 和 `EvolutionNote`；任务完成时会自动写入任务级 `evolutionNote` artifact 和任务级 `ProjectFact`，Evolution 建议可通过 `decide_evolution_note` 记录接受/拒绝。MemoryAgent 已在应用启动时按 `MEMORY_DB_PATH` 接入 SQLite 长期记忆，自动存储会落盘，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已通过 `store_knowledge` / `search_knowledge` 暴露结构化知识条目写入和检索，在前端记忆页提供基础写入/搜索界面，会在补丁验证失败时自动写入 `FailureCase`，验证通过或跳过时自动写入补丁级 `ProjectFact`，并会在 Planner 请求前检索用户目标、`ProjectFact` 和 `FailureCase` 注入规划上下文。通用 `tool.*` 工具审批已支持创建请求、关联任务/步骤等待审批、审批通过恢复和拒绝失败，并写入 `toolApproval` / `toolApprovalResolved` artifact；Tool 步骤即将调用 legacy `file_read`、`web_search` 或 `file_write` 时会自动创建 `tool.fileRead` / `tool.webSearch` / `tool.fileWrite` 审批，通过后恢复原 Tool 步骤投递，实际读取复用 workspace 只读 API 的路径沙箱，`file_write` 会拒绝直接写入并提示转入 patch proposal；`web_search` 默认 mock，配置 SerpAPI 或 Google CSE 后可调用真实搜索 API。ToolAgent 调用会写入 `tool_invocations` SQLite 审计表，记录任务/步骤、approvalId、工具名、脱敏参数摘要、成功/失败、错误、耗时和创建时间，并在项目页展示最近记录。验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`，写入 `reworkSuggestion`，并自动追加 Coder 返工草案步骤。前端聊天页已支持本地多会话选择和新建；项目页、审批页、任务看板、Agent 面板和记忆页已能展示对应状态。自动把返工草案转换为可应用修复补丁、更细粒度的回滚策略仍未实现。
 
 安全要求：
 
@@ -313,7 +313,7 @@ src-tauri/src/review/risk.rs
 验收标准：
 
 - 每次代码改动后自动产生 ReviewReport。（已部分完成：项目感知软件计划会调度 `ReviewAgent` 生成 `ReviewReport`；尚未对每个真实 diff 强制审查）
-- Review 不通过时，任务回到 CoderAgent 返工。（未完成：当前会标记步骤失败并保留重试上下文）
+- Review 不通过时，任务回到 CoderAgent 返工。（部分完成：Review 未通过会失败并保留上下文；补丁验证失败已能自动追加 Coder 返工草案步骤）
 - Review 通过并且验证命令通过后，任务才可完成。（已部分完成：Review 步骤可进入任务流，patch 验证通过/跳过可完成关联步骤）
 
 ## 6. LLM 与结构化输出
@@ -384,7 +384,7 @@ Memory 类型：
 任务：
 
 - 把当前 `MemoryAgent` 从短期内存升级为 SQLite 持久化。（已完成第一版：启动时连接 SQLite、自动存储落盘、短期/长期组合检索、结构化知识条目 IPC）
-- 每次任务完成后由 EvolutionAgent 生成经验摘要。（已部分完成：`EvolutionAgent` 可生成 `EvolutionNote`，任务完成时会自动写入任务级 `evolutionNote` artifact）
+- 每次任务完成后由 EvolutionAgent 生成经验摘要。（已部分完成：`EvolutionAgent` 可生成 `EvolutionNote`，任务完成时会自动写入任务级 `evolutionNote` artifact 和任务级 `ProjectFact`，并可记录接受/拒绝决策）
 - Planner 在新任务开始前检索相关 ProjectFact、FailureCase 和历史经验。
 
 ## 8. 自进化模块
@@ -596,12 +596,12 @@ task://completed
 
 目标：CoderAgent 能提出代码修改，但先不自动应用高风险改动。
 
-当前状态：补丁提案存储、单文件 diff 预览、审批请求链路、关联任务/步骤等待审批、审批决策后恢复或失败、审批后手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚、任务 artifact 写回、验证失败任务/步骤 failed 标记和 `reworkSuggestion` 返工上下文已完成第一版；尚未由 CoderAgent 自动生成 proposal，也尚未接入自动生成修复补丁的验证失败返工执行器和更细粒度的回滚策略。
+当前状态：补丁提案存储、单文件 diff 预览、审批请求链路、关联任务/步骤等待审批、审批决策后恢复或失败、审批后手动应用、应用后推荐验证命令自动运行、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚、任务 artifact 写回、验证失败任务/步骤 failed 标记、`reworkSuggestion` 返工上下文和 Coder 返工草案自动分派已完成第一版；尚未自动把 Coder 草案转换为可应用修复补丁，也尚未补齐更细粒度的回滚策略。
 
 任务：
 
 1. 新增 patch/diff 模块。（已部分完成：proposal、diff 预览、审批创建）
-2. CoderAgent 输出 PatchProposal。
+2. CoderAgent 输出 PatchProposalDraft，并在后续阶段转换为 PatchProposal。
 3. 前端新增 DiffViewer。（已部分完成：项目页/审批页内置 diff 预览）
 4. 用户可审批应用 patch。（已部分完成：审批通过后可手动应用）
 5. patch 应用后生成 artifact。（已部分完成：写入任务 `patchApplied` / `patchVerification` / `patchReverted` artifact；验证失败会标记关联任务/步骤 `failed`）
@@ -622,12 +622,12 @@ task://completed
 2. 支持 `cargo check`、`cargo test`、`npm test`、`npm run build`。
 3. 新增 TesterAgent。
 4. 新增 ReviewerAgent。（已完成基础版：`ReviewAgent` 生成 `ReviewReport`，Review 未通过会标记步骤失败）
-5. Review 不通过时回到 CoderAgent。（未完成：当前可通过失败重试带上返工上下文，尚未自动生成修复补丁）
+5. Review 不通过时回到 CoderAgent。（部分完成：Review 未通过会失败并保留上下文；补丁验证失败已自动反馈给 Coder 生成返工草案，尚未自动生成可应用修复补丁）
 
 验收标准：
 
 - patch 应用后自动运行推荐验证命令。（已部分完成：`apply_approved_patch` 首次应用成功后会运行项目推荐 allowlist 命令并写入命令审计；验证通过或跳过会完成关联步骤，验证失败会标记关联任务/步骤 `failed`；已应用补丁可手动安全回滚，也可按默认策略或调用参数开启验证失败自动回滚）
-- 测试失败能被记录并反馈给 CoderAgent。（已部分完成：失败可写回任务状态，`patchVerification` 会写入 `reworkSuggestion` 并通过 `retry_task` 重新调度；尚未自动反馈给 CoderAgent 生成修复补丁）
+- 测试失败能被记录并反馈给 CoderAgent。（已部分完成：失败可写回任务状态，`patchVerification` 会写入 `reworkSuggestion` 并自动追加 Coder 返工草案步骤；尚未自动转换为可应用修复补丁）
 - Review 通过且验证通过后任务完成。（已部分完成：项目感知软件计划包含 Review 步骤，Review 未通过会失败；patch 验证通过/跳过可完成关联步骤）
 
 ### 阶段 6：持久化与长期记忆
@@ -638,8 +638,8 @@ task://completed
 
 1. 新增 storage 模块和 SQLite schema。
 2. 保存 Task、Step、Event、ToolInvocation、PatchSet、ReviewReport。
-3. MemoryAgent 接入 SQLite。（已部分完成：启动连接、自动存储、长期检索、结构化知识条目 IPC、补丁验证失败 `FailureCase`、验证通过/跳过补丁级 `ProjectFact` 自动写入和任务级 `evolutionNote` artifact 已落地；完整任务级 ProjectFact 写入 KnowledgeBase 待补齐）
-4. 新任务开始前检索相关 ProjectFact 和 FailureCase。（已部分完成：Planner 请求前会注入相关长期经验；补丁级 ProjectFact 自动生成已落地，完整任务级 ProjectFact 和精细排序待补齐）
+3. MemoryAgent 接入 SQLite。（已部分完成：启动连接、自动存储、长期检索、结构化知识条目 IPC、补丁验证失败 `FailureCase`、验证通过/跳过补丁级 `ProjectFact` 自动写入、任务级 `evolutionNote` artifact 和任务级 `ProjectFact` 入库已落地；精细排序待补齐）
+4. 新任务开始前检索相关 ProjectFact 和 FailureCase。（已部分完成：Planner 请求前会注入相关长期经验；补丁级和任务级 ProjectFact 自动生成已落地，精细排序待补齐）
 
 验收标准：
 

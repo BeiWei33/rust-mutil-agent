@@ -3,6 +3,8 @@ import type { AgentStatus, Capability } from "@/types";
 const FALLBACK_AGENT_NAMES: Record<string, string> = {
   Echo: "回声测试员",
   Planner: "协调员/总控",
+  Coder: "编码工程师",
+  Tester: "测试工程师",
   Executor: "执行工程师",
   Review: "代码评审员",
   Evolution: "演进顾问",
@@ -13,6 +15,8 @@ const FALLBACK_AGENT_NAMES: Record<string, string> = {
 const FALLBACK_ROLE_LABELS: Record<string, string> = {
   echo: "连接测试",
   planner: "任务规划与调度",
+  coder: "补丁草案",
+  tester: "验证计划",
   executor: "任务执行",
   review: "风险审查",
   evolution: "经验沉淀",
@@ -23,6 +27,8 @@ const FALLBACK_ROLE_LABELS: Record<string, string> = {
 const FALLBACK_CAPABILITY_NAMES: Record<string, string> = {
   chat: "自然语言对话",
   planning: "任务拆解",
+  coding: "补丁草案",
+  testing: "验证计划",
   code_execution: "代码/命令执行",
   retrieval: "信息检索",
   tool_use: "工具调用",

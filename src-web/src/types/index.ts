@@ -264,6 +264,20 @@ export interface SkipTaskStepResponse {
   task?: Task | null;
 }
 
+/** Evolution 建议决策请求 */
+export interface EvolutionDecisionRequest {
+  taskId: string;
+  accepted: boolean;
+  note?: string;
+  decidedBy?: string;
+}
+
+/** Evolution 建议决策响应 */
+export interface EvolutionDecisionResponse {
+  taskId: string;
+  task?: Task | null;
+}
+
 /** 任务列表响应 */
 export interface TaskListResponse {
   tasks: Task[];
