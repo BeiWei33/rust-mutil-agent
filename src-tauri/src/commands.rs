@@ -11,7 +11,7 @@ use crate::approval::{
 };
 use crate::chat::ChatMessage as StoredChatMessage;
 use crate::error::AgentError;
-use crate::memory::KnowledgeItem;
+use crate::memory::{KnowledgeBase, KnowledgeItem};
 use crate::project::ProjectSnapshot;
 use crate::runtime::{
     CommandRunStore, ProjectCommandInspection, ProjectCommandRunListResponse,
@@ -1188,6 +1188,128 @@ fn patch_verification_failed(runs: &[ProjectCommandRunResponse], errors: &[Value
     !errors.is_empty() || runs.iter().any(|run| !run.success)
 }
 
+fn preview_for_knowledge(value: &str) -> String {
+    const PREVIEW_CHARS: usize = 600;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut preview = trimmed.chars().take(PREVIEW_CHARS).collect::<String>();
+    if trimmed.chars().nth(PREVIEW_CHARS).is_some() {
+        preview.push_str("\n[preview truncated]");
+    }
+    preview
+}
+
+fn failed_command_summary(run: &ProjectCommandRunResponse) -> String {
+    let mut lines = vec![format!(
+        "- `{}` in `{}` failed: exitCode={:?}, timedOut={}",
+        run.command, run.working_dir, run.exit_code, run.timed_out
+    )];
+    let stderr = preview_for_knowledge(&run.stderr);
+    if !stderr.is_empty() {
+        lines.push(format!("  stderr:\n{}", stderr));
+    }
+    let stdout = preview_for_knowledge(&run.stdout);
+    if !stdout.is_empty() {
+        lines.push(format!("  stdout:\n{}", stdout));
+    }
+    lines.join("\n")
+}
+
+fn verification_error_summary(error: &Value) -> String {
+    preview_for_knowledge(&serde_json::to_string(error).unwrap_or_else(|_| error.to_string()))
+}
+
+fn auto_rollback_summary(auto_rollback: Option<&PatchAutoRollbackResult>) -> &'static str {
+    match auto_rollback {
+        Some(result) if result.reverted => "验证失败后已自动回滚补丁。",
+        Some(result) if !result.reverted => "验证失败后尝试自动回滚，但回滚失败，需要人工处理。",
+        None => "验证失败后未自动回滚，补丁仍可能保留在工作区。",
+        _ => "验证失败后的回滚状态未知。",
+    }
+}
+
+fn patch_verification_failure_knowledge(
+    proposal: &PatchProposal,
+    approval_id: &str,
+    runs: &[ProjectCommandRunResponse],
+    errors: &[Value],
+    auto_rollback: Option<&PatchAutoRollbackResult>,
+) -> Option<(String, String, Option<String>, Vec<String>)> {
+    if !patch_verification_failed(runs, errors) {
+        return None;
+    }
+
+    let failed_runs = runs
+        .iter()
+        .filter(|run| !run.success)
+        .map(failed_command_summary)
+        .collect::<Vec<_>>();
+    let command_section = if failed_runs.is_empty() {
+        "无失败命令记录。".to_string()
+    } else {
+        failed_runs.join("\n")
+    };
+    let error_section = if errors.is_empty() {
+        "无额外验证错误。".to_string()
+    } else {
+        errors
+            .iter()
+            .map(verification_error_summary)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let files = proposal
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let task_id = proposal.task_id.as_deref().unwrap_or("unlinked");
+    let step_id = proposal.step_id.as_deref().unwrap_or("unlinked");
+    let rollback = auto_rollback_summary(auto_rollback);
+    let title = format!("FailureCase: {}", proposal.summary);
+    let content = format!(
+        "补丁验证失败经验\n\n任务: {task_id}\n步骤: {step_id}\n补丁: {}\n审批: {approval_id}\n摘要: {}\n文件: {}\n\n失败命令:\n{}\n\n验证错误:\n{}\n\n回滚状态: {}\n\n后续处理: 先修复失败命令输出中暴露的问题，再通过 retry_task 重新调度；如果补丁仍在工作区且风险较高，优先手动回滚。",
+        proposal.id, proposal.summary, files, command_section, error_section, rollback
+    );
+    let mut tags = vec![
+        "FailureCase".to_string(),
+        "patchVerification".to_string(),
+        "autoExperience".to_string(),
+    ];
+    if auto_rollback.is_some_and(|result| result.reverted) {
+        tags.push("autoRollback".to_string());
+    }
+    Some((
+        title,
+        content,
+        Some(format!("patch:{};approval:{}", proposal.id, approval_id)),
+        tags,
+    ))
+}
+
+fn store_patch_verification_failure_knowledge(
+    knowledge_base: &KnowledgeBase,
+    proposal: &PatchProposal,
+    approval_id: &str,
+    runs: &[ProjectCommandRunResponse],
+    errors: &[Value],
+    auto_rollback: Option<&PatchAutoRollbackResult>,
+) -> Result<Option<String>, AgentError> {
+    let Some((title, content, source, tags)) =
+        patch_verification_failure_knowledge(proposal, approval_id, runs, errors, auto_rollback)
+    else {
+        return Ok(None);
+    };
+
+    knowledge_base
+        .store_knowledge(&title, &content, source.as_deref(), Some(&tags))
+        .map(Some)
+}
+
 const PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE_ENV: &str =
     "PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE";
 
@@ -1700,6 +1822,16 @@ pub async fn apply_approved_patch(
         if let Some(revert_result) = reverted.as_ref() {
             orch.record_patch_reverted(&proposal, revert_result).await;
         }
+        if let Err(err) = store_patch_verification_failure_knowledge(
+            state.knowledge_base.as_ref(),
+            &proposal,
+            &approval.id,
+            &verification_runs,
+            &verification_errors,
+            auto_rollback.as_ref(),
+        ) {
+            tracing::warn!("写入补丁验证失败经验失败: {}", err);
+        }
         result.auto_rollback = auto_rollback;
     }
 
@@ -1854,6 +1986,61 @@ pub async fn clear_history(session_id: String, state: State<'_, AppState>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_patch_proposal(summary: &str) -> PatchProposal {
+        use crate::workspace::patch::{PatchChangeType, PatchFileChange};
+
+        let now = chrono::Utc::now();
+        PatchProposal {
+            id: "patch-test-1".to_string(),
+            task_id: Some("task-test-1".to_string()),
+            step_id: Some("task-test-1-1".to_string()),
+            approval_id: Some("approval-1".to_string()),
+            summary: summary.to_string(),
+            status: PatchProposalStatus::Applied,
+            files: vec![PatchFileChange {
+                path: "README.md".to_string(),
+                change_type: PatchChangeType::Modify,
+                old_content: "old".to_string(),
+                new_content: "new".to_string(),
+                diff: crate::workspace::patch::build_unified_diff("README.md", "old", "new"),
+            }],
+            unified_diff: crate::workspace::patch::build_unified_diff("README.md", "old", "new"),
+            requested_by: "ProjectPanel".to_string(),
+            created_at: now,
+            updated_at: now,
+            applied_at: Some(now),
+            applied_by: Some("user".to_string()),
+            reverted_at: None,
+            reverted_by: None,
+        }
+    }
+
+    fn test_command_run(command: &str, success: bool) -> ProjectCommandRunResponse {
+        ProjectCommandRunResponse {
+            id: format!("run-{command}"),
+            approval_id: None,
+            command: command.to_string(),
+            working_dir: "src-tauri".to_string(),
+            exit_code: Some(if success { 0 } else { 101 }),
+            success,
+            stdout: if success {
+                "ok".to_string()
+            } else {
+                "build started".to_string()
+            },
+            stderr: if success {
+                String::new()
+            } else {
+                "assertion failed in verification".to_string()
+            },
+            duration_ms: 42,
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            created_at: "2026-06-09T12:00:00Z".to_string(),
+        }
+    }
 
     #[test]
     fn test_build_request_context_redacts_api_key() {
@@ -2188,6 +2375,52 @@ mod tests {
             &[],
             &[serde_json::json!({ "phase": "runCommand", "error": "boom" })]
         ));
+    }
+
+    #[test]
+    fn test_patch_verification_failure_knowledge_skips_success() {
+        let proposal = test_patch_proposal("更新 README");
+        let runs = vec![test_command_run("cargo test", true)];
+
+        let note = patch_verification_failure_knowledge(&proposal, "approval-1", &runs, &[], None);
+
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn test_store_patch_verification_failure_knowledge_writes_failure_case() {
+        let kb = KnowledgeBase::new(":memory:");
+        kb.initialize().unwrap();
+        let proposal = test_patch_proposal("更新 README");
+        let runs = vec![test_command_run("cargo test", false)];
+
+        let id = store_patch_verification_failure_knowledge(
+            &kb,
+            &proposal,
+            "approval-1",
+            &runs,
+            &[serde_json::json!({ "phase": "audit", "error": "audit failed" })],
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(!id.is_empty());
+        let results = kb.search_knowledge("FailureCase", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        let item = &results[0];
+        assert!(item.title.contains("更新 README"));
+        assert_eq!(
+            item.source.as_deref(),
+            Some("patch:patch-test-1;approval:approval-1")
+        );
+        assert!(item.tags.contains(&"FailureCase".to_string()));
+        assert!(item.tags.contains(&"patchVerification".to_string()));
+        assert!(item.tags.contains(&"autoExperience".to_string()));
+        assert!(item.content.contains("cargo test"));
+        assert!(item.content.contains("assertion failed in verification"));
+        assert!(item.content.contains("audit failed"));
+        assert!(item.content.contains("retry_task"));
     }
 
     #[test]

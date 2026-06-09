@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录和验证失败任务/步骤标记已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录、验证失败任务/步骤标记和补丁验证失败 `FailureCase` 经验沉淀已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -13,14 +13,14 @@
 | Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
 | 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
 | 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
-| 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已提供结构化知识存储/搜索 IPC；初始化失败时回退到短期记忆或内存知识库。 |
+| 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已提供结构化知识存储/搜索 IPC；补丁验证失败会自动写入 `FailureCase`；初始化失败时回退到短期记忆或内存知识库。 |
 | 项目理解 | 已实现 | 扫描 Rust/Tauri/React/Vite 项目，生成技术栈、Manifest、关键文件和推荐命令。 |
 | Workspace 只读能力 | 已实现 | 支持项目内文件列表、文本读取和源码搜索，并限制路径逃逸和敏感文件读取。 |
 | Planner 规划 | 部分实现 | 默认使用规则/项目上下文规划；可通过环境变量或前端请求级配置启用 LLM JSON 规划并自动降级。 |
 | LLM Client | 部分实现 | 支持 Mock、OpenAI、DeepSeek 和自定义 OpenAI-compatible 端点；`LlamaCpp` 仍为预留。 |
 | 受控命令运行 | 已实现 | 只允许低风险验证命令，执行不经过 shell，结果写入命令审计 SQLite。 |
 | 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护、非 allowlist 命令手动审批、通用 `tool.*` 工具审批、任务关联审批等待/恢复和已审批命令执行结果回写。 |
-| 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、legacy `file_read` / `web_search` 自动审批拦截、workspace 路径沙箱、ToolAgent 调用审计、任务 artifact 写回和验证失败任务/步骤 failed 标记；更多 ToolAgent 工具权限、验证失败自动返工和 ReviewAgent 尚未接入。 |
+| 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、验证失败 `FailureCase` 经验沉淀、legacy `file_read` / `web_search` 自动审批拦截、workspace 路径沙箱、ToolAgent 调用审计、任务 artifact 写回和验证失败任务/步骤 failed 标记；更多 ToolAgent 工具权限、验证失败自动返工和 ReviewAgent 尚未接入。 |
 
 ## 功能概览
 
@@ -29,7 +29,7 @@
 - 持久化：任务、任务事件、聊天历史、MemoryAgent 长期记忆、结构化知识条目、命令运行记录、ToolAgent 调用审计、审批请求和补丁提案都使用 SQLite 本地保存。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令、最近运行记录和补丁提案草稿。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
-- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，通用工具可创建 `tool.*` 审批请求；命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，并可通过重试入口重新调度。
+- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，通用工具可创建 `tool.*` 审批请求；命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，写入 `FailureCase` 长期知识，并可通过重试入口重新调度。
 - 请求级 LLM 设置：前端可传模型、Base URL、max tokens、temperature 和 API Key；API Key 只进入请求期临时上下文，不写入持久化数据。
 - 浏览器降级：前端单独运行 Vite 时自动使用 mock API，方便开发 UI。
 - 结构化错误：后端返回 `ApiError`，前端统一转换为中文错误提示和技术详情。
@@ -276,10 +276,10 @@ cp .env.example .env
 | `run_approved_project_command` | 已实现 | 通过 approvalId 执行已通过审批的项目命令，并关联写入命令审计。 |
 | `list_project_command_runs` | 已实现 | 查询最近命令运行记录。 |
 | `list_tool_invocations` | 已实现 | 查询最近 ToolAgent 工具调用审计记录，包含任务/步骤、approvalId、脱敏参数摘要、成功状态、错误和耗时。 |
-| `store_knowledge` / `search_knowledge` | 已实现 | 写入和检索长期知识条目，支持标题、内容、来源和标签，用于后续 ProjectFact / FailureCase 经验沉淀。 |
+| `store_knowledge` / `search_knowledge` | 已实现 | 写入和检索长期知识条目，支持标题、内容、来源和标签，用于 ProjectFact / FailureCase 经验沉淀；补丁验证失败会自动写入 `FailureCase`。 |
 | `create_patch_proposal` | 已实现 | 为现有文本文件生成补丁提案、持久化 diff，创建 `workspace.applyPatch` 审批请求，并让关联任务/步骤进入待审批状态。 |
 | `list_patch_proposals` / `get_patch_proposal` | 已实现 | 查询最近补丁提案或指定补丁提案。 |
-| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，把提案状态更新为 `applied`，运行推荐验证命令，并在关联任务中写入 patch/verification artifact 与事件；验证失败会标记关联任务/步骤 failed，可按后端默认策略或单次请求开启验证失败自动回滚。 |
+| `apply_approved_patch` | 已实现 | 通过 approvalId 应用已通过审批的补丁，把提案状态更新为 `applied`，运行推荐验证命令，并在关联任务中写入 patch/verification artifact 与事件；验证失败会标记关联任务/步骤 failed，自动写入 `FailureCase`，可按后端默认策略或单次请求开启验证失败自动回滚。 |
 | `revert_applied_patch` | 已实现 | 通过 patchId 回滚已应用补丁；回滚前校验当前文件内容仍等于补丁应用结果，成功后写入 `patchReverted` artifact 与事件。 |
 | `list_approval_requests` | 已实现 | 查询审批请求，可按状态过滤。 |
 | `approve_action` | 已实现 | 对审批请求执行通过或拒绝；命令、`workspace.applyPatch` 和通用 `tool.*` 审批会恢复或失败关联任务/步骤，补丁审批还会同步补丁提案状态。 |
@@ -306,7 +306,7 @@ cp .env.example .env
 
 项目面板在读取文本文件后可编辑草稿并调用 `create_patch_proposal`。后端会校验路径仍在 workspace 内、目标是普通文本文件、基线内容与当前文件一致，并拒绝 `.git`、密钥文件和构建产物目录。创建成功后会写入 `patch_proposals` SQLite 表，并同步生成 `workspace.applyPatch` 审批请求；审批 payload 包含 `patchId`、文件列表和统一 diff。若补丁提案关联任务/步骤，任务运行时会写入 `patchApproval` artifact，发出 `approvalRequested` 事件，并把关联任务/步骤置为 `waitingApproval`。
 
-审批面板会对 `workspace.applyPatch` 展开文件列表和 diff。用户通过或拒绝审批时，后端会把对应补丁提案状态更新为 `approved` 或 `rejected`，写入 `patchApprovalResolved` artifact，并发出 `approvalResolved` 事件；通过会让关联任务/步骤恢复运行，拒绝会把关联任务/步骤标记为 failed，便于通过 `retry_task` 重新调度。通过后可继续调用 `apply_approved_patch` 手动写入工作区。应用时后端会重新校验目标文件仍与提案基线一致，拒绝过期补丁，并把提案状态更新为 `applied`。首次应用成功后，后端会运行项目扫描得到的推荐验证命令，把结果写入命令审计；若补丁提案关联了任务，系统会同步写入 `patchApplied` / `patchVerification` artifact 和 `artifactCreated` 事件，验证通过或跳过时会完成关联步骤，验证失败时还会把关联任务和步骤标记为 `failed`。`PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE` 可配置新补丁审批的失败回滚默认值，`apply_approved_patch` 也可携带 `autoRollbackOnVerificationFailure` 对单次应用显式覆盖；触发时后端会复用安全回滚校验，成功后把 proposal 更新为 `reverted`，在 `patchVerification` artifact 记录 `autoRollback` 元信息，并额外写入 `patchReverted` artifact。已应用补丁也可通过 `revert_applied_patch` 手动回滚：后端会确认当前文件内容仍等于补丁应用后的 `newContent`，再恢复 `oldContent`，并写入 `patchReverted` artifact 和事件；若文件已被用户继续修改，会拒绝回滚以避免覆盖新改动。
+审批面板会对 `workspace.applyPatch` 展开文件列表和 diff。用户通过或拒绝审批时，后端会把对应补丁提案状态更新为 `approved` 或 `rejected`，写入 `patchApprovalResolved` artifact，并发出 `approvalResolved` 事件；通过会让关联任务/步骤恢复运行，拒绝会把关联任务/步骤标记为 failed，便于通过 `retry_task` 重新调度。通过后可继续调用 `apply_approved_patch` 手动写入工作区。应用时后端会重新校验目标文件仍与提案基线一致，拒绝过期补丁，并把提案状态更新为 `applied`。首次应用成功后，后端会运行项目扫描得到的推荐验证命令，把结果写入命令审计；若补丁提案关联了任务，系统会同步写入 `patchApplied` / `patchVerification` artifact 和 `artifactCreated` 事件，验证通过或跳过时会完成关联步骤，验证失败时还会把关联任务和步骤标记为 `failed`，并把失败命令、验证错误、回滚状态和后续处理建议写入 `FailureCase` 长期知识。`PATCH_AUTO_ROLLBACK_ON_VERIFICATION_FAILURE` 可配置新补丁审批的失败回滚默认值，`apply_approved_patch` 也可携带 `autoRollbackOnVerificationFailure` 对单次应用显式覆盖；触发时后端会复用安全回滚校验，成功后把 proposal 更新为 `reverted`，在 `patchVerification` artifact 记录 `autoRollback` 元信息，并额外写入 `patchReverted` artifact。已应用补丁也可通过 `revert_applied_patch` 手动回滚：后端会确认当前文件内容仍等于补丁应用后的 `newContent`，再恢复 `oldContent`，并写入 `patchReverted` artifact 和事件；若文件已被用户继续修改，会拒绝回滚以避免覆盖新改动。
 
 ## 通用工具动作审批
 
@@ -319,7 +319,7 @@ cp .env.example .env
 1. `Executor` 还没有接入真实代码修改或沙箱写入，补丁应用仍需要用户在审批面板手动触发。
 2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、通用 `tool.*` 工具审批、legacy `file_read` / `web_search` 自动审批拦截、已审批命令执行结果回写、ToolAgent 调用审计和补丁提案 diff 审批/应用；命令、补丁和通用工具审批已能挂起/恢复关联任务步骤，但尚未覆盖所有 ToolAgent 工具或通用文件写入。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
-4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；后续还需要沉淀 ProjectFact / FailureCase 等经验模型，并在新任务规划前自动注入相关经验。
+4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；补丁验证失败会自动沉淀 `FailureCase`，后续还需要补齐 ProjectFact 自动生成和新任务规划前的经验注入。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截和工具调用审计。
 6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
 7. 前端默认只有 `default` 聊天会话，尚未提供多会话管理界面。
