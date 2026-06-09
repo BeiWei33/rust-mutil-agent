@@ -72,6 +72,7 @@ rust-mutil-agent/
 ```text
 React UI
   ├─ ChatWindow: 聊天、Agent 选择、发送/重试
+  ├─ MemoryPanel: 长期知识写入与检索
   ├─ AgentPanel: Agent 列表、状态、能力展示
   └─ SettingsPanel: 模型/API Key/参数设置
         │
@@ -410,6 +411,7 @@ Planner LLM 相关环境变量：
 | --- | --- | --- |
 | 对话 | `ChatWindow` | 消息展示、Markdown 渲染、Agent 选择、发送/重试 |
 | 项目 | `ProjectPanel` | 项目快照、文件检索、只读预览、推荐验证命令运行、非 allowlist 命令审批和补丁提案创建 |
+| 记忆 | `MemoryPanel` | 长期知识写入与检索，支持来源和标签 |
 | 审批 | `ApprovalPanel` | 高风险动作审批请求列表、通过/拒绝、执行已审批命令、补丁 diff 预览 |
 | Agent | `AgentPanel` | Agent 状态列表、能力展示、5 秒轮询 |
 | 设置 | `SettingsPanel` | 模型、API Key、Base URL、max tokens、temperature |

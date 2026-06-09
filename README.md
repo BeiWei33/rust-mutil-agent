@@ -9,7 +9,7 @@
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
 | Tauri 桌面壳 | 已实现 | Rust 后端启动 Agent 运行时，注册 IPC 命令和 Tauri 插件。 |
-| React/Vite 前端 | 已实现 | 包含对话、任务看板、项目面板、审批面板、Agent 面板和设置页。 |
+| React/Vite 前端 | 已实现 | 包含对话、任务看板、项目面板、记忆面板、审批面板、Agent 面板和设置页。 |
 | Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
 | 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
 | 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端默认使用 `default` 会话。 |
@@ -87,6 +87,7 @@ rust-mutil-agent/
         │   ├── ChatWindow.tsx
         │   ├── TaskBoard.tsx
         │   ├── ProjectPanel.tsx
+        │   ├── MemoryPanel.tsx
         │   ├── ApprovalPanel.tsx
         │   ├── AgentPanel.tsx
         │   └── SettingsPanel.tsx
@@ -103,6 +104,7 @@ React/Vite UI
   ├─ ChatWindow
   ├─ TaskBoard
   ├─ ProjectPanel
+  ├─ MemoryPanel
   ├─ ApprovalPanel
   ├─ AgentPanel
   └─ SettingsPanel

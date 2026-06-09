@@ -618,4 +618,11 @@ export interface AppSettings {
 }
 
 /** 页面路由（简易状态切换） */
-export type PageRoute = "chat" | "tasks" | "project" | "approvals" | "agents" | "settings";
+export type PageRoute =
+  | "chat"
+  | "tasks"
+  | "project"
+  | "memory"
+  | "approvals"
+  | "agents"
+  | "settings";

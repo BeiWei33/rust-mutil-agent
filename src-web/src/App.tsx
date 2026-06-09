@@ -10,6 +10,7 @@ import AgentPanel from "@/components/AgentPanel";
 import SettingsPanel from "@/components/SettingsPanel";
 import TaskBoard from "@/components/TaskBoard";
 import ProjectPanel from "@/components/ProjectPanel";
+import MemoryPanel from "@/components/MemoryPanel";
 import ApprovalPanel from "@/components/ApprovalPanel";
 import type { PageRoute } from "@/types";
 
@@ -25,6 +26,7 @@ const NAV_ITEMS: NavItem[] = [
   { route: "chat", label: "对话", icon: "💬" },
   { route: "tasks", label: "任务", icon: "📋" },
   { route: "project", label: "项目", icon: "🗂️" },
+  { route: "memory", label: "记忆", icon: "🧠" },
   { route: "approvals", label: "审批", icon: "✅" },
   { route: "agents", label: "Agent", icon: "🤖" },
   { route: "settings", label: "设置", icon: "⚙️" },
@@ -118,6 +120,8 @@ function PageContent() {
       return <TaskBoard />;
     case "project":
       return <ProjectPanel />;
+    case "memory":
+      return <MemoryPanel />;
     case "approvals":
       return <ApprovalPanel />;
     case "agents":
