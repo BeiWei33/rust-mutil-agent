@@ -216,6 +216,24 @@ impl Capability {
             level: CapabilityLevel::Basic,
         }
     }
+
+    /// 审查能力
+    pub fn review() -> Self {
+        Self {
+            name: "review".to_string(),
+            description: "审查执行结果、风险和缺失验证".to_string(),
+            level: CapabilityLevel::Expert,
+        }
+    }
+
+    /// 演进建议能力
+    pub fn evolution() -> Self {
+        Self {
+            name: "evolution".to_string(),
+            description: "总结任务经验并提出后续改进建议".to_string(),
+            level: CapabilityLevel::Advanced,
+        }
+    }
 }
 
 // ============================================================

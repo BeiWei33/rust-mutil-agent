@@ -7,6 +7,8 @@
 //! - `echo_agent`：回显 Agent，用于测试和演示
 //! - `planner_agent`：任务规划 Agent，将用户目标分解为执行步骤
 //! - `executor_agent`：执行 Agent，执行具体的工具调用和命令
+//! - `review_agent`：审查 Agent，输出结构化 ReviewReport
+//! - `evolution_agent`：演进 Agent，输出结构化 EvolutionNote
 //! - `memory_agent`：记忆 Agent，管理对话历史与知识检索
 //! - `tool_agent`：工具 Agent，注册和调用外部工具/函数
 //!
@@ -26,17 +28,21 @@
 
 pub mod action;
 pub mod echo_agent;
+pub mod evolution_agent;
 pub mod executor_agent;
 pub mod memory_agent;
 pub mod planner_agent;
+pub mod review_agent;
 pub mod tool_agent;
 pub mod traits;
 
 // 重新导出常用类型，方便外部使用
 pub use action::{AgentAction, AgentOutcome, RiskLevel};
 pub use echo_agent::EchoAgent;
+pub use evolution_agent::EvolutionAgent;
 pub use executor_agent::ExecutorAgent;
 pub use memory_agent::MemoryAgent;
 pub use planner_agent::PlannerAgent;
+pub use review_agent::ReviewAgent;
 pub use tool_agent::ToolAgent;
 pub use traits::{Agent, AgentMessage, Capability, CapabilityLevel};

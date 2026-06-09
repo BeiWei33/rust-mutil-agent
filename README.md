@@ -1,8 +1,8 @@
 # 多 Agent 协同智能体
 
-基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
+基于 Rust、Tauri v2 和 React/Vite 构建的本地优先多 Agent 软件工程桌面应用。项目目标是把用户需求拆成可追踪的软件工程任务，由 Planner、Executor、Review、Evolution、Tool、Memory 等 Agent 通过消息总线协作推进，并在前端展示对话、任务、项目结构、命令运行、审批请求和 Agent 状态。
 
-当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、规划前 KnowledgeBase 经验注入、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录、验证失败任务/步骤标记、补丁验证失败 `FailureCase` 和验证通过/跳过补丁 `ProjectFact` 经验沉淀已经落地；更多工具权限、验证失败自动返工和完整自进化闭环仍在路线图中。
+当前代码处于可运行原型阶段：多 Agent 运行时、Tauri IPC、任务状态机、步骤超时、项目只读检索、聊天/任务/事件持久化、MemoryAgent SQLite 长期记忆、请求级 Planner LLM 配置、规划前 KnowledgeBase 经验注入、ReviewAgent 结构化审查、EvolutionAgent 经验建议、任务完成 `evolutionNote` artifact、受控验证命令、命令审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务产物记录、验证失败任务/步骤标记、补丁验证失败 `FailureCase` 和验证通过/跳过补丁 `ProjectFact` 经验沉淀已经落地；更多工具权限、验证失败自动返工执行器和完整自进化闭环仍在路线图中。
 
 ## 当前进度
 
@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | Tauri 桌面壳 | 已实现 | Rust 后端启动 Agent 运行时，注册 IPC 命令和 Tauri 插件。 |
 | React/Vite 前端 | 已实现 | 包含对话、任务看板、项目面板、记忆面板、审批面板、Agent 面板和设置页。 |
-| Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
+| Agent 运行时 | 已实现原型 | 内置 `Planner`、`Executor`、`Review`、`Evolution`、`Memory`、`Tool`、`Echo`，通过 mpsc + broadcast 通信。 |
 | 任务闭环 | 已实现 | 支持 `Task`、`TaskStep`、`TaskEvent`、依赖推进、步骤超时、取消、重试和 SQLite 恢复。 |
 | 聊天历史 | 已实现 | 按 `sessionId` 写入 SQLite，前端支持本地会话列表、会话切换和新建会话。 |
 | 长期记忆 | 已实现原型 | `MemoryAgent` 启动时默认连接 `MEMORY_DB_PATH`，自动存储写入 SQLite，检索会先查短期记忆再补充长期记忆；KnowledgeBase 已提供结构化知识存储/搜索 IPC；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会写入 `ProjectFact`；Planner 请求前会检索相关 ProjectFact / FailureCase 并注入上下文；初始化失败时回退到短期记忆或内存知识库。 |
@@ -20,16 +20,17 @@
 | LLM Client | 部分实现 | 支持 Mock、OpenAI、DeepSeek 和自定义 OpenAI-compatible 端点；`LlamaCpp` 仍为预留。 |
 | 受控命令运行 | 已实现 | 只允许低风险验证命令，执行不经过 shell，结果写入命令审计 SQLite。 |
 | 审批请求基础 | 已实现原型 | 支持审批请求持久化、列表筛选、通过/拒绝、重复决策保护、非 allowlist 命令手动审批、通用 `tool.*` 工具审批、任务关联审批等待/恢复和已审批命令执行结果回写。 |
-| 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、验证失败 `FailureCase` 经验沉淀、legacy `file_read` / `web_search` 自动审批拦截、workspace 路径沙箱、ToolAgent 调用审计、任务 artifact 写回和验证失败任务/步骤 failed 标记；更多 ToolAgent 工具权限、验证失败自动返工和 ReviewAgent 尚未接入。 |
+| 工程修改闭环 | 部分实现 | 已支持现有文本文件的 patch proposal、统一 diff 预览、审批请求生成、关联任务/步骤等待审批、审批决策恢复或失败、审批后应用、应用后自动验证、手动安全回滚、可配置默认的验证失败自动回滚、验证失败 `FailureCase` 经验沉淀、legacy `file_read` / `web_search` 自动审批拦截、workspace 路径沙箱、ToolAgent 调用审计、ReviewReport、EvolutionNote、任务 artifact 写回、验证失败任务/步骤 failed 标记和验证失败 `reworkSuggestion` 上下文；更多 ToolAgent 工具权限、自动生成修复补丁和完整验证失败返工执行仍待完善。 |
 
 ## 功能概览
 
-- 多 Agent 协作：Planner 负责任务拆解，Executor 负责执行确认，Tool 负责工具调用，Memory 负责记忆，Echo 用于链路调试。
+- 多 Agent 协作：Planner 负责任务拆解，Executor 负责执行确认，Review 负责风险审查，Evolution 负责经验建议，Tool 负责工具调用，Memory 负责记忆，Echo 用于链路调试。
 - 可追踪任务：每次消息或任务创建都会生成任务 ID，可查看步骤状态、事件时间线、输出、步骤超时、取消和重试。
 - 持久化：任务、任务事件、聊天历史、MemoryAgent 长期记忆、结构化知识条目、命令运行记录、ToolAgent 调用审计、审批请求和补丁提案都使用 SQLite 本地保存；聊天页会在前端保存会话列表，后端按 `sessionId` 读取和清理历史。
 - 项目面板：展示技术栈、Manifest、关键文件、文件列表、只读预览、文本搜索、推荐命令、最近运行记录和补丁提案草稿。
 - 受控验证命令：支持 `cargo check`、`cargo test`、`npm test -- --run`、`npm run build`，带工作目录限制、超时和输出截断。
-- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，通用工具可创建 `tool.*` 审批请求；命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，写入 `FailureCase` 长期知识，并可通过重试入口重新调度。
+- 审批面板：展示待审批/全部审批请求，可通过或拒绝高风险动作请求；项目面板可为非 allowlist 命令和补丁提案创建审批请求，通用工具可创建 `tool.*` 审批请求；命令审批通过后可从审批面板执行并写入命令审计，若审批关联任务/步骤会同步等待、恢复、完成或失败状态；补丁审批会展示 diff，同步提案状态，在应用后自动运行推荐验证命令，可对已应用补丁执行安全回滚；“失败回滚”会按后端默认策略初始化，也可在应用前手动覆盖，以便验证失败时自动恢复补丁；关联任务的验证失败会标记任务/步骤 failed，写入 `FailureCase` 长期知识和 `reworkSuggestion` 返工上下文，并可通过重试入口重新调度。
+- 审查与演进：软件工程项目感知计划默认包含 Review 和 Evolution 步骤；ReviewAgent 返回 `ReviewReport`，EvolutionAgent 返回 `EvolutionNote`，任务完成时会写入任务级 `evolutionNote` artifact。
 - 请求级 LLM 设置：前端可传模型、Base URL、max tokens、temperature 和 API Key；API Key 只进入请求期临时上下文，不写入持久化数据。
 - 浏览器降级：前端单独运行 Vite 时自动使用 mock API，方便开发 UI。
 - 结构化错误：后端返回 `ApiError`，前端统一转换为中文错误提示和技术详情。
@@ -319,17 +320,17 @@ cp .env.example .env
 1. `Executor` 还没有接入真实代码修改或沙箱写入，补丁应用仍需要用户在审批面板手动触发。
 2. 审批请求已经可持久化、决策，并接入非 allowlist 命令手动审批、通用 `tool.*` 工具审批、legacy `file_read` / `web_search` 自动审批拦截、已审批命令执行结果回写、ToolAgent 调用审计和补丁提案 diff 审批/应用；命令、补丁和通用工具审批已能挂起/恢复关联任务步骤，但尚未覆盖所有 ToolAgent 工具或通用文件写入。
 3. `web_search` 仍是模拟工具，不会访问真实互联网。
-4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；补丁验证失败会自动沉淀 `FailureCase`，验证通过或跳过会自动沉淀补丁级 `ProjectFact`，Planner 请求前会注入相关长期经验；后续还需要补齐完整任务级 ProjectFact 生成和更精细的经验排序/引用策略。
+4. `MemoryAgent` 已接入 SQLite 长期记忆，KnowledgeBase 也已提供结构化知识条目 IPC；补丁验证失败会自动沉淀 `FailureCase`，验证通过或跳过会自动沉淀补丁级 `ProjectFact`，任务完成会写入任务级 `evolutionNote` artifact，Planner 请求前会注入相关长期经验；后续还需要补齐完整任务级 ProjectFact 写入 KnowledgeBase 和更精细的经验排序/引用策略。
 5. 项目内 `workspace` IPC 已限制路径和敏感文件；通用 ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截和工具调用审计。
-6. ReviewAgent、EvolutionAgent、验证失败自动返工和更细粒度的回滚策略仍待实现。
+6. ReviewAgent 和 EvolutionAgent 已接入基础任务流；验证失败目前会生成 `reworkSuggestion` 并支持手动重试，但尚未自动生成修复补丁或自动回到 Coder/Executor 完成返工。
 
 ## 路线图
 
 详细路线见 [docs/SELF_EVOLVING_AGENT_ROADMAP.md](docs/SELF_EVOLVING_AGENT_ROADMAP.md)。近期优先级：
 
-1. 把已具备的命令/patch 审批等待恢复、手动回滚、失败回滚默认策略和验证失败可重试状态继续推进到验证失败自动返工。
+1. 在 `reworkSuggestion` 基础上继续推进验证失败自动返工，自动生成修复补丁并重新走审批/验证。
 2. 继续把 `tool.*` 自动审批拦截从 `file_read` / `web_search` 扩展到更多 ToolAgent 高风险动作。
-3. 将 Executor 拆分/演进为 Coder、Tester、Reviewer 等更清晰的工程角色。
+3. 将 Executor 进一步拆分/演进为 Coder、Tester 等更清晰的工程角色，并让 Review 未通过时自动回到返工步骤。
 4. 统一前端设置、安全存储和后端 LLMClient 配置。
 
 ## 文档

@@ -30,7 +30,15 @@ use super::traits::{Agent, AgentMessage, Capability};
 use crate::error::AgentError;
 use crate::llm::{ChatCompletionRequest, ChatMessage, LLMClient, ResponseFormat, Role};
 
-const PLANNER_ALLOWED_AGENTS: &[&str] = &["Planner", "Tool", "Executor", "Memory", "Echo"];
+const PLANNER_ALLOWED_AGENTS: &[&str] = &[
+    "Planner",
+    "Tool",
+    "Executor",
+    "Review",
+    "Evolution",
+    "Memory",
+    "Echo",
+];
 const DEFAULT_PLANNER_LLM_RETRIES: usize = 1;
 
 // ============================================================
@@ -376,11 +384,31 @@ impl TaskPlan {
             PlanStep {
                 step_id: format!("{task_id}-4"),
                 order: 4,
-                agent: "Memory".to_string(),
+                agent: "Review".to_string(),
                 instruction: format!(
-                    "记录本轮项目事实、相关文件、后续实现建议和可复用经验: {goal}。"
+                    "审查 Executor 的方案、风险、缺失验证和后续 patch 闭环要求: {goal}。相关经验: {knowledge_summary}。"
                 ),
                 depends_on: vec![format!("{task_id}-3")],
+                status: StepStatus::Pending,
+            },
+            PlanStep {
+                step_id: format!("{task_id}-5"),
+                order: 5,
+                agent: "Evolution".to_string(),
+                instruction: format!(
+                    "基于 Tool、Executor 和 Review 的结果生成本轮任务经验摘要与可接受的改进建议: {goal}。"
+                ),
+                depends_on: vec![format!("{task_id}-4")],
+                status: StepStatus::Pending,
+            },
+            PlanStep {
+                step_id: format!("{task_id}-6"),
+                order: 6,
+                agent: "Memory".to_string(),
+                instruction: format!(
+                    "记录本轮项目事实、ReviewReport、EvolutionNote、相关文件、后续实现建议和可复用经验: {goal}。"
+                ),
+                depends_on: vec![format!("{task_id}-5")],
                 status: StepStatus::Pending,
             },
         ];
@@ -527,6 +555,8 @@ fn normalize_agent_id(agent: &str) -> Option<String> {
         "planner" | "coordinator" => Some("Planner".to_string()),
         "tool" | "toolagent" => Some("Tool".to_string()),
         "executor" | "coder" | "coderagent" => Some("Executor".to_string()),
+        "review" | "reviewer" | "reviewagent" | "revieweragent" => Some("Review".to_string()),
+        "evolution" | "evolutionagent" | "evolver" => Some("Evolution".to_string()),
         "memory" | "memoryagent" => Some("Memory".to_string()),
         "echo" => Some("Echo".to_string()),
         _ => None,
@@ -1117,14 +1147,18 @@ mod tests {
             .with_context(context);
         let replies = planner.handle_message(msg).await.unwrap();
 
-        assert_eq!(replies.len(), 5);
+        assert_eq!(replies.len(), 7);
         let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
-        assert_eq!(plan.steps.len(), 4);
+        assert_eq!(plan.steps.len(), 6);
         assert!(plan.steps[0].instruction.contains("Rust"));
         assert!(plan.steps[0].instruction.contains("FailureCase"));
         assert!(plan.steps[1].instruction.contains("TaskBoard.tsx"));
         assert!(plan.steps[2].instruction.contains("cargo test"));
         assert!(plan.steps[2].instruction.contains("npm test 失败"));
+        assert_eq!(plan.steps[3].agent, "Review");
+        assert_eq!(plan.steps[4].agent, "Evolution");
+        assert_eq!(plan.steps[5].agent, "Memory");
+        assert_eq!(plan.steps[5].depends_on, vec!["task-project-5"]);
     }
 
     /// 测试 — 普通搜索任务不会因项目上下文被误判为软件任务
@@ -1191,6 +1225,18 @@ mod tests {
                     "agent": "coder",
                     "instruction": "形成实现方案，不直接修改文件",
                     "dependsOn": ["inspect"]
+                },
+                {
+                    "id": "review",
+                    "agent": "reviewer",
+                    "instruction": "审查实现方案",
+                    "dependsOn": ["summarize"]
+                },
+                {
+                    "id": "evolve",
+                    "agent": "evolution",
+                    "instruction": "总结经验",
+                    "dependsOn": ["review"]
                 }
             ]
         }"#;
@@ -1199,12 +1245,15 @@ mod tests {
 
         assert_eq!(plan.task_id, "task-llm");
         assert_eq!(plan.goal, "优化任务看板");
-        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps.len(), 5);
         assert_eq!(plan.steps[0].step_id, "task-llm-1");
         assert_eq!(plan.steps[0].agent, "Planner");
         assert_eq!(plan.steps[1].depends_on, vec!["task-llm-1".to_string()]);
         assert_eq!(plan.steps[2].agent, "Executor");
         assert_eq!(plan.steps[2].depends_on, vec!["task-llm-2".to_string()]);
+        assert_eq!(plan.steps[3].agent, "Review");
+        assert_eq!(plan.steps[4].agent, "Evolution");
+        assert_eq!(plan.steps[4].depends_on, vec!["task-llm-4".to_string()]);
     }
 
     /// 测试 — 可从 Markdown fenced JSON 中提取计划

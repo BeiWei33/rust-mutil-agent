@@ -8,9 +8,11 @@
 
 use crate::agent::action::RiskLevel;
 use crate::agent::echo_agent::EchoAgent;
+use crate::agent::evolution_agent::EvolutionAgent;
 use crate::agent::executor_agent::ExecutorAgent;
 use crate::agent::memory_agent::MemoryAgent;
 use crate::agent::planner_agent::{PlannerAgent, TaskPlan};
+use crate::agent::review_agent::ReviewAgent;
 use crate::agent::tool_agent::{infer_file_read_args_from_content, ToolAgent};
 use crate::agent::traits::{Agent, AgentMessage};
 use crate::approval::{ApprovalRequest, ApprovalStatus, ApprovalStore, CreateApprovalRequest};
@@ -1032,28 +1034,7 @@ impl TaskRuntime {
                     .iter()
                     .all(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
             {
-                let completed_steps = task
-                    .steps
-                    .iter()
-                    .filter(|step| step.status == StepStatus::Completed)
-                    .count();
-                let skipped_steps = task
-                    .steps
-                    .iter()
-                    .filter(|step| step.status == StepStatus::Skipped)
-                    .count();
-                let output = completion_output(completed_steps, skipped_steps);
-                task.complete(output.clone());
-                emitted.push(TaskEvent::new(
-                    task_id.to_string(),
-                    None,
-                    TaskEventKind::Completed,
-                    output,
-                    serde_json::json!({
-                        "completedSteps": completed_steps,
-                        "skippedSteps": skipped_steps,
-                    }),
-                ));
+                complete_task_with_evolution_note(task, &mut emitted);
             }
         }
         let updated = task.clone();
@@ -1167,28 +1148,7 @@ impl TaskRuntime {
                     .iter()
                     .all(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
             {
-                let completed_steps = task
-                    .steps
-                    .iter()
-                    .filter(|step| step.status == StepStatus::Completed)
-                    .count();
-                let skipped_steps = task
-                    .steps
-                    .iter()
-                    .filter(|step| step.status == StepStatus::Skipped)
-                    .count();
-                let output = completion_output(completed_steps, skipped_steps);
-                task.complete(output.clone());
-                emitted.push(TaskEvent::new(
-                    task_id.to_string(),
-                    None,
-                    TaskEventKind::Completed,
-                    output,
-                    serde_json::json!({
-                        "completedSteps": completed_steps,
-                        "skippedSteps": skipped_steps,
-                    }),
-                ));
+                complete_task_with_evolution_note(task, &mut emitted);
             }
         }
         let updated = task.clone();
@@ -1459,28 +1419,7 @@ impl TaskRuntime {
             .iter()
             .all(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
         {
-            let completed_steps = task
-                .steps
-                .iter()
-                .filter(|step| step.status == StepStatus::Completed)
-                .count();
-            let skipped_steps = task
-                .steps
-                .iter()
-                .filter(|step| step.status == StepStatus::Skipped)
-                .count();
-            let output = completion_output(completed_steps, skipped_steps);
-            task.complete(output.clone());
-            emitted.push(TaskEvent::new(
-                task_id.to_string(),
-                None,
-                TaskEventKind::Completed,
-                output,
-                serde_json::json!({
-                    "completedSteps": completed_steps,
-                    "skippedSteps": skipped_steps,
-                }),
-            ));
+            complete_task_with_evolution_note(task, emitted);
         }
     }
 }
@@ -1555,7 +1494,7 @@ impl Orchestrator {
 
     /// 注册所有内置 Agent 并启动其运行循环
     ///
-    /// 内置 Agent 包括：Echo、Planner、Executor、Memory、Tool。
+    /// 内置 Agent 包括：Echo、Planner、Executor、Review、Evolution、Memory、Tool。
     pub async fn register_builtin_agents(&mut self) {
         tracing::info!("[Orchestrator] 正在注册内置 Agent...");
 
@@ -1563,6 +1502,9 @@ impl Orchestrator {
         self.register_and_spawn(Box::new(PlannerAgent::from_env()))
             .await;
         self.register_and_spawn(Box::new(ExecutorAgent::new()))
+            .await;
+        self.register_and_spawn(Box::new(ReviewAgent::new())).await;
+        self.register_and_spawn(Box::new(EvolutionAgent::new()))
             .await;
         self.register_and_spawn(Box::new(self.memory_agent_from_config()))
             .await;
@@ -2070,8 +2012,23 @@ async fn handle_agent_message(
                 );
             }
         },
+        "review_report"
+            if msg
+                .context
+                .get("passed")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false) =>
+        {
+            let mut runtime = runtime.lock().await;
+            runtime.fail_running_step(
+                &task_id,
+                &msg.from,
+                &format!("Review 未通过：{}", msg.content),
+                Some(&msg.context),
+            );
+        }
         "execution_result" | "tool_result" | "memory_ack" | "memory_stored"
-        | "memory_retrieved" | "echo_reply" => {
+        | "memory_retrieved" | "echo_reply" | "review_report" | "evolution_note" => {
             let dispatches = {
                 let mut runtime = runtime.lock().await;
                 runtime.complete_running_step(&task_id, &msg.from, &msg.content, msg.context)
@@ -2411,6 +2368,88 @@ fn completion_output(completed_steps: usize, skipped_steps: usize) -> String {
     }
 }
 
+fn complete_task_with_evolution_note(task: &mut Task, emitted: &mut Vec<TaskEvent>) {
+    let task_id = task.id.clone();
+    let completed_steps = task
+        .steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Completed)
+        .count();
+    let skipped_steps = task
+        .steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Skipped)
+        .count();
+    let artifact = task_evolution_note_artifact(task, completed_steps, skipped_steps);
+
+    task.add_artifact(artifact.clone());
+    emitted.push(TaskEvent::new(
+        task_id.clone(),
+        None,
+        TaskEventKind::ArtifactCreated,
+        "任务经验摘要已生成。",
+        artifact,
+    ));
+
+    let output = completion_output(completed_steps, skipped_steps);
+    task.complete(output.clone());
+    emitted.push(TaskEvent::new(
+        task_id,
+        None,
+        TaskEventKind::Completed,
+        output,
+        serde_json::json!({
+            "completedSteps": completed_steps,
+            "skippedSteps": skipped_steps,
+        }),
+    ));
+}
+
+fn task_evolution_note_artifact(
+    task: &Task,
+    completed_steps: usize,
+    skipped_steps: usize,
+) -> serde_json::Value {
+    let agent_sequence = task
+        .steps
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "stepId": &step.id,
+                "order": step.order,
+                "agentId": &step.agent_id,
+                "status": serde_json::to_value(&step.status).unwrap_or(serde_json::Value::Null),
+                "attempts": step.attempts,
+                "title": &step.title,
+            })
+        })
+        .collect::<Vec<_>>();
+    let review_reports = task
+        .steps
+        .iter()
+        .filter(|step| step.agent_id == "Review")
+        .filter_map(|step| step.result.clone())
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "kind": "evolutionNote",
+        "taskId": &task.id,
+        "goal": &task.user_goal,
+        "summary": "任务已完成，系统生成了可复用的任务级经验摘要。",
+        "completedSteps": completed_steps,
+        "skippedSteps": skipped_steps,
+        "agentSequence": agent_sequence,
+        "reviewReports": review_reports,
+        "recommendations": [
+            "将稳定结论沉淀为 ProjectFact，供后续 Planner 检索。",
+            "将失败验证沉淀为 FailureCase，并在返工时优先引用。",
+            "Evolution 建议需要用户显式接受后再影响后续策略。"
+        ],
+        "generatedAt": chrono::Utc::now(),
+        "requiresUserAcceptance": true,
+    })
+}
+
 fn build_step_dispatch_context(task: &Task, step_index: usize) -> serde_json::Value {
     let step = &task.steps[step_index];
     let dependency_results = step
@@ -2430,6 +2469,11 @@ fn build_step_dispatch_context(task: &Task, step_index: usize) -> serde_json::Va
                 })
         })
         .collect::<Vec<_>>();
+    let rework_suggestions = task
+        .artifacts
+        .iter()
+        .filter_map(|artifact| artifact.get("reworkSuggestion").cloned())
+        .collect::<Vec<_>>();
 
     serde_json::json!({
         "taskId": task.id,
@@ -2439,6 +2483,7 @@ fn build_step_dispatch_context(task: &Task, step_index: usize) -> serde_json::Va
         "stepAttempt": step.attempts,
         "dependsOn": step.depends_on,
         "dependencyResults": dependency_results,
+        "reworkSuggestions": rework_suggestions,
     })
 }
 
@@ -2672,6 +2717,11 @@ fn patch_verification_artifact(
         artifact["autoRollback"] =
             serde_json::to_value(auto_rollback).unwrap_or(serde_json::Value::Null);
     }
+    if let Some(rework_suggestion) =
+        patch_rework_suggestion(proposal, approval_id, runs, errors, auto_rollback)
+    {
+        artifact["reworkSuggestion"] = rework_suggestion;
+    }
     artifact
 }
 
@@ -2725,6 +2775,69 @@ fn patch_verification_status_label(status: &str) -> &'static str {
         "failed" => "失败",
         _ => "跳过",
     }
+}
+
+fn patch_rework_suggestion(
+    proposal: &PatchProposal,
+    approval_id: &str,
+    runs: &[ProjectCommandRunResponse],
+    errors: &[serde_json::Value],
+    auto_rollback: Option<&PatchAutoRollbackResult>,
+) -> Option<serde_json::Value> {
+    if patch_verification_status(runs, errors) != "failed" {
+        return None;
+    }
+
+    let failed_commands = runs
+        .iter()
+        .filter(|run| !run.success)
+        .map(|run| {
+            serde_json::json!({
+                "id": &run.id,
+                "command": &run.command,
+                "workingDir": &run.working_dir,
+                "exitCode": run.exit_code,
+                "timedOut": run.timed_out,
+                "stdoutPreview": output_preview(&run.stdout),
+                "stderrPreview": output_preview(&run.stderr),
+            })
+        })
+        .collect::<Vec<_>>();
+    let error_summaries = errors
+        .iter()
+        .map(verification_error_summary)
+        .collect::<Vec<_>>();
+    let rollback_reverted = auto_rollback
+        .map(|rollback| rollback.reverted)
+        .unwrap_or(false);
+    let next_action = if rollback_reverted {
+        "补丁已自动回滚；请根据失败命令和错误摘要重新生成修复补丁，再走审批和验证。"
+    } else {
+        "保留失败上下文；请修复失败命令或错误摘要中指出的问题，然后重试任务。"
+    };
+
+    Some(serde_json::json!({
+        "patchId": &proposal.id,
+        "approvalId": approval_id,
+        "taskId": &proposal.task_id,
+        "stepId": &proposal.step_id,
+        "retryable": true,
+        "failedCommands": failed_commands,
+        "errors": error_summaries,
+        "autoRollbackReverted": rollback_reverted,
+        "suggestedNextAction": next_action,
+    }))
+}
+
+fn verification_error_summary(error: &serde_json::Value) -> serde_json::Value {
+    if let Some(message) = error.get("message").and_then(serde_json::Value::as_str) {
+        return serde_json::json!({ "message": text_preview(message, 500).0 });
+    }
+    if let Some(error_text) = error.get("error").and_then(serde_json::Value::as_str) {
+        return serde_json::json!({ "message": text_preview(error_text, 500).0 });
+    }
+
+    serde_json::json!({ "message": text_preview(&error.to_string(), 500).0 })
 }
 
 fn approval_status_label(status: &ApprovalStatus) -> &'static str {
@@ -3075,7 +3188,7 @@ mod tests {
     }
 
     /// 测试 — 注册所有内置 Agent 后列表完整
-    /// 验证：register_builtin_agents 注册了全部 5 个内置 Agent
+    /// 验证：register_builtin_agents 注册了全部 7 个内置 Agent
     #[tokio::test]
     async fn test_all_builtin_agents_registered() {
         let bus = Arc::new(MessageBus::new());
@@ -3083,10 +3196,12 @@ mod tests {
         orch.register_builtin_agents().await;
 
         let agents = orch.list_agents();
-        assert_eq!(agents.len(), 5);
+        assert_eq!(agents.len(), 7);
         assert!(agents.contains(&"Echo".to_string()));
         assert!(agents.contains(&"Planner".to_string()));
         assert!(agents.contains(&"Executor".to_string()));
+        assert!(agents.contains(&"Review".to_string()));
+        assert!(agents.contains(&"Evolution".to_string()));
         assert!(agents.contains(&"Memory".to_string()));
         assert!(agents.contains(&"Tool".to_string()));
     }
@@ -3145,12 +3260,18 @@ mod tests {
 
         let task = orch.get_task(&task_id).await.unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
-        assert_eq!(task.steps.len(), 4);
+        assert_eq!(task.steps.len(), 6);
         assert!(task.steps[0].instruction.contains("技术栈"));
         assert!(task
             .steps
             .iter()
             .any(|step| step.instruction.contains("Task")));
+        assert!(task.steps.iter().any(|step| step.agent_id == "Review"));
+        assert!(task.steps.iter().any(|step| step.agent_id == "Evolution"));
+        assert!(task
+            .artifacts
+            .iter()
+            .any(|artifact| artifact["kind"] == serde_json::json!("evolutionNote")));
 
         let tool_step = task
             .steps
@@ -3959,14 +4080,28 @@ mod tests {
         runtime.record_command_run(&approved, &run).unwrap();
 
         let task = runtime.get_task(task_id).unwrap();
-        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(task.artifacts.len(), 2);
+        assert_eq!(
+            task.artifacts
+                .iter()
+                .filter(|artifact| artifact["kind"] == serde_json::json!("commandRun"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            task.artifacts
+                .iter()
+                .filter(|artifact| artifact["kind"] == serde_json::json!("evolutionNote"))
+                .count(),
+            1
+        );
         assert_eq!(
             runtime
                 .get_events(task_id)
                 .iter()
                 .filter(|event| event.kind == TaskEventKind::ArtifactCreated)
                 .count(),
-            1
+            2
         );
     }
 
@@ -4220,6 +4355,14 @@ mod tests {
 
         assert_eq!(task.status, TaskStatus::Failed);
         assert_eq!(task.steps[0].status, StepStatus::Failed);
+        assert_eq!(
+            task.artifacts[0]["reworkSuggestion"]["retryable"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            task.artifacts[0]["reworkSuggestion"]["failedCommands"][0]["command"],
+            serde_json::json!("cargo test")
+        );
         assert!(runtime
             .get_events(task_id)
             .iter()
@@ -4233,6 +4376,10 @@ mod tests {
         let task = runtime.get_task(task_id).unwrap();
 
         assert_eq!(retry.dispatches.len(), 1);
+        assert_eq!(
+            retry.dispatches[0].context["reworkSuggestions"][0]["patchId"],
+            serde_json::json!("patch-task-1")
+        );
         assert_eq!(task.status, TaskStatus::Running);
         assert_eq!(task.steps[0].status, StepStatus::Running);
         assert!(task.error.is_none());

@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、聊天多会话界面、工具注册表、短期记忆、MemoryAgent SQLite 长期记忆、结构化 KnowledgeBase 存储/检索、Planner 长期经验注入、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool artifact、验证失败任务/步骤状态回写、补丁验证失败 `FailureCase` 和验证通过/跳过补丁 `ProjectFact` 经验沉淀已具备；更多工具权限、验证失败自动返工和写入型工具权限仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、聊天多会话界面、工具注册表、短期记忆、MemoryAgent SQLite 长期记忆、结构化 KnowledgeBase 存储/检索、Planner 长期经验注入、ReviewAgent 结构化审查、EvolutionAgent 经验建议、任务级 `evolutionNote` artifact、LLM 客户端、项目理解、聊天历史持久化、任务/事件持久化、依赖调度式任务闭环、步骤超时、受控验证命令执行、命令运行审计、ToolAgent 调用审计、审批请求基础、非 allowlist 命令审批入口、已审批命令执行、命令审批等待/恢复、已审批命令结果回写、补丁提案持久化、diff 审批预览、已审批补丁手动应用、应用后自动验证、已应用补丁安全回滚、可配置默认的验证失败自动回滚、补丁审批等待/恢复、通用 `tool.*` 工具审批等待/恢复、legacy `file_read` / `web_search` 自动审批拦截和 workspace 路径沙箱、任务 command/patch/verification/revert/tool/review/evolution artifact、验证失败任务/步骤状态回写、补丁验证失败 `FailureCase`、验证通过/跳过补丁 `ProjectFact` 和验证失败 `reworkSuggestion` 经验/返工上下文已具备；更多工具权限、自动返工执行器和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -599,19 +599,19 @@ npm test
 3. 任务调度器已按步骤依赖推进，并把依赖步骤结果写入后续步骤上下文；当前已支持任务取消、单步骤跳过、步骤超时、失败/取消后的任务重试、任务/事件持久化，以及命令、补丁和通用 `tool.*` 审批对任务步骤的等待、恢复和失败回写；legacy `file_read` 和 `web_search` 已能自动进入审批，其他高风险工具仍待接入。
 4. Planner 分析步骤仍由运行时内部模拟完成，避免把计划内 Planner 子步骤再次送入 Planner 触发嵌套规划。
 5. 聊天历史已按 `sessionId` 持久化；当前前端提供本地会话列表、会话切换和新建会话，发送、读取与清理都会使用当前会话 ID。
-6. MemoryAgent 已接入启动流程并默认使用 SQLite 长期记忆，KnowledgeBase 已提供结构化知识条目写入/检索 IPC；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会自动写入补丁级 `ProjectFact`，Planner 请求前会检索并注入相关长期经验；后续仍需统一完整任务级 ProjectFact 生成和更精细的经验排序/引用策略。
+6. MemoryAgent 已接入启动流程并默认使用 SQLite 长期记忆，KnowledgeBase 已提供结构化知识条目写入/检索 IPC；补丁验证失败会自动写入 `FailureCase`，验证通过或跳过会自动写入补丁级 `ProjectFact`，任务完成会生成任务级 `evolutionNote` artifact，Planner 请求前会检索并注入相关长期经验；后续仍需统一完整任务级 ProjectFact 写入 KnowledgeBase 和更精细的经验排序/引用策略。
 7. `web_search` 是模拟结果。
 8. 前端只读项目文件 API 已限制在 workspace 内；ToolRegistry 中的 legacy `file_read` 已复用同一套 workspace 沙箱并接入自动审批拦截，ToolAgent 调用审计已接入项目面板。
 9. 前端设置中的 API Key 和模型配置保存在 localStorage；后端请求期可使用该配置，但尚未接入系统安全凭据存储。
 10. 运行时环境变量 LLM 配置和前端请求级 LLM 配置已经并存，尚未提供统一的凭据管理界面。
-11. 命令审批已经支持任务等待/恢复和已审批运行结果回写；补丁提案已经支持 diff 预览、审批状态同步、补丁审批等待/恢复、已审批手动应用、应用后自动验证、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚、任务 patch/verification/revert artifact 记录、验证失败任务/步骤 failed 标记和失败经验写入 `FailureCase`；通用 `tool.*` 审批已经支持任务等待/恢复、拒绝失败回写、legacy `file_read` / `web_search` 自动拦截和 ToolAgent 调用审计；还没有验证失败自动返工和更细粒度的回滚策略。
+11. 命令审批已经支持任务等待/恢复和已审批运行结果回写；补丁提案已经支持 diff 预览、审批状态同步、补丁审批等待/恢复、已审批手动应用、应用后自动验证、已应用补丁安全回滚、默认/可覆盖的验证失败自动回滚、任务 patch/verification/revert artifact 记录、验证失败任务/步骤 failed 标记、失败经验写入 `FailureCase` 和验证失败 `reworkSuggestion`；通用 `tool.*` 审批已经支持任务等待/恢复、拒绝失败回写、legacy `file_read` / `web_search` 自动拦截和 ToolAgent 调用审计；还没有自动生成修复补丁的验证失败返工执行器和更细粒度的回滚策略。
 
 ## 13. 建议后续路线
 
 1. 扩展工具执行层：将 `file_read` / `web_search` 已接入的 `tool.*` 自动审批拦截推广到更多 ToolAgent 高风险动作。
 2. 扩展请求级真实 LLM：在 Planner 临时 LLMClient 基础上，继续让 Executor/Tool 使用受控工具调用，并接入安全存储。
-3. 扩展工程闭环：在受控验证命令运行、审计、审批请求和补丁提案基础上，引入差异审查、验证失败自动返工和高风险动作自动暂停。
-4. 引入更完整的记忆检索语义：统一 MemoryAgent 与 KnowledgeBase，在已自动写入补丁验证失败 `FailureCase`、补丁验证成功 `ProjectFact` 和规划前经验注入的基础上补齐完整任务级 ProjectFact 生成、经验排序和引用反馈。
+3. 扩展工程闭环：在受控验证命令运行、审计、审批请求、补丁提案、ReviewReport 和 `reworkSuggestion` 基础上，引入自动生成修复补丁的验证失败返工执行器和高风险动作自动暂停。
+4. 引入更完整的记忆检索语义：统一 MemoryAgent 与 KnowledgeBase，在已自动写入补丁验证失败 `FailureCase`、补丁验证成功 `ProjectFact`、任务级 `evolutionNote` artifact 和规划前经验注入的基础上补齐完整任务级 ProjectFact 生成、经验排序和引用反馈。
 5. 强化工具权限：继续对文件写入、命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。
-7. 在已写回命令、补丁、通用工具审批结果、legacy `file_read` / `web_search` 自动拦截、路径沙箱、工具调用审计、补丁应用、验证结果、手动回滚、失败回滚默认策略和验证失败 failed 状态的基础上，将更多工具拦截与验证失败自动返工继续纳入任务状态机。
+7. 在已写回命令、补丁、通用工具审批结果、legacy `file_read` / `web_search` 自动拦截、路径沙箱、工具调用审计、补丁应用、验证结果、手动回滚、失败回滚默认策略、Review/Evolution 报告和验证失败 `reworkSuggestion` 的基础上，将更多工具拦截与自动返工继续纳入任务状态机。

@@ -507,6 +507,45 @@ const MOCK_AGENTS: AgentStatus[] = [
     lastActive: new Date().toISOString(),
   },
   {
+    id: "review",
+    runtimeName: "Review",
+    name: "代码评审员",
+    role: "review",
+    roleLabel: "风险审查",
+    description: "负责审查执行结果、潜在风险和缺失验证，输出结构化 ReviewReport。",
+    online: true,
+    status: "idle",
+    statusLabel: "空闲",
+    currentTask: null,
+    selectable: true,
+    recommended: false,
+    isInternal: false,
+    capabilities: [
+      { name: "风险审查", description: "审查执行结果、风险和缺失验证", available: true },
+    ],
+    lastActive: new Date().toISOString(),
+  },
+  {
+    id: "evolution",
+    runtimeName: "Evolution",
+    name: "演进顾问",
+    role: "evolution",
+    roleLabel: "经验沉淀",
+    description: "负责总结任务经验并提出可接受或拒绝的后续改进建议。",
+    online: true,
+    status: "idle",
+    statusLabel: "空闲",
+    currentTask: null,
+    selectable: false,
+    recommended: false,
+    isInternal: true,
+    capabilities: [
+      { name: "经验沉淀", description: "总结任务经验并提出改进建议", available: true },
+      { name: "上下文记忆", description: "沉淀可复用任务知识", available: true },
+    ],
+    lastActive: new Date().toISOString(),
+  },
+  {
     id: "memory",
     runtimeName: "Memory",
     name: "记忆管理员",
@@ -617,12 +656,13 @@ async function mockSendMessage(
 function buildMockTask(content: string, agentId: string): Task {
   const taskId = generateId();
   const now = new Date().toISOString();
+  const runtimeName = runtimeNameForMockAgent(agentId);
   const steps = [
     {
       id: `${taskId}-1`,
       taskId,
       order: 1,
-      agentId: agentId === "executor" ? "Executor" : "Planner",
+      agentId: runtimeName,
       title: "理解任务目标",
       instruction: content,
       status: "completed" as const,
@@ -683,6 +723,15 @@ function buildMockTask(content: string, agentId: string): Task {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function runtimeNameForMockAgent(agentId: string): string {
+  return (
+    MOCK_AGENTS.find(
+      (agent) =>
+        agent.id === agentId || agent.runtimeName === agentId || agent.role === agentId
+    )?.runtimeName ?? "Planner"
+  );
 }
 
 async function mockCreateTask(
