@@ -8,6 +8,7 @@ import type {
   Message,
   ChatMessage,
   AppSettings,
+  LlmRequestSettings,
   PageRoute,
   SendMessageRequest,
   Task,
@@ -43,6 +44,21 @@ function loadSettings(): AppSettings {
     // 解析失败使用默认值
   }
   return { ...DEFAULT_SETTINGS };
+}
+
+function optionalText(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function buildLlmRequestSettings(settings: AppSettings): LlmRequestSettings {
+  return {
+    model: optionalText(settings.model),
+    apiKey: optionalText(settings.apiKey),
+    apiBaseUrl: optionalText(settings.apiBaseUrl),
+    maxTokens: settings.maxTokens,
+    temperature: settings.temperature,
+  };
 }
 
 interface AgentState {
@@ -212,6 +228,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         content,
         agentId,
         routeMode: agentId ? "direct" : "auto",
+        llmSettings: buildLlmRequestSettings(get().settings),
       };
       const res = await api.sendMessage(request);
 
@@ -340,7 +357,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   createTask: async (content, agentId) => {
     set({ tasksLoading: true, tasksError: null });
     try {
-      const res = await api.createTask({ content, agentId });
+      const res = await api.createTask({
+        content,
+        agentId,
+        llmSettings: buildLlmRequestSettings(get().settings),
+      });
       set((s) => {
         const task = res.task ?? null;
         const withoutOld = s.tasks.filter((item) => item.id !== res.taskId);

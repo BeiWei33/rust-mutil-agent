@@ -23,10 +23,15 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::traits::{Agent, AgentMessage, Capability};
 use crate::error::AgentError;
+use crate::llm::{ChatCompletionRequest, ChatMessage, LLMClient, ResponseFormat, Role};
+
+const PLANNER_ALLOWED_AGENTS: &[&str] = &["Planner", "Tool", "Executor", "Memory", "Echo"];
+const DEFAULT_PLANNER_LLM_RETRIES: usize = 1;
 
 // ============================================================
 // 计划数据结构
@@ -166,6 +171,94 @@ impl TaskPlan {
         }
     }
 
+    /// 从 LLM JSON 输出解析结构化计划。
+    ///
+    /// 该入口只做解析和校验，不直接调用 LLM；调用方可在真实 LLM 接入后
+    /// 先用 JSON mode 取得文本，再通过这里转换为内部 `TaskPlan`。
+    pub fn from_llm_json(
+        goal: &str,
+        task_id: impl Into<String>,
+        raw_json: &str,
+    ) -> Result<Self, AgentError> {
+        let task_id = task_id.into();
+        let json = extract_json_object(raw_json)?;
+        let envelope: LlmTaskPlanEnvelope = serde_json::from_str(&json)
+            .map_err(|err| AgentError::MessageFormat(format!("Planner JSON 解析失败: {err}")))?;
+
+        if envelope.steps.is_empty() {
+            return Err(AgentError::MessageFormat(
+                "Planner JSON 至少需要包含一个步骤".to_string(),
+            ));
+        }
+        if envelope.steps.len() > 12 {
+            return Err(AgentError::MessageFormat(
+                "Planner JSON 步骤数量不能超过 12".to_string(),
+            ));
+        }
+
+        let mut original_to_internal = HashMap::new();
+        let mut seen_original_ids = HashSet::new();
+        for (index, step) in envelope.steps.iter().enumerate() {
+            let original_id = step.original_id(index + 1);
+            if !seen_original_ids.insert(original_id.clone()) {
+                return Err(AgentError::MessageFormat(format!(
+                    "Planner JSON 步骤 ID 重复: {original_id}"
+                )));
+            }
+            original_to_internal.insert(original_id, format!("{task_id}-{}", index + 1));
+        }
+
+        let mut steps = Vec::new();
+        let mut known_internal_ids = HashSet::new();
+        for (index, step) in envelope.steps.into_iter().enumerate() {
+            let order = (index + 1) as u32;
+            let original_id = step.original_id(index + 1);
+            let step_id = format!("{task_id}-{}", index + 1);
+            let agent = normalize_agent_id(&step.agent).ok_or_else(|| {
+                AgentError::MessageFormat(format!(
+                    "Planner JSON 包含不允许的 Agent: {}",
+                    step.agent
+                ))
+            })?;
+            let instruction = step.instruction.trim().to_string();
+            if instruction.is_empty() {
+                return Err(AgentError::MessageFormat(format!(
+                    "Planner JSON 步骤 {original_id} 的 instruction 不能为空"
+                )));
+            }
+
+            let depends_on = resolve_depends_on(
+                &step.depends_on,
+                &original_to_internal,
+                &known_internal_ids,
+                &original_id,
+            )?;
+
+            known_internal_ids.insert(step_id.clone());
+            steps.push(PlanStep {
+                step_id,
+                order,
+                agent,
+                instruction,
+                depends_on,
+                status: StepStatus::Pending,
+            });
+        }
+
+        let plan_goal = envelope
+            .goal
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| goal.to_string());
+
+        Ok(Self {
+            task_id,
+            goal: plan_goal,
+            steps,
+            created_at: chrono::Utc::now(),
+        })
+    }
+
     /// 根据目标、任务 ID 和项目上下文生成计划。
     pub fn from_goal_with_context(
         goal: &str,
@@ -292,6 +385,161 @@ impl TaskPlan {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct LlmTaskPlanEnvelope {
+    #[serde(default)]
+    goal: Option<String>,
+    steps: Vec<LlmPlanStep>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmPlanStep {
+    #[serde(default, alias = "step_id", alias = "stepId")]
+    id: Option<String>,
+    agent: String,
+    instruction: String,
+    #[serde(default, alias = "depends_on", alias = "dependsOn")]
+    depends_on: Vec<String>,
+}
+
+impl LlmPlanStep {
+    fn original_id(&self, fallback_index: usize) -> String {
+        self.id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("step-{fallback_index}"))
+    }
+}
+
+/// Planner LLM 输出 JSON Schema。
+pub fn planner_plan_json_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["steps"],
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "用户目标的简短复述"
+            },
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "agent", "instruction"],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "计划内唯一步骤 ID，例如 understand, inspect, implement"
+                        },
+                        "agent": {
+                            "type": "string",
+                            "enum": PLANNER_ALLOWED_AGENTS
+                        },
+                        "instruction": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "dependsOn": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "只允许引用前置步骤 ID"
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Planner LLM system prompt；要求模型只输出可校验 JSON。
+pub fn planner_json_system_prompt() -> String {
+    format!(
+        "你是软件工程多 Agent 调度器 Planner。只输出一个 JSON 对象，不要 Markdown，不要解释。\
+JSON 必须符合此 schema: {}",
+        planner_plan_json_schema()
+    )
+}
+
+fn normalize_agent_id(agent: &str) -> Option<String> {
+    match agent.trim().to_ascii_lowercase().as_str() {
+        "planner" | "coordinator" => Some("Planner".to_string()),
+        "tool" | "toolagent" => Some("Tool".to_string()),
+        "executor" | "coder" | "coderagent" => Some("Executor".to_string()),
+        "memory" | "memoryagent" => Some("Memory".to_string()),
+        "echo" => Some("Echo".to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_depends_on(
+    raw_depends_on: &[String],
+    original_to_internal: &HashMap<String, String>,
+    known_internal_ids: &HashSet<String>,
+    current_original_id: &str,
+) -> Result<Vec<String>, AgentError> {
+    let mut depends_on = Vec::new();
+    for raw_dep in raw_depends_on {
+        let dep = raw_dep.trim();
+        if dep.is_empty() {
+            continue;
+        }
+        let Some(internal_id) = original_to_internal.get(dep).cloned() else {
+            return Err(AgentError::MessageFormat(format!(
+                "Planner JSON 步骤 {current_original_id} 引用了不存在的依赖: {dep}"
+            )));
+        };
+        if !known_internal_ids.contains(&internal_id) {
+            return Err(AgentError::MessageFormat(format!(
+                "Planner JSON 步骤 {current_original_id} 的依赖必须指向前置步骤: {dep}"
+            )));
+        }
+        if !depends_on.iter().any(|existing| existing == &internal_id) {
+            depends_on.push(internal_id);
+        }
+    }
+
+    Ok(depends_on)
+}
+
+fn extract_json_object(raw: &str) -> Result<String, AgentError> {
+    let trimmed = raw.trim();
+    let candidate = if trimmed.starts_with("```") {
+        let without_opening = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```JSON"))
+            .or_else(|| trimmed.strip_prefix("```"))
+            .unwrap_or(trimmed)
+            .trim();
+        without_opening
+            .strip_suffix("```")
+            .unwrap_or(without_opening)
+            .trim()
+    } else {
+        trimmed
+    };
+
+    let start = candidate
+        .find('{')
+        .ok_or_else(|| AgentError::MessageFormat("Planner 输出缺少 JSON 对象".to_string()))?;
+    let end = candidate
+        .rfind('}')
+        .ok_or_else(|| AgentError::MessageFormat("Planner 输出缺少 JSON 对象".to_string()))?;
+    if end < start {
+        return Err(AgentError::MessageFormat(
+            "Planner 输出 JSON 对象边界无效".to_string(),
+        ));
+    }
+
+    Ok(candidate[start..=end].to_string())
+}
+
 fn is_software_goal(goal: &str) -> bool {
     let lower = goal.to_lowercase();
     [
@@ -312,11 +560,128 @@ fn is_software_goal(goal: &str) -> bool {
 pub struct PlannerAgent {
     /// 已创建的计划数量
     plans_created: u64,
+    /// 可选 LLM 客户端；默认关闭，避免测试和本地开发环境意外联网。
+    llm_client: Option<LLMClient>,
+    #[cfg(test)]
+    llm_response_override: Option<Result<String, String>>,
 }
 
 impl PlannerAgent {
     pub fn new() -> Self {
-        Self { plans_created: 0 }
+        Self {
+            plans_created: 0,
+            llm_client: None,
+            #[cfg(test)]
+            llm_response_override: None,
+        }
+    }
+
+    /// 从环境变量创建 Planner。
+    ///
+    /// 只有 `PLANNER_USE_LLM=true|1|yes|on` 时才启用 LLM 规划；
+    /// 否则保持规则规划，保证默认运行稳定且不访问网络。
+    pub fn from_env() -> Self {
+        if !planner_llm_enabled() {
+            return Self::new();
+        }
+
+        let provider = std::env::var("PLANNER_LLM_PROVIDER")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(default_planner_llm_provider);
+
+        let llm_client = match provider.as_str() {
+            "openai" => LLMClient::openai_from_env(),
+            "deepseek" => LLMClient::deepseek_from_env(),
+            _ => {
+                tracing::warn!(
+                    "未知 PLANNER_LLM_PROVIDER [{}]，Planner LLM 已禁用",
+                    provider
+                );
+                return Self::new();
+            }
+        };
+
+        Self::with_llm_client(llm_client)
+    }
+
+    pub fn with_llm_client(llm_client: LLMClient) -> Self {
+        Self {
+            plans_created: 0,
+            llm_client: Some(llm_client),
+            #[cfg(test)]
+            llm_response_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_llm_response(response: Result<String, String>) -> Self {
+        Self {
+            plans_created: 0,
+            llm_client: None,
+            llm_response_override: Some(response),
+        }
+    }
+
+    async fn build_plan(&self, msg: &AgentMessage) -> TaskPlan {
+        let task_id = msg
+            .task_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        match self.try_build_llm_plan(msg, &task_id).await {
+            Ok(Some(plan)) => plan,
+            Ok(None) => TaskPlan::from_goal_with_context(&msg.content, task_id, &msg.context),
+            Err(err) => {
+                tracing::warn!("Planner LLM 规划失败，降级为规则规划: {err}");
+                TaskPlan::from_goal_with_context(&msg.content, task_id, &msg.context)
+            }
+        }
+    }
+
+    async fn try_build_llm_plan(
+        &self,
+        msg: &AgentMessage,
+        task_id: &str,
+    ) -> Result<Option<TaskPlan>, AgentError> {
+        #[cfg(test)]
+        if let Some(response) = &self.llm_response_override {
+            return match response {
+                Ok(content) => TaskPlan::from_llm_json(&msg.content, task_id, content).map(Some),
+                Err(err) => Err(AgentError::LlmError(err.clone())),
+            };
+        }
+
+        let Some(llm_client) = &self.llm_client else {
+            return Ok(None);
+        };
+
+        let request = ChatCompletionRequest {
+            system_prompt: Some(planner_json_system_prompt()),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: build_planner_llm_user_prompt(msg),
+            }],
+            max_tokens: Some(1_500),
+            temperature: Some(0.2),
+            response_format: Some(ResponseFormat::JsonObject),
+        };
+
+        let attempts = planner_llm_retry_count();
+        let mut last_error = None;
+        for _ in 0..attempts {
+            match llm_client.chat_completion(request.clone()).await {
+                Ok(response) => {
+                    return TaskPlan::from_llm_json(&msg.content, task_id, &response.content)
+                        .map(Some);
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| AgentError::LlmError("Planner LLM 调用未执行".to_string())))
     }
 }
 
@@ -339,11 +704,7 @@ impl Agent for PlannerAgent {
     async fn handle_message(&mut self, msg: AgentMessage) -> Result<Vec<AgentMessage>, AgentError> {
         self.plans_created += 1;
 
-        // 根据消息内容生成执行计划；优先沿用 Orchestrator 创建的 task_id。
-        let plan = match msg.task_id.as_deref() {
-            Some(task_id) => TaskPlan::from_goal_with_context(&msg.content, task_id, &msg.context),
-            None => TaskPlan::from_goal(&msg.content),
-        };
+        let plan = self.build_plan(&msg).await;
 
         tracing::info!(
             "PlannerAgent 为任务 {} 创建了 {} 个步骤的计划",
@@ -381,6 +742,51 @@ impl Agent for PlannerAgent {
 
         Ok(all_messages)
     }
+}
+
+fn planner_llm_enabled() -> bool {
+    std::env::var("PLANNER_USE_LLM")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn default_planner_llm_provider() -> String {
+    if std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        "openai".to_string()
+    } else {
+        "deepseek".to_string()
+    }
+}
+
+fn planner_llm_retry_count() -> usize {
+    std::env::var("PLANNER_LLM_RETRIES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(1, 3))
+        .unwrap_or(DEFAULT_PLANNER_LLM_RETRIES)
+}
+
+fn build_planner_llm_user_prompt(msg: &AgentMessage) -> String {
+    let context = if msg.context.is_null() {
+        "null".to_string()
+    } else {
+        serde_json::to_string_pretty(&msg.context).unwrap_or_else(|_| msg.context.to_string())
+    };
+
+    format!(
+        "用户目标:\n{}\n\n项目上下文 JSON:\n{}\n\n请生成适合当前多 Agent 系统执行的计划。",
+        msg.content, context
+    )
 }
 
 #[cfg(test)]
@@ -597,6 +1003,180 @@ mod tests {
         let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
         assert_eq!(plan.steps.len(), 3);
         assert_eq!(plan.steps[0].agent, "Tool");
+    }
+
+    /// 测试 — Planner JSON schema 包含步骤约束和 Agent 枚举
+    #[test]
+    fn test_planner_plan_json_schema_shape() {
+        let schema = planner_plan_json_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["steps"]["minItems"], 1);
+        assert!(
+            schema["properties"]["steps"]["items"]["properties"]["agent"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "Tool")
+        );
+
+        let prompt = planner_json_system_prompt();
+        assert!(prompt.contains("只输出一个 JSON 对象"));
+        assert!(prompt.contains("steps"));
+    }
+
+    /// 测试 — 从 LLM JSON 解析 TaskPlan 并规范化内部 step_id
+    #[test]
+    fn test_task_plan_from_llm_json_normalizes_steps() {
+        let raw = r#"{
+            "goal": "优化任务看板",
+            "steps": [
+                {
+                    "id": "understand",
+                    "agent": "planner",
+                    "instruction": "理解需求和项目上下文"
+                },
+                {
+                    "id": "inspect",
+                    "agent": "Tool",
+                    "instruction": "只读检索 TaskBoard 相关文件",
+                    "dependsOn": ["understand"]
+                },
+                {
+                    "id": "summarize",
+                    "agent": "coder",
+                    "instruction": "形成实现方案，不直接修改文件",
+                    "dependsOn": ["inspect"]
+                }
+            ]
+        }"#;
+
+        let plan = TaskPlan::from_llm_json("fallback goal", "task-llm", raw).unwrap();
+
+        assert_eq!(plan.task_id, "task-llm");
+        assert_eq!(plan.goal, "优化任务看板");
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].step_id, "task-llm-1");
+        assert_eq!(plan.steps[0].agent, "Planner");
+        assert_eq!(plan.steps[1].depends_on, vec!["task-llm-1".to_string()]);
+        assert_eq!(plan.steps[2].agent, "Executor");
+        assert_eq!(plan.steps[2].depends_on, vec!["task-llm-2".to_string()]);
+    }
+
+    /// 测试 — 可从 Markdown fenced JSON 中提取计划
+    #[test]
+    fn test_task_plan_from_llm_json_accepts_fenced_json() {
+        let raw = r#"```json
+        {
+            "steps": [
+                {
+                    "id": "answer",
+                    "agent": "Echo",
+                    "instruction": "回复用户"
+                }
+            ]
+        }
+        ```"#;
+
+        let plan = TaskPlan::from_llm_json("原始目标", "task-fenced", raw).unwrap();
+        assert_eq!(plan.goal, "原始目标");
+        assert_eq!(plan.steps[0].step_id, "task-fenced-1");
+        assert_eq!(plan.steps[0].agent, "Echo");
+    }
+
+    /// 测试 — 未知 Agent 会被拒绝
+    #[test]
+    fn test_task_plan_from_llm_json_rejects_unknown_agent() {
+        let raw = r#"{
+            "steps": [
+                {
+                    "id": "unsafe",
+                    "agent": "Shell",
+                    "instruction": "执行任意命令"
+                }
+            ]
+        }"#;
+
+        let err = TaskPlan::from_llm_json("目标", "task-bad", raw).unwrap_err();
+        assert!(format!("{}", err).contains("不允许的 Agent"));
+    }
+
+    /// 测试 — 依赖只能引用前置步骤
+    #[test]
+    fn test_task_plan_from_llm_json_rejects_forward_dependency() {
+        let raw = r#"{
+            "steps": [
+                {
+                    "id": "first",
+                    "agent": "Planner",
+                    "instruction": "第一步",
+                    "dependsOn": ["second"]
+                },
+                {
+                    "id": "second",
+                    "agent": "Tool",
+                    "instruction": "第二步"
+                }
+            ]
+        }"#;
+
+        let err = TaskPlan::from_llm_json("目标", "task-forward", raw).unwrap_err();
+        assert!(format!("{}", err).contains("依赖必须指向前置步骤"));
+    }
+
+    /// 测试 — Planner 可使用 LLM JSON 输出生成计划
+    #[tokio::test]
+    async fn test_planner_uses_llm_json_when_available() {
+        let raw = r#"{
+            "goal": "优化任务看板",
+            "steps": [
+                {
+                    "id": "inspect",
+                    "agent": "Tool",
+                    "instruction": "只读检索 TaskBoard 相关源码"
+                },
+                {
+                    "id": "plan",
+                    "agent": "Executor",
+                    "instruction": "整理实现方案",
+                    "dependsOn": ["inspect"]
+                }
+            ]
+        }"#;
+        let mut planner = PlannerAgent::with_llm_response(Ok(raw.to_string()));
+        let msg = AgentMessage::new("User", "Planner", "优化项目任务看板")
+            .with_task_id("task-llm-runtime");
+
+        let replies = planner.handle_message(msg).await.unwrap();
+        let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
+
+        assert_eq!(plan.goal, "优化任务看板");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].agent, "Tool");
+        assert_eq!(plan.steps[1].depends_on, vec!["task-llm-runtime-1"]);
+        assert_eq!(replies.len(), 3);
+    }
+
+    /// 测试 — LLM 失败时 Planner 降级为规则规划
+    #[tokio::test]
+    async fn test_planner_falls_back_when_llm_fails() {
+        let mut planner = PlannerAgent::with_llm_response(Err("模型暂不可用".to_string()));
+        let msg =
+            AgentMessage::new("User", "Planner", "帮我搜索今日新闻").with_task_id("task-fallback");
+
+        let replies = planner.handle_message(msg).await.unwrap();
+        let plan: TaskPlan = serde_json::from_value(replies[0].context.clone()).unwrap();
+
+        assert_eq!(plan.task_id, "task-fallback");
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].agent, "Tool");
+    }
+
+    /// 测试 — 默认环境不会启用 Planner LLM，避免意外联网
+    #[test]
+    fn test_planner_from_env_defaults_to_rule_mode() {
+        std::env::remove_var("PLANNER_USE_LLM");
+        let planner = PlannerAgent::from_env();
+        assert!(planner.llm_client.is_none());
     }
 
     /// 测试 — PlanStep 序列化反序列化

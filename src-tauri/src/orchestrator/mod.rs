@@ -350,7 +350,8 @@ impl Orchestrator {
         tracing::info!("[Orchestrator] 正在注册内置 Agent...");
 
         self.register_and_spawn(Box::new(EchoAgent::new())).await;
-        self.register_and_spawn(Box::new(PlannerAgent::new())).await;
+        self.register_and_spawn(Box::new(PlannerAgent::from_env()))
+            .await;
         self.register_and_spawn(Box::new(ExecutorAgent::new()))
             .await;
         self.register_and_spawn(Box::new(MemoryAgent::new())).await;
@@ -427,6 +428,23 @@ impl Orchestrator {
         user_input: &str,
         msg_type: &str,
     ) -> Result<String, AgentError> {
+        self.submit_task_to_agent_with_context(
+            agent_name,
+            user_input,
+            msg_type,
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
+    /// 提交用户任务到指定 Agent，并附带请求级上下文。
+    pub async fn submit_task_to_agent_with_context(
+        &mut self,
+        agent_name: &str,
+        user_input: &str,
+        msg_type: &str,
+        extra_context: serde_json::Value,
+    ) -> Result<String, AgentError> {
         let task_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(
             "[Orchestrator] 接收任务 [{}]，目标 Agent [{}]: {}",
@@ -444,9 +462,9 @@ impl Orchestrator {
         }
 
         let context = if agent_name == "Planner" {
-            build_planner_message_context(user_input)
+            merge_message_context(build_planner_message_context(user_input), extra_context)
         } else {
-            serde_json::Value::Null
+            extra_context
         };
 
         let msg = AgentMessage::new("Orchestrator", agent_name, user_input)
@@ -513,6 +531,23 @@ impl Orchestrator {
     /// 获取消息总线的引用
     pub fn bus(&self) -> &Arc<MessageBus> {
         &self.bus
+    }
+}
+
+fn merge_message_context(base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    match (base, extra) {
+        (base, serde_json::Value::Null) => base,
+        (serde_json::Value::Null, extra) => extra,
+        (serde_json::Value::Object(mut base), serde_json::Value::Object(extra)) => {
+            for (key, value) in extra {
+                base.insert(key, value);
+            }
+            serde_json::Value::Object(base)
+        }
+        (base, extra) => serde_json::json!({
+            "base": base,
+            "extra": extra,
+        }),
     }
 }
 
@@ -931,6 +966,20 @@ mod tests {
 
         let result = execute_task_step_v1(&step);
         assert_eq!(result["mode"], "simulated");
+    }
+
+    #[test]
+    fn test_merge_message_context_combines_objects() {
+        let merged = merge_message_context(
+            serde_json::json!({"projectPlanningContext": {"name": "demo"}}),
+            serde_json::json!({"frontendLlmSettings": {"model": "deepseek-chat"}}),
+        );
+
+        assert_eq!(merged["projectPlanningContext"]["name"], "demo");
+        assert_eq!(
+            merged["frontendLlmSettings"]["model"],
+            serde_json::json!("deepseek-chat")
+        );
     }
 
     /// 测试 — 直连 Echo 任务可以通过 Agent 回复完成

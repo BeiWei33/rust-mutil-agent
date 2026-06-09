@@ -4,7 +4,7 @@
 
 本项目是一个基于 Rust 与 Tauri v2 的跨平台桌面应用，用于构建“多 Agent 协同智能体”运行时。系统由 React 前端提供聊天工作台、Agent 状态面板和设置面板，由 Rust 后端负责 Agent 注册、任务分发、消息通信、工具调用、记忆管理和 Tauri IPC 命令。
 
-当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆和测试框架已具备；真实 LLM 调用、真实搜索、任务结果回写、聊天历史持久化和端到端自动调度闭环仍待完善。
+当前代码处于可运行原型阶段：Agent 框架、前后端通信、状态展示、工具注册表、短期记忆、LLM 客户端、项目理解和任务执行闭环 v1 已具备；真实命令执行、聊天历史持久化、完整步骤调度和写入型工具权限仍待完善。
 
 ## 2. 技术栈
 
@@ -78,7 +78,9 @@ Rust Tauri Commands
   ├─ send_message
   ├─ list_agents
   ├─ get_agent_status
+  ├─ create_task / get_task / list_tasks / get_task_events
   ├─ get_task_result
+  ├─ get_project_snapshot / list_project_files / read_project_file / search_project_text
   ├─ health_check
   ├─ get_history
   └─ clear_history
@@ -155,9 +157,10 @@ pub trait Agent: Send + Sync {
 
 - 注册并启动内置 Agent。
 - 维护 Agent 名称到 `mpsc::UnboundedSender<AgentMessage>` 的映射。
-- 接收用户任务，生成任务 ID，并创建 `TaskResult` 初始缓存。
+- 接收用户任务，生成任务 ID，创建可追踪 `Task`，并维护任务事件。
 - 将消息直接发送给指定 Agent。
 - 提供 Agent 列表和任务结果查询。
+- 监听 `MessageBus` 中的 Agent 回复，应用 Planner 计划并推进任务执行闭环 v1。
 
 当前内置 Agent：
 
@@ -169,7 +172,7 @@ pub trait Agent: Send + Sync {
 | `Tool` | 工具操作员 | 否 | 工具调用 |
 | `Echo` | 回声测试员 | 是 | 通信链路测试 |
 
-注意：当前 `submit_task_to_agent()` 会把消息发到 Agent 的 `mpsc` 通道，Agent 回复会发送到 `MessageBus` 的 broadcast 通道；但 Orchestrator 还没有订阅回复并更新 `TaskResult`，所以 `get_task_result()` 目前只能看到初始状态。
+注意：当前 `submit_task_to_agent()` 会把消息发到 Agent 的 `mpsc` 通道，Agent 回复会发送到 `MessageBus` 的 broadcast 通道；Orchestrator 已订阅 Planner/Echo 等回复并更新任务状态。Planner 生成计划后，任务执行闭环 v1 会对只读 Tool 步骤执行项目搜索/文件预览，其余步骤仍以模拟结果完成。
 
 ### 6.3 MessageBus 消息总线
 
@@ -190,7 +193,7 @@ pub trait Agent: Send + Sync {
 
 职责：把用户目标拆解为 `TaskPlan` 和 `PlanStep`。
 
-当前实现是关键词规则：
+当前默认实现是关键词规则；当 `PLANNER_USE_LLM=true` 时可优先调用 LLM 生成 JSON 计划，解析或调用失败会自动降级到规则规划：
 
 - 包含“搜索/查找/新闻”：生成 `Tool -> Executor -> Memory` 三步计划。
 - 包含“代码/编程/写”：生成 `Planner -> Executor` 两步计划。
@@ -261,10 +264,25 @@ pub type ToolFn = Arc<
 - `Custom(String)`
 - `Mock`
 
-当前只有 `Mock` 模式实现了 `chat_completion()`；其他 provider 会返回“LLM 调用尚未实现”。代码中已有 DeepSeek 默认端点和模型配置：
+当前 `Mock`、OpenAI、DeepSeek 和 Custom OpenAI-compatible 端点已实现 `chat_completion()`；OpenAI/DeepSeek 缺少 API Key 时会本地返回可解释错误，不发起网络请求。`LlamaCpp` 仍是预留 provider，尚未接入本地服务调用。
+
+代码中已有 OpenAI 和 DeepSeek 默认端点与模型配置：
+
+- OpenAI 默认端点：`https://api.openai.com/v1/chat/completions`
+- OpenAI 默认模型：`gpt-4o`
 
 - 默认端点：`https://api.deepseek.com/v1/chat/completions`
 - 默认模型：`deepseek-v4-pro`
+
+`ChatCompletionRequest` 支持 `response_format`，其中 `JsonObject` 会映射为 OpenAI-compatible JSON mode。Planner 侧已提供 JSON plan schema 和解析校验入口；通过 `PLANNER_USE_LLM=true` 可启用 LLM JSON 规划，默认仍使用规则规划作为稳定降级路径。
+
+Planner LLM 相关环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `PLANNER_USE_LLM` | 设为 `true` / `1` / `yes` / `on` 时启用 LLM 规划 |
+| `PLANNER_LLM_PROVIDER` | `openai` 或 `deepseek`，未设置时优先 OpenAI Key，否则 DeepSeek |
+| `PLANNER_LLM_RETRIES` | LLM 调用重试次数，范围 1-3 |
 
 ## 7. Tauri IPC 命令契约
 
@@ -272,10 +290,18 @@ pub type ToolFn = Arc<
 
 | 命令 | 入参 | 返回 | 当前状态 |
 | --- | --- | --- | --- |
-| `send_message` | `{ request: { content, agentId?, routeMode?, sessionId? } }` | `SendMessageResponse` | 已实现任务提交 |
+| `send_message` | `{ request: { content, agentId?, routeMode?, sessionId?, llmSettings? } }` | `SendMessageResponse` | 已实现任务提交 |
+| `create_task` | `{ request: { content, agentId?, llmSettings? } }` | `CreateTaskResponse` | 已实现软件工程任务创建 |
+| `get_task` | `{ taskId }` | `Task` 或 `null` | 已实现 |
+| `list_tasks` | 无 | `{ tasks }` | 已实现 |
+| `get_task_events` | `{ taskId }` | `TaskEvent[]` | 已实现 |
+| `get_project_snapshot` | 无 | `ProjectSnapshot` | 已实现 |
+| `list_project_files` | `{ maxFiles? }` | `{ files }` | 已实现 |
+| `read_project_file` | `{ path }` | `FileReadResponse` | 已实现只读沙箱 |
+| `search_project_text` | `{ request: { query, maxResults? } }` | `SearchResponse` | 已实现只读搜索 |
 | `get_agent_status` | `{ agentId }` | `AgentStatusResponse` | 已实现 |
 | `list_agents` | 无 | `{ agents }` | 已实现 |
-| `get_task_result` | `{ taskId }` | 任务结果或 `null` | 只返回缓存初始状态 |
+| `get_task_result` | `{ taskId }` | 兼容旧接口的任务结果或 `null` | 已聚合当前任务步骤和输出 |
 | `health_check` | 无 | `{ healthy, version, agentCount }` | 已实现 |
 | `get_history` | `{ sessionId }` | 消息数组 | 当前返回空数组 |
 | `clear_history` | `{ sessionId }` | `void` | 当前为 no-op |
@@ -334,6 +360,8 @@ pub type ToolFn = Arc<
 - `settings`
 
 设置项保存在浏览器 `localStorage` 的 `app-settings` 键中。
+
+发送消息和创建任务时，前端会把当前模型、Base URL、max tokens、temperature 以及是否配置 API Key 的信息传给后端。后端写入 Planner 消息上下文时会脱敏，仅保留 `frontendLlmSettings.hasApiKey`，不会把 API Key 写入任务事件或计划上下文；Planner 是否实际使用 LLM 仍由后端环境变量 `PLANNER_USE_LLM` 控制。
 
 前端 IPC 适配：
 
@@ -488,25 +516,24 @@ npm test
 
 ## 12. 当前限制与风险
 
-1. 真实 LLM 调用尚未接入：`LLMClient` 只有 Mock 模式可用。
-2. Planner 是关键词规则，不是模型驱动规划。
-3. Orchestrator 尚未消费 Agent 回复并更新 `TaskResult`，任务状态不会自动完成。
-4. Planner 生成的 `plan_step` 回复发布到 broadcast 后，没有统一桥接器继续投递到对应 Agent 的 `mpsc` 通道；集成测试里是手动调用 Agent 完成流程。
+1. Planner 默认仍是关键词规则；真实 LLM 规划需要通过 `PLANNER_USE_LLM` 显式开启。
+2. Planner 已有 JSON plan schema、解析校验和失败降级策略；前端模型/API 配置已随请求传给后端，但 API Key 当前只做脱敏占位，尚未用于请求级 LLMClient。
+3. 任务执行闭环 v1 会自动完成计划步骤，其中只读 Tool 步骤能检索项目；Executor/Memory 等步骤仍是模拟结果。
+4. Planner 生成的 `plan_step` 回复发布到 broadcast 后，尚未作为真正的依赖调度队列逐步投递到对应 Agent 的 `mpsc` 通道。
 5. `get_history` 返回空数组，`clear_history` 是 no-op。
 6. MemoryAgent 默认不使用 SQLite；长期记忆未接入应用启动流程。
 7. `web_search` 是模拟结果。
 8. `file_read` 当前直接读取路径，后续需要加路径权限、沙箱和审计。
-9. 前端设置中的 API Key 和模型配置保存在 localStorage，但目前没有同步给后端 LLMClient。
-10. `.env.example` 与 DeepSeek 环境变量读取存在不一致。
+9. 前端设置中的 API Key 和模型配置保存在 localStorage；当前已随请求传递脱敏摘要，但未接入安全存储或请求级 LLMClient。
+10. 运行时 API Key 仍主要依赖环境变量或 localStorage，尚未接入系统安全凭据存储。
 11. README 中部分描述仍偏旧，例如前端并非 Next.js 预留，而是 Vite + React 已实现。
 
 ## 13. 建议后续路线
 
-1. 补齐 Orchestrator 的回复监听器：订阅 MessageBus，按 `task_id` 聚合 `plan_created`、`tool_result`、`execution_result`、`memory_ack`，更新 `TaskResult`。
-2. 实现计划步骤调度器：将 Planner 产出的 `plan_step` 真正按依赖关系投递给对应 Agent。
-3. 接入真实 LLM：优先让 Planner 使用 LLM 生成结构化计划，再让 Executor/Tool 使用工具调用。
+1. 实现计划步骤调度器：将 Planner 产出的 `plan_step` 真正按依赖关系投递给对应 Agent。
+2. 接入请求级真实 LLM：在安全存储方案落地后，让 Planner 可按前端配置构造临时 LLMClient，再让 Executor/Tool 使用工具调用。
+3. 扩展工具执行层：在只读项目检索之后，引入可审批的命令运行、补丁生成和差异审查能力。
 4. 引入持久化会话：实现 `get_history` / `clear_history`，并统一 MemoryAgent 与 KnowledgeBase。
 5. 强化工具权限：对 `file_read`、未来命令执行和网络请求增加白名单、确认流和审计日志。
 6. 同步配置体系：将前端设置、安全存储和后端环境变量统一。
 7. 更新 README：修正前端技术栈、运行方式和当前实现状态。
-

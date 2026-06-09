@@ -9,7 +9,21 @@ use crate::task::{Task, TaskEvent};
 use crate::workspace::{FileReadResponse, SearchResponse, WorkspaceEntry};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::State;
+
+/// 前端传入的 LLM 设置。
+///
+/// API Key 只用于请求期传递能力占位；当前不会写入任务上下文或事件。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendLlmSettingsRequest {
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub api_base_url: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
 
 /// 前端发送消息请求。
 #[derive(Debug, Clone, Deserialize)]
@@ -19,6 +33,7 @@ pub struct SendMessageRequest {
     pub agent_id: Option<String>,
     pub route_mode: Option<String>,
     pub session_id: Option<String>,
+    pub llm_settings: Option<FrontendLlmSettingsRequest>,
 }
 
 /// 创建软件工程任务请求。
@@ -27,6 +42,7 @@ pub struct SendMessageRequest {
 pub struct CreateTaskRequest {
     pub content: String,
     pub agent_id: Option<String>,
+    pub llm_settings: Option<FrontendLlmSettingsRequest>,
 }
 
 /// 搜索项目文本请求。
@@ -391,9 +407,38 @@ fn build_agent_status(runtime_name: String) -> AgentStatusResponse {
     }
 }
 
+fn clean_optional_string(value: Option<&String>) -> Option<String> {
+    value
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+}
+
+fn build_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value {
+    let Some(settings) = settings else {
+        return Value::Null;
+    };
+
+    let has_api_key = settings
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+
+    serde_json::json!({
+        "frontendLlmSettings": {
+            "model": clean_optional_string(settings.model.as_ref()),
+            "apiBaseUrl": clean_optional_string(settings.api_base_url.as_ref()),
+            "maxTokens": settings.max_tokens,
+            "temperature": settings.temperature,
+            "hasApiKey": has_api_key,
+        }
+    })
+}
+
 /// 发送用户消息给 Agent 系统。
 ///
-/// 前端调用：`invoke('send_message', { request: { content, agentId } })`
+/// 前端调用：`invoke('send_message', { request: { content, agentId, llmSettings } })`
 #[tauri::command]
 pub async fn send_message(
     request: SendMessageRequest,
@@ -412,8 +457,14 @@ pub async fn send_message(
     };
 
     let mut orch = state.orchestrator.lock().await;
+    let request_context = build_request_context(request.llm_settings.as_ref());
     let task_id = orch
-        .submit_task_to_agent(target_meta.runtime_name, content, msg_type)
+        .submit_task_to_agent_with_context(
+            target_meta.runtime_name,
+            content,
+            msg_type,
+            request_context,
+        )
         .await
         .map_err(|e| ApiError::route_failed(format!("{}", e)))?;
 
@@ -468,7 +519,7 @@ pub async fn send_message(
 
 /// 创建软件工程任务。
 ///
-/// 前端调用：`invoke('create_task', { request: { content, agentId } })`
+/// 前端调用：`invoke('create_task', { request: { content, agentId, llmSettings } })`
 #[tauri::command]
 pub async fn create_task(
     request: CreateTaskRequest,
@@ -487,8 +538,14 @@ pub async fn create_task(
     };
 
     let mut orch = state.orchestrator.lock().await;
+    let request_context = build_request_context(request.llm_settings.as_ref());
     let task_id = orch
-        .submit_task_to_agent(target_meta.runtime_name, content, msg_type)
+        .submit_task_to_agent_with_context(
+            target_meta.runtime_name,
+            content,
+            msg_type,
+            request_context,
+        )
         .await
         .map_err(|e| ApiError::route_failed(format!("{}", e)))?;
     let task = orch.get_task(&task_id).await;
@@ -658,4 +715,46 @@ pub async fn get_history(_session_id: String) -> Result<Vec<ChatMessageResponse>
 #[tauri::command]
 pub async fn clear_history(_session_id: String) -> Result<(), ApiError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_request_context_redacts_api_key() {
+        let settings = FrontendLlmSettingsRequest {
+            model: Some(" deepseek-chat ".to_string()),
+            api_key: Some("sk-secret".to_string()),
+            api_base_url: Some(" https://api.deepseek.com/v1 ".to_string()),
+            max_tokens: Some(2048),
+            temperature: Some(0.3),
+        };
+
+        let context = build_request_context(Some(&settings));
+        let serialized = serde_json::to_string(&context).unwrap();
+
+        assert_eq!(
+            context["frontendLlmSettings"]["model"],
+            serde_json::json!("deepseek-chat")
+        );
+        assert_eq!(context["frontendLlmSettings"]["hasApiKey"], true);
+        assert!(!serialized.contains("sk-secret"));
+        assert!(serialized.contains("hasApiKey"));
+    }
+
+    #[test]
+    fn test_build_request_context_omits_blank_settings() {
+        let settings = FrontendLlmSettingsRequest {
+            model: Some("  ".to_string()),
+            api_key: Some("  ".to_string()),
+            api_base_url: None,
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let context = build_request_context(Some(&settings));
+        assert!(context["frontendLlmSettings"]["model"].is_null());
+        assert_eq!(context["frontendLlmSettings"]["hasApiKey"], false);
+    }
 }

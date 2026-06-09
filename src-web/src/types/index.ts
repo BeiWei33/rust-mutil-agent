@@ -66,6 +66,20 @@ export interface Message {
 /** 聊天消息（Zustand store 内部使用） */
 export type ChatMessage = Message;
 
+/** 请求级 LLM 设置 */
+export interface LlmRequestSettings {
+  /** 当前模型名称 */
+  model?: string;
+  /** API Key（仅请求期传递，后端不会写入任务上下文） */
+  apiKey?: string;
+  /** API 基础 URL */
+  apiBaseUrl?: string;
+  /** 最大 Token 数 */
+  maxTokens?: number;
+  /** 温度参数 */
+  temperature?: number;
+}
+
 /** 发送消息请求 */
 export interface SendMessageRequest {
   /** 消息内容 */
@@ -76,6 +90,8 @@ export interface SendMessageRequest {
   routeMode?: "auto" | "direct";
   /** 会话 ID（预留） */
   sessionId?: string;
+  /** 请求级 LLM 设置（可选） */
+  llmSettings?: LlmRequestSettings;
 }
 
 /** 消息路由信息 */
@@ -181,6 +197,7 @@ export interface TaskEvent {
 export interface CreateTaskRequest {
   content: string;
   agentId?: string;
+  llmSettings?: LlmRequestSettings;
 }
 
 /** 创建任务响应 */
