@@ -10,6 +10,7 @@ import type { AppSettings } from "@/types";
 /** 可选模型列表 */
 const MODEL_OPTIONS = [
   { value: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  { value: "gpt5.5", label: "GPT-5.5" },
   { value: "gpt-4o", label: "GPT-4o" },
   { value: "gpt-4o-mini", label: "GPT-4o Mini" },
   { value: "gpt-4-turbo", label: "GPT-4 Turbo" },
@@ -19,6 +20,15 @@ const MODEL_OPTIONS = [
   { value: "deepseek-r1", label: "DeepSeek R1" },
   { value: "qwen-max", label: "Qwen Max" },
   { value: "glm-4", label: "GLM-4" },
+];
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: "", label: "默认" },
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "XHigh" },
 ];
 
 /** 表单区块 */
@@ -87,6 +97,7 @@ export default function SettingsPanel() {
         >
           <select
             className="input-field"
+            aria-label="模型选择"
             value={form.model}
             onChange={(e) => handleSave({ model: e.target.value })}
           >
@@ -229,6 +240,30 @@ export default function SettingsPanel() {
                 <span>0 (精确)</span>
                 <span>2 (创意)</span>
               </div>
+            </div>
+
+            {/* Reasoning Effort */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs text-zinc-400">推理强度</label>
+                <span className="text-xs text-primary-400 font-mono">
+                  {form.reasoningEffort || "default"}
+                </span>
+              </div>
+              <select
+                className="input-field"
+                aria-label="推理强度"
+                value={form.reasoningEffort}
+                onChange={(e) =>
+                  handleSave({ reasoningEffort: e.target.value })
+                }
+              >
+                {REASONING_EFFORT_OPTIONS.map((opt) => (
+                  <option key={opt.value || "default"} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </SettingSection>

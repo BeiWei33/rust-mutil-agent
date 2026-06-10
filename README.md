@@ -229,12 +229,14 @@ cp .env.example .env
 | `OPENAI_API_KEY` | OpenAI API Key。 |
 | `OPENAI_BASE_URL` | OpenAI-compatible base URL，可填 base URL 或完整 `/chat/completions` 端点。 |
 | `OPENAI_MODEL` / `DEFAULT_MODEL` | OpenAI 默认模型。 |
+| `OPENAI_REASONING_EFFORT` / `DEFAULT_REASONING_EFFORT` | 可选推理强度，会透传为 OpenAI-compatible `reasoning_effort`，例如 `high` 或本地服务支持的 `xhigh`。 |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key。 |
 | `DEEPSEEK_BASE_URL` | DeepSeek OpenAI-compatible base URL。 |
 | `DEEPSEEK_MODEL` | DeepSeek 默认模型。 |
 | `PLANNER_USE_LLM` | 设为 `true`、`1`、`yes` 或 `on` 时启用 Planner LLM JSON 规划。 |
 | `PLANNER_LLM_PROVIDER` | `openai` 或 `deepseek`。 |
 | `PLANNER_LLM_RETRIES` | Planner LLM 重试次数，范围 1-3。 |
+| `PLANNER_LLM_REASONING_EFFORT` | 可选；优先于通用推理强度变量，用于 Planner LLM 请求。 |
 | `TASK_DB_PATH` | 任务/事件 SQLite 路径，默认 `rust-mutil-agent-tasks.sqlite3`。 |
 | `CHAT_DB_PATH` | 聊天历史 SQLite 路径，默认 `rust-mutil-agent-chat.sqlite3`。 |
 | `MEMORY_DB_PATH` | MemoryAgent 长期记忆 SQLite 路径，默认 `rust-mutil-agent-memory.sqlite3`。 |
@@ -246,7 +248,7 @@ cp .env.example .env
 | `SERPAPI_KEY` | 可选；配置后 `web_search` 使用 SerpAPI 真实搜索。 |
 | `GOOGLE_API_KEY` / `GOOGLE_CSE_ID` | 可选；未配置 SerpAPI 时，配置二者可让 `web_search` 使用 Google Custom Search。 |
 
-默认情况下 Planner 不会访问网络，而是使用规则和项目上下文生成计划。启用 LLM 后，Planner 会要求模型输出 JSON，并在解析或调用失败时降级为规则规划。前端设置中的 API Key 只在单次请求中通过 `transient_context` 传给 Planner，不会写入任务事件、聊天历史、命令审计或审批记录。
+默认情况下 Planner 不会访问网络，而是使用规则和项目上下文生成计划。启用 LLM 后，Planner 会要求模型输出 JSON，并在解析或调用失败时降级为规则规划。前端设置中的 API Key 只在单次请求中通过 `transient_context` 传给 Planner，不会写入任务事件、聊天历史、命令审计或审批记录；前端推理强度会随请求传给后端并透传为 `reasoning_effort`。
 
 本地生成的 `*.sqlite` / `*.sqlite3` 已在 `.gitignore` 中忽略。
 

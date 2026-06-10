@@ -761,6 +761,10 @@ impl PlannerAgent {
                         &config.client,
                         config.max_tokens,
                         config.temperature,
+                        config
+                            .reasoning_effort
+                            .clone()
+                            .or_else(default_planner_reasoning_effort),
                     )
                     .await
                     .map(Some);
@@ -769,14 +773,31 @@ impl PlannerAgent {
         };
 
         let request_config = request_planner_llm_config(&msg.transient_context);
-        let (llm_client, max_tokens, temperature) = request_config
+        let (llm_client, max_tokens, temperature, reasoning_effort) = request_config
             .as_ref()
-            .map(|config| (&config.client, config.max_tokens, config.temperature))
-            .unwrap_or((llm_client, None, None));
+            .map(|config| {
+                (
+                    &config.client,
+                    config.max_tokens,
+                    config.temperature,
+                    config
+                        .reasoning_effort
+                        .clone()
+                        .or_else(default_planner_reasoning_effort),
+                )
+            })
+            .unwrap_or((llm_client, None, None, default_planner_reasoning_effort()));
 
-        self.call_llm_plan(msg, task_id, llm_client, max_tokens, temperature)
-            .await
-            .map(Some)
+        self.call_llm_plan(
+            msg,
+            task_id,
+            llm_client,
+            max_tokens,
+            temperature,
+            reasoning_effort,
+        )
+        .await
+        .map(Some)
     }
 
     async fn call_llm_plan(
@@ -786,6 +807,7 @@ impl PlannerAgent {
         llm_client: &LLMClient,
         max_tokens: Option<u32>,
         temperature: Option<f32>,
+        reasoning_effort: Option<String>,
     ) -> Result<TaskPlan, AgentError> {
         let request = ChatCompletionRequest {
             system_prompt: Some(planner_json_system_prompt()),
@@ -795,6 +817,7 @@ impl PlannerAgent {
             }],
             max_tokens: Some(max_tokens.unwrap_or(1_500)),
             temperature: Some(temperature.unwrap_or(0.2)),
+            reasoning_effort,
             response_format: Some(ResponseFormat::JsonObject),
         };
 
@@ -819,6 +842,7 @@ struct RequestPlannerLlmConfig {
     client: LLMClient,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    reasoning_effort: Option<String>,
 }
 
 fn request_planner_llm_config(context: &serde_json::Value) -> Option<RequestPlannerLlmConfig> {
@@ -850,12 +874,35 @@ fn request_planner_llm_config(context: &serde_json::Value) -> Option<RequestPlan
         .get("temperature")
         .and_then(|value| value.as_f64())
         .map(|value| value.clamp(0.0, 2.0) as f32);
+    let reasoning_effort = settings
+        .get("reasoningEffort")
+        .and_then(|value| value.as_str())
+        .and_then(clean_reasoning_effort);
 
     Some(RequestPlannerLlmConfig {
         client: LLMClient::openai_compatible(api_key, model, api_base_url),
         max_tokens,
         temperature,
+        reasoning_effort,
     })
+}
+
+fn default_planner_reasoning_effort() -> Option<String> {
+    std::env::var("PLANNER_LLM_REASONING_EFFORT")
+        .ok()
+        .or_else(|| std::env::var("OPENAI_REASONING_EFFORT").ok())
+        .or_else(|| std::env::var("DEFAULT_REASONING_EFFORT").ok())
+        .and_then(|value| clean_reasoning_effort(&value))
+}
+
+fn clean_reasoning_effort(value: &str) -> Option<String> {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        .then(|| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl Default for PlannerAgent {
@@ -1397,7 +1444,8 @@ mod tests {
                 "model": "custom-model",
                 "apiBaseUrl": "https://example.com/v1",
                 "maxTokens": 2048,
-                "temperature": 0.3
+                "temperature": 0.3,
+                "reasoningEffort": "xhigh"
             }
         }))
         .unwrap();
@@ -1410,6 +1458,18 @@ mod tests {
         );
         assert_eq!(config.max_tokens, Some(2048));
         assert_eq!(config.temperature, Some(0.3));
+        assert_eq!(config.reasoning_effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn test_default_planner_reasoning_effort_reads_env() {
+        std::env::remove_var("PLANNER_LLM_REASONING_EFFORT");
+        std::env::remove_var("OPENAI_REASONING_EFFORT");
+        std::env::set_var("DEFAULT_REASONING_EFFORT", " high ");
+
+        assert_eq!(default_planner_reasoning_effort().as_deref(), Some("high"));
+
+        std::env::remove_var("DEFAULT_REASONING_EFFORT");
     }
 
     #[test]

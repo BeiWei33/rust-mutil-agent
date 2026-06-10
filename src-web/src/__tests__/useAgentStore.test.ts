@@ -147,6 +147,7 @@ describe("useAgentStore", () => {
         apiBaseUrl: "https://api.deepseek.com/v1",
         maxTokens: 4096,
         temperature: 0.7,
+        reasoningEffort: "",
       },
     });
 
@@ -232,6 +233,9 @@ describe("useAgentStore", () => {
       expect.objectContaining({
         content: "你好，Agent！",
         sessionId: "default",
+        llmSettings: expect.objectContaining({
+          reasoningEffort: undefined,
+        }),
       })
     );
   });
@@ -483,6 +487,7 @@ describe("useAgentStore", () => {
       apiBaseUrl: "https://api.deepseek.com/v1",
       maxTokens: 16384,
       temperature: 0.5,
+      reasoningEffort: "xhigh",
     };
     localStorage.setItem("app-settings", JSON.stringify(savedSettings));
 

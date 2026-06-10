@@ -39,6 +39,7 @@ pub struct FrontendLlmSettingsRequest {
     pub api_base_url: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub reasoning_effort: Option<String>,
 }
 
 /// 前端发送消息请求。
@@ -718,6 +719,7 @@ fn build_request_context(settings: Option<&FrontendLlmSettingsRequest>) -> Value
             "apiBaseUrl": clean_optional_string(settings.api_base_url.as_ref()),
             "maxTokens": settings.max_tokens,
             "temperature": settings.temperature,
+            "reasoningEffort": clean_optional_string(settings.reasoning_effort.as_ref()),
             "hasApiKey": has_api_key,
         }
     })
@@ -843,6 +845,7 @@ fn build_transient_request_context(settings: Option<&FrontendLlmSettingsRequest>
             "apiBaseUrl": clean_optional_string(settings.api_base_url.as_ref()),
             "maxTokens": settings.max_tokens,
             "temperature": settings.temperature,
+            "reasoningEffort": clean_optional_string(settings.reasoning_effort.as_ref()),
         }
     })
 }
@@ -2376,6 +2379,7 @@ mod tests {
             api_base_url: Some(" https://api.deepseek.com/v1 ".to_string()),
             max_tokens: Some(2048),
             temperature: Some(0.3),
+            reasoning_effort: Some(" xhigh ".to_string()),
         };
 
         let context = build_request_context(Some(&settings));
@@ -2386,6 +2390,10 @@ mod tests {
             serde_json::json!("deepseek-chat")
         );
         assert_eq!(context["frontendLlmSettings"]["hasApiKey"], true);
+        assert_eq!(
+            context["frontendLlmSettings"]["reasoningEffort"],
+            serde_json::json!("xhigh")
+        );
         assert!(!serialized.contains("sk-secret"));
         assert!(serialized.contains("hasApiKey"));
     }
@@ -2398,10 +2406,12 @@ mod tests {
             api_base_url: None,
             max_tokens: None,
             temperature: None,
+            reasoning_effort: Some("  ".to_string()),
         };
 
         let context = build_request_context(Some(&settings));
         assert!(context["frontendLlmSettings"]["model"].is_null());
+        assert!(context["frontendLlmSettings"]["reasoningEffort"].is_null());
         assert_eq!(context["frontendLlmSettings"]["hasApiKey"], false);
     }
 
@@ -2463,6 +2473,7 @@ mod tests {
             api_base_url: None,
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
         };
 
         let context =
@@ -2489,6 +2500,7 @@ mod tests {
             api_base_url: Some("https://api.deepseek.com/v1".to_string()),
             max_tokens: Some(1024),
             temperature: Some(0.2),
+            reasoning_effort: Some("xhigh".to_string()),
         };
 
         let safe = build_request_context(Some(&settings));
@@ -2498,6 +2510,10 @@ mod tests {
         assert_eq!(
             transient["plannerLlmSettings"]["apiKey"],
             serde_json::json!("sk-request")
+        );
+        assert_eq!(
+            transient["plannerLlmSettings"]["reasoningEffort"],
+            serde_json::json!("xhigh")
         );
     }
 

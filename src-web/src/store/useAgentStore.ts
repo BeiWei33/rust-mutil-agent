@@ -43,6 +43,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   apiBaseUrl: "https://api.deepseek.com/v1",
   maxTokens: 4096,
   temperature: 0.7,
+  reasoningEffort: "",
 };
 
 const DEFAULT_SESSION_ID = "default";
@@ -212,6 +213,7 @@ function buildLlmRequestSettings(settings: AppSettings): LlmRequestSettings {
     apiBaseUrl: optionalText(settings.apiBaseUrl),
     maxTokens: settings.maxTokens,
     temperature: settings.temperature,
+    reasoningEffort: optionalText(settings.reasoningEffort),
   };
 }
 

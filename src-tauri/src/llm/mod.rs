@@ -64,6 +64,8 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     /// 温度参数 (0.0 ~ 2.0)
     pub temperature: Option<f32>,
+    /// 推理强度；OpenAI-compatible 服务支持时会透传为 `reasoning_effort`。
+    pub reasoning_effort: Option<String>,
     /// 响应格式；`JsonObject` 会映射为 OpenAI-compatible 的 JSON mode。
     pub response_format: Option<ResponseFormat>,
 }
@@ -112,6 +114,8 @@ struct OpenAIChatRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<OpenAIResponseFormat>,
 }
@@ -394,6 +398,7 @@ impl LLMClient {
             messages,
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            reasoning_effort: clean_optional_text(request.reasoning_effort.as_deref()),
             response_format: request.response_format.as_ref().map(openai_response_format),
         })
     }
@@ -468,6 +473,13 @@ fn compact_error_body(body: &str) -> String {
     preview
 }
 
+fn clean_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +495,7 @@ mod tests {
             }],
             max_tokens: Some(100),
             temperature: Some(0.7),
+            reasoning_effort: None,
             response_format: None,
         };
 
@@ -569,6 +582,7 @@ mod tests {
             }],
             max_tokens: Some(256),
             temperature: Some(0.2),
+            reasoning_effort: Some("xhigh".to_string()),
             response_format: Some(ResponseFormat::JsonObject),
         };
 
@@ -578,6 +592,7 @@ mod tests {
         assert_eq!(value["model"], "gpt-test");
         assert_eq!(value["messages"][0]["role"], "system");
         assert_eq!(value["messages"][1]["content"], "生成计划");
+        assert_eq!(value["reasoning_effort"], "xhigh");
         assert_eq!(value["response_format"]["type"], "json_object");
     }
 
@@ -598,6 +613,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
             response_format: None,
         };
 
@@ -641,6 +657,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
             response_format: None,
         };
 
@@ -673,6 +690,7 @@ mod tests {
             ],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
             response_format: None,
         };
 
@@ -701,6 +719,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
             response_format: None,
         };
 
@@ -764,6 +783,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
             response_format: None,
         };
 

@@ -90,6 +90,8 @@ export interface LlmRequestSettings {
   maxTokens?: number;
   /** 温度参数 */
   temperature?: number;
+  /** 推理强度；OpenAI-compatible 服务支持时透传为 reasoning_effort */
+  reasoningEffort?: string;
 }
 
 /** 发送消息请求 */
@@ -641,6 +643,8 @@ export interface AppSettings {
   maxTokens: number;
   /** 温度参数 */
   temperature: number;
+  /** 推理强度 */
+  reasoningEffort: string;
 }
 
 /** 页面路由（简易状态切换） */

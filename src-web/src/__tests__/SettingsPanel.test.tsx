@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   apiBaseUrl: "https://api.deepseek.com/v1",
   maxTokens: 4096,
   temperature: 0.7,
+  reasoningEffort: "",
 };
 
 /**
@@ -95,7 +96,7 @@ describe("SettingsPanel", () => {
     setupMockStore({ settings: { ...DEFAULT_SETTINGS, model: "deepseek-v4-pro" } });
     render(<SettingsPanel />);
 
-    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    const select = screen.getByLabelText("模型选择") as HTMLSelectElement;
     expect(select.value).toBe("deepseek-v4-pro");
   });
 
@@ -111,7 +112,7 @@ describe("SettingsPanel", () => {
     render(<SettingsPanel />);
 
     // 选择新模型
-    const select = screen.getByRole("combobox");
+    const select = screen.getByLabelText("模型选择");
     await user.selectOptions(select, "gpt-4-turbo");
 
     // 验证 updateSettings 被调用
@@ -130,12 +131,13 @@ describe("SettingsPanel", () => {
         apiBaseUrl: "https://custom.api.com",
         maxTokens: 8192,
         temperature: 0.3,
+        reasoningEffort: "high",
       },
     });
     render(<SettingsPanel />);
 
     // 模型下拉框显示已保存的值
-    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    const select = screen.getByLabelText("模型选择") as HTMLSelectElement;
     expect(select.value).toBe("claude-3.5-sonnet");
 
     // API Base URL 显示已保存的值
@@ -285,12 +287,28 @@ describe("SettingsPanel", () => {
   /// 验证：滑块旁的标签显示当前值
   it("应正确显示参数滑块的当前值标签", () => {
     setupMockStore({
-      settings: { ...DEFAULT_SETTINGS, maxTokens: 8192, temperature: 1.2 },
+      settings: { ...DEFAULT_SETTINGS, maxTokens: 8192, temperature: 1.2, reasoningEffort: "xhigh" },
     });
     render(<SettingsPanel />);
 
     expect(screen.getByText("8192")).toBeDefined();
     expect(screen.getByText("1.2")).toBeDefined();
+    expect(screen.getByText("xhigh")).toBeDefined();
+  });
+
+  it("调整推理强度应立即保存", async () => {
+    const user = userEvent.setup();
+    setupMockStore();
+    render(<SettingsPanel />);
+
+    const select = screen.getByLabelText("推理强度");
+    await user.selectOptions(select, "xhigh");
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ reasoningEffort: "xhigh" })
+      );
+    });
   });
 
   // ============================================================
@@ -304,7 +322,7 @@ describe("SettingsPanel", () => {
     setupMockStore();
     render(<SettingsPanel />);
 
-    const select = screen.getByRole("combobox");
+    const select = screen.getByLabelText("模型选择");
     await user.selectOptions(select, "deepseek-v3");
 
     // 一瞬间应显示"已保存"
@@ -322,10 +340,11 @@ describe("SettingsPanel", () => {
   it("模型选择下拉框应包含所有选项", () => {
     render(<SettingsPanel />);
 
-    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    const select = screen.getByLabelText("模型选择") as HTMLSelectElement;
     const options = Array.from(select.options).map((o) => o.value);
 
     expect(options).toContain("deepseek-v4-pro");
+    expect(options).toContain("gpt5.5");
     expect(options).toContain("gpt-4o");
     expect(options).toContain("gpt-4o-mini");
     expect(options).toContain("gpt-4-turbo");
@@ -353,7 +372,7 @@ describe("SettingsPanel", () => {
     const { rerender } = render(<SettingsPanel />);
 
     // 初始模型
-    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    const select = screen.getByLabelText("模型选择") as HTMLSelectElement;
     expect(select.value).toBe("deepseek-v4-pro");
 
     // 更新 store 中的 settings
@@ -363,7 +382,7 @@ describe("SettingsPanel", () => {
     rerender(<SettingsPanel />);
 
     await waitFor(() => {
-      const updatedSelect = screen.getByRole("combobox") as HTMLSelectElement;
+      const updatedSelect = screen.getByLabelText("模型选择") as HTMLSelectElement;
       expect(updatedSelect.value).toBe("claude-3-opus");
     });
   });
